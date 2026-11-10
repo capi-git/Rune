@@ -1,0 +1,1636 @@
+//! Quick find, settings and trash.
+
+use crate::ai::{self, local::Installed, AiEvent, ChatMessage, Provider};
+use super::icons::{Icon, PageIcon};
+use crate::model::{Block, BlockKind, Page};
+use crate::state::{ancestors, AppState, Look, Route, Theme, VoiceFor};
+use crate::{backup, store, when};
+use dioxus::prelude::*;
+use futures_util::StreamExt;
+
+#[derive(Clone, PartialEq)]
+struct Hit {
+    id: String,
+    icon: String,
+    title: String,
+    snippet: Option<String>,
+    path: String,
+}
+
+fn snippet_around(text: &str, query_lower: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    let at = lower.find(query_lower)?;
+    // Map the byte offset in the lowercased text back to a char index. A few
+    // letters become two when they are lower-cased ("İ"), so the count can
+    // run past the end of the text itself: keep it inside.
+    let chars: Vec<char> = text.chars().collect();
+    let char_at = lower[..at].chars().count().min(chars.len());
+    let start = char_at.saturating_sub(30);
+    let end = (char_at + query_lower.chars().count() + 50).min(chars.len());
+    let mut s: String = chars[start..end].iter().collect();
+    s = s.replace('\n', " ");
+    if start > 0 {
+        s.insert(0, '…');
+    }
+    if end < chars.len() {
+        s.push('…');
+    }
+    Some(s)
+}
+
+#[component]
+pub fn QuickFind() -> Element {
+    let state = use_context::<AppState>();
+    let mut query = use_signal(String::new);
+    let mut selected = use_signal(|| 0usize);
+
+    let found = use_memo(move || {
+    let q = query.read().trim().to_lowercase();
+    let space = state.ui.read().space.clone();
+    let pages = state.pages.read();
+    let blocks = state.blocks.read();
+    let path_of = |p: &Page| ancestors(&pages, &p.id).iter().map(|a| a.display_title().to_string()).collect::<Vec<_>>().join(" / ");
+    let mut hits: Vec<(u8, Hit)> = Vec::new();
+    if q.is_empty() {
+        let recent = state.ui.read().recent.clone();
+        let mut ordered: Vec<&Page> = recent.iter().filter_map(|id| pages.get(id)).filter(|p| !p.trashed && p.space_id == space).collect();
+        let mut rest: Vec<&Page> = pages.values().filter(|p| !p.trashed && p.space_id == space && !recent.contains(&p.id)).collect();
+        rest.sort_by_key(|p| std::cmp::Reverse(p.updated_at));
+        ordered.extend(rest);
+        for p in ordered.into_iter().take(30) {
+            hits.push((0, Hit { id: p.id.clone(), icon: p.display_icon().into(), title: p.display_title().into(), snippet: None, path: path_of(p) }));
+        }
+    } else {
+        for p in pages.values().filter(|p| !p.trashed && p.space_id == space) {
+            let title_match = p.display_title().to_lowercase().contains(&q);
+            let body = blocks.get(&p.id).and_then(|bs| bs.iter().find_map(|b| snippet_around(&b.plain_text(), &q)));
+            if title_match || body.is_some() {
+                let rank = if p.display_title().to_lowercase().starts_with(&q) { 0 } else if title_match { 1 } else { 2 };
+                hits.push((rank, Hit { id: p.id.clone(), icon: p.display_icon().into(), title: p.display_title().into(), snippet: body, path: path_of(p) }));
+            }
+        }
+        hits.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.title.to_lowercase().cmp(&b.1.title.to_lowercase())));
+        hits.truncate(30);
+    }
+    drop(blocks);
+    drop(pages);
+    let hits: Vec<Hit> = hits.into_iter().map(|h| h.1).collect();
+    (q.is_empty(), hits)
+    });
+    let (no_query, hits) = found();
+    let count = hits.len();
+    let sel = (*selected.read()).min(count.saturating_sub(1));
+    let hits_for_keys = hits.clone();
+
+    rsx! {
+        div { class: "modal-backdrop", onclick: move |_| state.set_modal(None),
+            div { class: "modal", onclick: move |e| e.stop_propagation(),
+                div { class: "qf-input-row",
+                    span { class: "qf-glass", Icon { name: "search", size: 18 } }
+                    input {
+                        class: "qf-input",
+                        placeholder: "Search pages…",
+                        onmounted: move |e: MountedEvent| async move {
+                            let _ = e.set_focus(true).await;
+                        },
+                        oninput: move |e: FormEvent| {
+                            query.set(e.value());
+                            selected.set(0);
+                        },
+                        onkeydown: move |e: KeyboardEvent| {
+                            match e.key() {
+                                Key::ArrowDown => {
+                                    e.prevent_default();
+                                    if count > 0 { selected.set((sel + 1) % count); }
+                                }
+                                Key::ArrowUp => {
+                                    e.prevent_default();
+                                    if count > 0 { selected.set((sel + count - 1) % count); }
+                                }
+                                Key::Enter => {
+                                    e.prevent_default();
+                                    if let Some(hit) = hits_for_keys.get(sel) {
+                                        if e.modifiers().meta() { state.open_in_new_tab(Route::Page(hit.id.clone())) } else { state.open_page(&hit.id) }
+                                    }
+                                }
+                                Key::Escape => state.set_modal(None),
+                                _ => {}
+                            }
+                        },
+                    }
+                }
+                div { class: "qf-results",
+                    if hits.is_empty() {
+                        div { class: "menu-empty", "No results" }
+                    } else if no_query {
+                        div { class: "menu-section", "Recent pages" }
+                    }
+                    for (i, hit) in hits.into_iter().enumerate() {
+                        div {
+                            key: "{hit.id}",
+                            class: if i == sel { "qf-item selected" } else { "qf-item" },
+                            onmouseenter: move |_| selected.set(i),
+                            onclick: {
+                                let id = hit.id.clone();
+                                move |e: MouseEvent| {
+                                    if e.modifiers().meta() { state.open_in_new_tab(Route::Page(id.clone())) } else { state.open_page(&id) }
+                                }
+                            },
+                            span { class: "qf-icon", PageIcon { icon: Some(hit.icon.clone()), size: 18 } }
+                            div { class: "qf-text",
+                                div { class: "qf-title", "{hit.title}" }
+                                if let Some(s) = hit.snippet {
+                                    div { class: "qf-snippet", "{s}" }
+                                }
+                            }
+                            if !hit.path.is_empty() {
+                                span { class: "qf-path", "{hit.path}" }
+                            }
+                        }
+                    }
+                }
+                div { class: "qf-footer", "↑↓ select  ·  ↵ open  ·  ⌘↵ open in new tab  ·  esc close" }
+            }
+        }
+    }
+}
+
+/// Tint swatches for the glass: (label, colour). "" is neutral grey.
+const TINTS: &[(&str, &str)] = &[
+    ("Neutral", ""),
+    ("Blue", "#3a7dd2"),
+    ("Purple", "#8858d4"),
+    ("Pink", "#cf4f97"),
+    ("Red", "#d94848"),
+    ("Orange", "#e0742a"),
+    ("Yellow", "#cf9418"),
+    ("Green", "#3c9862"),
+];
+
+/// The parts of Settings, in the order they're listed.
+#[derive(Clone, Copy, PartialEq)]
+enum Section {
+    Appearance,
+    Space,
+    Calendar,
+    Ai,
+    Notifications,
+    Data,
+}
+
+impl Section {
+    const ALL: [Section; 6] = [Section::Appearance, Section::Space, Section::Calendar, Section::Ai, Section::Notifications, Section::Data];
+
+    fn label(self) -> &'static str {
+        match self {
+            Section::Appearance => "Appearance",
+            Section::Space => "Space",
+            Section::Calendar => "Calendar",
+            Section::Ai => "AI",
+            Section::Notifications => "Notifications",
+            Section::Data => "Data",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Section::Appearance => "palette",
+            Section::Space => "folder",
+            Section::Calendar => "calendar",
+            Section::Ai => "sparkles",
+            Section::Notifications => "bell",
+            Section::Data => "inbox",
+        }
+    }
+
+    fn blurb(self) -> &'static str {
+        match self {
+            Section::Appearance => "The look of the window.",
+            Section::Space => "The space you're in.",
+            Section::Calendar => "Other calendars, and reminders.",
+            Section::Ai => "Ask AI uses a tool on this Mac, with your own account. It sees only the page you ask about.",
+            Section::Notifications => "Reminders, and notes for meetings.",
+            Section::Data => "Your notes are in one file on this Mac.",
+        }
+    }
+}
+
+/// Settings, laid out like Aven's: the sections down the left, the chosen
+/// section's settings on the right as rows on cards (what it is and what it
+/// does on the left, its control on the right). Esc or "Back to notes" closes it.
+#[component]
+pub fn SettingsView() -> Element {
+    let state = use_context::<AppState>();
+    let mut section = use_signal(|| Section::Appearance);
+    let current = section();
+    rsx! {
+        div { class: "settings-view", role: "dialog", "aria-label": "Settings",
+            nav { class: "settings-nav",
+                button { class: "settings-back", onclick: move |_| state.set_modal(None),
+                    Icon { name: "chevron-left", size: 16 }
+                    span { "Back to notes" }
+                    span { class: "settings-key", "esc" }
+                }
+                div { class: "settings-nav-title", "Settings" }
+                for s in Section::ALL {
+                    button {
+                        class: if current == s { "settings-nav-item on" } else { "settings-nav-item" },
+                        "data-section": "{s.label()}",
+                        onclick: move |_| section.set(s),
+                        span { class: "settings-nav-icon", Icon { name: s.icon(), size: 15 } }
+                        span { "{s.label()}" }
+                    }
+                }
+            }
+            div { class: "settings-card",
+                div { class: "settings-scroll",
+                    // Keyed by section, so each one settles in as it opens.
+                    for s in [current] {
+                        div { key: "{s.label()}", class: "settings-content",
+                            header { class: "settings-page-header",
+                                h1 { "{s.label()}" }
+                                p { "{s.blurb()}" }
+                            }
+                            match s {
+                                Section::Appearance => rsx! { AppearanceSettings {} },
+                                Section::Space => rsx! { SpaceSettings {} },
+                                Section::Calendar => rsx! { CalendarSettings {} },
+                                Section::Ai => rsx! {
+                                    AiSettings {}
+                                    VoiceSettings {}
+                                    ConnectorSettings {}
+                                },
+                                Section::Notifications => rsx! { NotificationSettings {} },
+                                Section::Data => rsx! { DataSettings {} },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A titled card of settings rows.
+#[component]
+fn Group(#[props(default, into)] title: String, children: Element) -> Element {
+    rsx! {
+        section { class: "set-group",
+            if !title.is_empty() {
+                h2 { "{title}" }
+            }
+            div { class: "set-card", {children} }
+        }
+    }
+}
+
+/// One setting: what it is (and a line on what it does), then its control.
+#[component]
+fn Row(#[props(into)] label: String, #[props(default, into)] note: String, #[props(default)] tone: &'static str, children: Element) -> Element {
+    rsx! {
+        div { class: "set-row",
+            div { class: "set-copy",
+                div { class: "set-label", "{label}" }
+                if !note.is_empty() {
+                    div { class: "set-note {tone}", "{note}" }
+                }
+            }
+            div { class: "set-control", {children} }
+        }
+    }
+}
+
+#[component]
+fn AppearanceSettings() -> Element {
+    let state = use_context::<AppState>();
+    let theme = state.ui.read().theme;
+    let look = state.look.read().clone();
+    let custom_tint = if look.tint.is_empty() || TINTS.iter().any(|(_, c)| *c == look.tint) {
+        "#7a8a99".to_string()
+    } else {
+        look.tint.clone()
+    };
+    let is_custom = !look.tint.is_empty() && !TINTS.iter().any(|(_, c)| *c == look.tint);
+    let glass_label = match look.glass {
+        0 => "Solid".to_string(),
+        g => format!("{g}%"),
+    };
+    let blur_max = crate::glass::BLUR_MAX;
+    let blur_fill = u32::from(look.blur.min(blur_max)) * 100 / u32::from(blur_max);
+    let blur_label = match look.blur {
+        0 => "None".to_string(),
+        _ => format!("{blur_fill}%"),
+    };
+    // A solid window shows nothing behind it, so there is nothing to blur.
+    let solid = look.glass == 0;
+    rsx! {
+        Group {
+            Row { label: "Theme", note: "⌘⇧L switches light and dark.",
+                div { class: "segmented",
+                    for (label, value) in [("System", Theme::System), ("Light", Theme::Light), ("Dark", Theme::Dark)] {
+                        button {
+                            class: if theme == value { "on" } else { "" },
+                            onclick: move |_| state.set_theme(value),
+                            "{label}"
+                        }
+                    }
+                }
+            }
+        }
+        Group { title: "Window glass",
+            Row { label: "Transparency", note: "How much shows through the window.",
+                div { class: "set-slider",
+                    input {
+                        class: "slider",
+                        r#type: "range",
+                        min: "0",
+                        max: "100",
+                        step: "1",
+                        value: "{look.glass}",
+                        style: "--fill: {look.glass}%",
+                        id: "glass-amount",
+                        "aria-label": "Transparency",
+                        oninput: {
+                            let look = look.clone();
+                            move |e: FormEvent| {
+                                let glass = e.value().parse::<u8>().unwrap_or(look.glass).min(100);
+                                state.set_look(Look { glass, ..look.clone() }, false);
+                            }
+                        },
+                        onchange: {
+                            let look = look.clone();
+                            move |e: FormEvent| {
+                                let glass = e.value().parse::<u8>().unwrap_or(look.glass).min(100);
+                                state.set_look(Look { glass, ..look.clone() }, true);
+                            }
+                        },
+                    }
+                    span { class: "set-value", "{glass_label}" }
+                }
+            }
+            Row { label: "Blur", note: "How soft the desktop looks behind it.",
+                div { class: "set-slider",
+                    input {
+                        class: "slider",
+                        id: "glass-blur",
+                        r#type: "range",
+                        min: "0",
+                        max: "{blur_max}",
+                        step: "1",
+                        value: "{look.blur}",
+                        style: "--fill: {blur_fill}%",
+                        disabled: solid,
+                        "aria-label": "Blur",
+                        oninput: {
+                            let look = look.clone();
+                            move |e: FormEvent| {
+                                let blur = e.value().parse::<u8>().unwrap_or(look.blur).min(blur_max);
+                                state.set_look(Look { blur, ..look.clone() }, false);
+                            }
+                        },
+                        onchange: {
+                            let look = look.clone();
+                            move |e: FormEvent| {
+                                let blur = e.value().parse::<u8>().unwrap_or(look.blur).min(blur_max);
+                                state.set_look(Look { blur, ..look.clone() }, true);
+                            }
+                        },
+                    }
+                    span { class: "set-value", "{blur_label}" }
+                }
+            }
+            Row { label: "Tint", note: "The colour of the glass.",
+                div { class: "tints",
+                    for (label, color) in TINTS {
+                        button {
+                            class: if look.tint == *color { "tint on" } else { "tint" },
+                            title: "{label}",
+                            style: if color.is_empty() { "".to_string() } else { format!("--c: {color}") },
+                            onclick: {
+                                let look = look.clone();
+                                move |_| state.set_look(Look { tint: color.to_string(), ..look.clone() }, true)
+                            },
+                        }
+                    }
+                    label {
+                        class: if is_custom { "tint custom on" } else { "tint custom" },
+                        title: "Any colour",
+                        style: "--c: {custom_tint}",
+                        input {
+                            r#type: "color",
+                            value: "{custom_tint}",
+                            oninput: {
+                                let look = look.clone();
+                                move |e: FormEvent| {
+                                    let c = e.value();
+                                    if crate::state::valid_hex(&c) {
+                                        state.set_look(Look { tint: c, ..look.clone() }, false);
+                                    }
+                                }
+                            },
+                            onchange: {
+                                let look = look;
+                                move |e: FormEvent| {
+                                    let c = e.value();
+                                    if crate::state::valid_hex(&c) {
+                                        state.set_look(Look { tint: c, ..look.clone() }, true);
+                                    }
+                                }
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn SpaceSettings() -> Element {
+    let state = use_context::<AppState>();
+    let space = state.space();
+    let space_name = space.as_ref().map(|s| s.name.clone()).unwrap_or_default();
+    let space_color = space.as_ref().map(|s| s.color.clone()).unwrap_or_else(|| "blue".into());
+    let space_id = space.as_ref().map(|s| s.id.clone()).unwrap_or_default();
+    let space_count = state.spaces.read().len();
+    rsx! {
+        Group { title: "This space",
+            Row { label: "Name",
+                // Keyed by space, so switching spaces shows the new name.
+                for id in [space_id] {
+                    input {
+                        key: "{id}",
+                        class: "text-input",
+                        "aria-label": "Space name",
+                        initial_value: "{space_name}",
+                        oninput: move |e: FormEvent| state.rename_space(e.value()),
+                    }
+                }
+            }
+            Row { label: "Colour", note: "For its badge in the sidebar.",
+                div { class: "tints",
+                    for (color, label) in super::icons::ICON_COLORS {
+                        button {
+                            class: if space_color == *color { "tint on" } else { "tint" },
+                            title: "{label}",
+                            style: "--c: var(--icon-{color})",
+                            onclick: move |_| state.set_space_color(color),
+                        }
+                    }
+                }
+            }
+        }
+        if space_count > 1 {
+            Group {
+                Row { label: "Delete this space", note: "Only when it has no pages left.",
+                    button { class: "secondary-btn danger-text", onclick: move |_| state.delete_space(), "Delete" }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn AiSettings() -> Element {
+    let mut test = use_signal(|| None::<(bool, String)>);
+    let mut testing = use_signal(|| false);
+    let mut chosen = use_signal(|| store::setting(ai::PROVIDER_SETTING).and_then(|s| Provider::from_id(&s)));
+    let mut lookups = use_signal(|| 0u32);
+    // Look for installed AI tools off the UI thread; "Look again" re-runs it.
+    let tools = use_resource(move || async move {
+        let refresh = lookups() > 0;
+        ai::local::installed_async(refresh || ai::local::installed_cached().is_none()).await
+    });
+    let found: Option<Vec<Installed>> = tools.read().clone();
+    let looking = found.is_none();
+    let found = found.unwrap_or_default();
+    let prefs = ai::Prefs { provider: *chosen.read(), ..ai::Prefs::load() };
+    let active = ai::pick_provider(&prefs, &found);
+    let automatic = chosen.read().is_none();
+    let installed = |p: Provider| found.iter().any(|i| i.provider == p);
+    let status = |p: Provider| match found.iter().find(|i| i.provider == p) {
+        _ if looking => "Looking…".to_string(),
+        Some(Installed { version: Some(v), .. }) => format!("Installed · {v}"),
+        Some(_) => "Installed".to_string(),
+        None => "Not installed".to_string(),
+    };
+    // (choice, name, line under it, ready to use)
+    let mut choices: Vec<(Option<Provider>, String, String, bool)> = vec![(
+        None,
+        "Automatic".to_string(),
+        match active {
+            Some(p) if automatic => format!("Using {}: the first one installed.", p.name()),
+            _ if looking => "Looking…".to_string(),
+            _ if active.is_none() => ai::NO_AI.to_string(),
+            _ => "Uses Claude Code if it's installed, otherwise Codex.".to_string(),
+        },
+        active.is_some(),
+    )];
+    for p in Provider::ALL {
+        choices.push((Some(p), p.name().to_string(), status(p), installed(p)));
+    }
+    let claude_model = ai::normalize_model(Provider::ClaudeCode, &store::setting(Provider::ClaudeCode.model_setting()).unwrap_or_default());
+    let codex_model = store::setting(Provider::Codex.model_setting()).unwrap_or_default();
+
+    let run_test = move |_| {
+        testing.set(true);
+        test.set(None);
+        let prefs = ai::Prefs::load();
+        let label = ai::active_label(&prefs);
+        spawn(async move {
+            let messages = vec![ChatMessage::system("Reply in one short, friendly sentence."), ChatMessage::user("Hello")];
+            let mut rx = ai::start(prefs, messages);
+            let mut reply = String::new();
+            let mut outcome = None;
+            while let Some(event) = rx.next().await {
+                match event {
+                    AiEvent::Delta(t) => reply.push_str(&t),
+                    AiEvent::Done => {
+                        outcome = Some((true, format!("{label} replied: “{}”", reply.trim().chars().take(160).collect::<String>())));
+                        break;
+                    }
+                    AiEvent::Error(e) => {
+                        outcome = Some((false, e));
+                        break;
+                    }
+                }
+            }
+            test.set(outcome.or(Some((false, "No reply.".into()))));
+            testing.set(false);
+        });
+    };
+    let (test_note, test_tone) = match test.read().clone() {
+        Some((true, msg)) => (msg, "ok"),
+        Some((false, msg)) => (msg, "err"),
+        None => ("Sends a short hello and shows the reply.".to_string(), ""),
+    };
+
+    rsx! {
+        section { class: "set-group",
+            div { class: "set-group-head",
+                h2 { "AI tool" }
+                button { class: "link-btn", disabled: looking, onclick: move |_| lookups += 1,
+                    if looking { "Looking…" } else { "Look again" }
+                }
+            }
+            div { class: "set-card",
+                for (choice, name, line, ready) in choices {
+                    button {
+                        key: "{name}",
+                        class: if chosen() == choice { "set-row choice on" } else { "set-row choice" },
+                        role: "radio",
+                        "aria-checked": "{chosen() == choice}",
+                        onclick: move |_| {
+                            store::set_setting(ai::PROVIDER_SETTING, choice.map(|p| p.id()).unwrap_or(""));
+                            chosen.set(choice);
+                            test.set(None);
+                        },
+                        div { class: "set-copy",
+                            div { class: "set-label", "{name}" }
+                            div { class: if ready { "set-note ok" } else { "set-note" }, "{line}" }
+                        }
+                        div { class: "set-control", span { class: "radio" } }
+                    }
+                }
+            }
+        }
+        match active {
+            Some(provider) => rsx! {
+                Group { title: "Model",
+                    Row {
+                        label: "Model",
+                        note: format!("Which {} model answers.", provider.name()),
+                        ModelPicker { provider, current: if provider == Provider::ClaudeCode { claude_model.clone() } else { codex_model.clone() } }
+                    }
+                    if !looking && !installed(provider) {
+                        Row {
+                            label: "Not installed",
+                            tone: "err",
+                            note: if provider == Provider::ClaudeCode {
+                                "Get Claude Code at claude.com/claude-code, then press Look again."
+                            } else {
+                                "Install Codex with npm install -g @openai/codex, then press Look again."
+                            },
+                        }
+                    }
+                    Row {
+                        label: "Signing in",
+                        note: if provider == Provider::ClaudeCode {
+                            "Not signed in yet? Run claude in Terminal once and sign in."
+                        } else {
+                            "Not signed in yet? Run codex login in Terminal once."
+                        },
+                    }
+                }
+                Group {
+                    Row { label: "Try it", note: test_note, tone: test_tone,
+                        button { class: "secondary-btn", disabled: testing(), onclick: run_test,
+                            if testing() { "Testing…" } else { "Test" }
+                        }
+                    }
+                }
+            },
+            None => rsx! {},
+        }
+    }
+}
+
+/// Updates: which build this is, whether a newer one is ready, and how
+/// updates arrive (see update.rs).
+#[component]
+fn UpdateSettings() -> Element {
+    use crate::update;
+    let state = use_context::<AppState>();
+    let mut auto = use_signal(update::automatic);
+    let mut source = use_signal(|| update::source().display().to_string());
+    let custom = source() != update::DEFAULT_SOURCE;
+    let installed = update::own_app().is_some() && update::own_build().is_some();
+    let ready = state.update.read().clone();
+    let status = match (&ready, installed) {
+        (Some(u), _) => format!("{}. A newer build is ready: {}.", update::describe(), update::build_label(u.build)),
+        (None, true) => format!("{}. Up to date.", update::describe()),
+        (None, false) => format!("{}. This copy runs from the build folder, so it does not update itself.", update::describe()),
+    };
+    rsx! {
+        Group { title: "Updates",
+            Row { label: "Rune", note: status,
+                if ready.is_some() {
+                    button { class: "primary-btn", id: "update-now", onclick: move |_| state.install_update(), "Update and restart" }
+                } else if installed {
+                    button { class: "secondary-btn", id: "update-check", onclick: move |_| state.check_update(true), "Check now" }
+                }
+            }
+            Row {
+                label: "Update automatically",
+                note: "Installs a newer build when the app opens.",
+                button {
+                    id: "update-auto",
+                    class: if auto() { "switch on" } else { "switch" },
+                    role: "switch",
+                    "aria-checked": "{auto()}",
+                    "aria-label": "Update automatically",
+                    onclick: move |_| {
+                        let on = !auto();
+                        update::set_automatic(on);
+                        auto.set(on);
+                    },
+                    span { class: "knob" }
+                }
+            }
+            Row { label: "Where updates come from", note: source(), tone: "mono",
+                if custom {
+                    button {
+                        class: "ghost-btn",
+                        onclick: move |_| {
+                            update::set_source(None);
+                            source.set(update::DEFAULT_SOURCE.to_string());
+                            state.check_update(false);
+                        },
+                        "Use the usual place"
+                    }
+                }
+                button {
+                    class: "secondary-btn",
+                    onclick: move |_| async move {
+                        let picked = rfd::AsyncFileDialog::new()
+                            .set_title("Choose the Rune app that newer builds arrive as")
+                            .add_filter("App", &["app"])
+                            .pick_file()
+                            .await;
+                        if let Some(app) = picked {
+                            update::set_source(Some(app.path()));
+                            source.set(app.path().display().to_string());
+                            state.check_update(true);
+                        }
+                    },
+                    "Choose…"
+                }
+            }
+        }
+    }
+}
+
+/// Voice: how the app hears you, and the shortcut that opens the AI from any app.
+#[component]
+fn VoiceSettings() -> Element {
+    let mut anywhere = use_signal(|| store::setting("voice_anywhere").as_deref() != Some("off"));
+    let mut engine = use_signal(|| if crate::listen::own_ears() { "builtin" } else { "dictation" });
+    let can_listen = crate::listen::available();
+    rsx! {
+        Group { title: "Voice",
+            Row {
+                label: "Hear me with",
+                note: "For the voice box and the microphones beside text boxes.",
+                select {
+                    id: "voice-engine",
+                    class: "select",
+                    "aria-label": "Hear me with",
+                    onchange: move |e: FormEvent| {
+                        let v = if e.value() == "builtin" { "builtin" } else { "dictation" };
+                        store::set_setting("voice_engine", v);
+                        engine.set(v);
+                    },
+                    option { value: "dictation", selected: engine() == "dictation", "The Mac's Dictation" }
+                    option { value: "builtin", selected: engine() == "builtin", disabled: !can_listen, "Rune's listener" }
+                }
+            }
+            Row {
+                label: "AI from anywhere",
+                note: "⌃⌥Space in any app opens Ask AI.",
+                button {
+                    id: "voice-anywhere",
+                    class: if anywhere() { "switch on" } else { "switch" },
+                    role: "switch",
+                    "aria-checked": "{anywhere()}",
+                    "aria-label": "AI from anywhere",
+                    onclick: move |_| {
+                        let on = !anywhere();
+                        store::set_setting("voice_anywhere", if on { "on" } else { "off" });
+                        anywhere.set(on);
+                    },
+                    span { class: "knob" }
+                }
+            }
+        }
+    }
+}
+
+/// Connect AI tools: what to give Claude Code, Codex, the Claude app, Cursor
+/// and others so they can read and write this workspace (the MCP connector,
+/// which is this app started with `--mcp`).
+#[component]
+fn ConnectorSettings() -> Element {
+    use crate::mcp::connect;
+    let state = use_context::<AppState>();
+    let program = use_hook(connect::program);
+    let (p1, p2, p3, p4) = (program.clone(), program.clone(), program.clone(), program.clone());
+    rsx! {
+        Group { title: "Connect AI tools",
+            Row {
+                label: "Rune connector",
+                note: "Lets an AI tool read and write your pages on this Mac. Give each tool its lines one time.",
+            }
+            Row { label: "Claude Code", note: "Run this once in Terminal.",
+                button {
+                    class: "secondary-btn",
+                    "data-copy": "claude-code",
+                    onclick: move |_| state.copy_to_clipboard(connect::claude_code(&p1), "Copied. Paste it in Terminal"),
+                    "Copy command"
+                }
+            }
+            Row { label: "Codex", note: "Add these lines to ~/.codex/config.toml.",
+                button {
+                    class: "secondary-btn",
+                    "data-copy": "codex",
+                    onclick: move |_| state.copy_to_clipboard(connect::codex(&p2), "Copied the lines for Codex"),
+                    "Copy lines"
+                }
+            }
+            Row {
+                label: "Claude app, Cursor and others",
+                note: "For the MCP settings file of the tool.",
+                button {
+                    class: "secondary-btn",
+                    "data-copy": "json",
+                    onclick: move |_| state.copy_to_clipboard(connect::json(&p3), "Copied the JSON"),
+                    "Copy JSON"
+                }
+            }
+            Row { label: "The command itself", note: connect::command(&program), tone: "mono",
+                button {
+                    class: "ghost-btn",
+                    "data-copy": "command",
+                    onclick: move |_| state.copy_to_clipboard(connect::command(&p4), "Copied the command"),
+                    "Copy"
+                }
+            }
+        }
+    }
+}
+
+/// Pick the model a tool uses. Anything chosen before that isn't in the list
+/// stays available as a custom choice.
+#[component]
+fn ModelPicker(provider: Provider, current: String) -> Element {
+    let mut choices = ai::model_choices(provider);
+    if !current.is_empty() && !choices.iter().any(|(id, _)| *id == current) {
+        choices.push((current.clone(), format!("{current} (custom)")));
+    }
+    rsx! {
+        select {
+            class: "select",
+            "aria-label": "Model",
+            onchange: move |e: FormEvent| store::set_setting(provider.model_setting(), e.value().trim()),
+            for (id, label) in choices {
+                option { value: "{id}", selected: id == current, "{label}" }
+            }
+        }
+    }
+}
+
+/// The calendar: the calendars of this Mac (off until the person turns
+/// them on), and the reminder a new event starts with.
+#[component]
+fn CalendarSettings() -> Element {
+    use crate::maccal::Access;
+    let state = use_context::<AppState>();
+    let mac = state.mac_cal.read().clone();
+    let default_reminder = crate::notify::default_reminder();
+    let (note, tone) = match (mac.on, mac.access) {
+        (false, _) => ("From the Calendar app: iCloud, Google, Outlook. Read only.", ""),
+        (true, Access::Allowed) => ("On. Read only, and they stay on this Mac.", "ok"),
+        (true, Access::Denied) => ("macOS does not let Rune read your calendars.", ""),
+        (true, Access::Unavailable) => ("Only the installed app can read your calendars.", ""),
+        (true, Access::NotAsked) | (true, Access::Unknown) => ("Waiting for your answer to macOS…", ""),
+    };
+    let on = mac.on;
+    let allowed = on && mac.access == Access::Allowed;
+    rsx! {
+        Group { title: "Calendars of this Mac",
+            Row { label: "Show their events", note, tone,
+                if on && mac.access == Access::Denied {
+                    button { class: "secondary-btn", onclick: move |_| crate::maccal::open_settings(), "Open System Settings" }
+                }
+                button {
+                    id: "mac-calendars-switch",
+                    class: if on { "switch on" } else { "switch" },
+                    role: "switch",
+                    "aria-checked": "{on}",
+                    "aria-label": "Show the events of the calendars of this Mac",
+                    onclick: move |_| state.set_mac_calendars(!on),
+                    span { class: "knob" }
+                }
+            }
+            if allowed {
+                for c in mac.calendars.clone() {
+                    div { key: "{c.id}", class: "set-row", "data-calendar": "{c.title}",
+                        div { class: "set-copy with-dot",
+                            span {
+                                class: "set-dot",
+                                style: if c.color.is_empty() { "background: var(--text-3);".to_string() } else { format!("background: {};", c.color) },
+                            }
+                            div {
+                                div { class: "set-label", "{c.title}" }
+                                if !c.source.is_empty() && c.source != c.title {
+                                    div { class: "set-note", "{c.source}" }
+                                }
+                            }
+                        }
+                        div { class: "set-control",
+                            button {
+                                class: if mac.hidden.contains(&c.id) { "switch" } else { "switch on" },
+                                role: "switch",
+                                "aria-checked": "{!mac.hidden.contains(&c.id)}",
+                                "aria-label": "Show {c.title}",
+                                onclick: {
+                                    let (id, shown) = (c.id.clone(), !mac.hidden.contains(&c.id));
+                                    move |_| state.show_mac_calendar(&id, !shown)
+                                },
+                                span { class: "knob" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if allowed {
+            Group { title: "Changes from Rune",
+                Row { label: "Let Rune change them", note: "Drag one of their events to another time. Not a meeting with other people in it.",
+                    button {
+                        id: "mac-write-switch",
+                        class: if mac.write { "switch on" } else { "switch" },
+                        role: "switch",
+                        "aria-checked": "{mac.write}",
+                        "aria-label": "Let Rune change the calendars of this Mac",
+                        onclick: move |_| state.set_mac_write(!mac.write),
+                        span { class: "knob" }
+                    }
+                }
+                if mac.write {
+                    Row { label: "Make new events in", note: "For events you type in words or draw on the hours.",
+                        select {
+                            id: "mac-new-in",
+                            class: "select",
+                            "aria-label": "Make new events in",
+                            onchange: move |e: FormEvent| state.set_mac_new_in(&e.value()),
+                            option { value: "", selected: mac.new_in.is_empty(), "Rune" }
+                            for c in mac.calendars.iter().filter(|c| c.writable) {
+                                option { key: "{c.id}", value: "{c.id}", selected: mac.new_in == c.id, "{c.title}" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Group { title: "New events",
+            Row { label: "Reminder", note: "Each event can change its own.",
+                select {
+                    class: "select",
+                    "aria-label": "Reminder for new events",
+                    onchange: move |e: FormEvent| store::set_setting("default_reminder", &e.value()),
+                    for (m, label) in crate::notify::REMINDERS {
+                        option {
+                            value: m.map(|x| x.to_string()).unwrap_or_else(|| "none".into()),
+                            selected: default_reminder == m,
+                            "{label}"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn NotificationSettings() -> Element {
+    let mut notif_refresh = use_signal(|| 0u32);
+    let notif = use_resource(move || async move {
+        let _ = notif_refresh();
+        crate::notify::permission().await
+    });
+    let mut meeting_notes = use_signal(crate::meeting::enabled);
+    let permission = *notif.read();
+    let (text, tone) = match permission {
+        None => ("Checking…", ""),
+        Some(crate::notify::Permission::Allowed) => ("On. Reminders arrive even when the app is closed.", "ok"),
+        Some(crate::notify::Permission::NotAsked) => ("Not turned on yet.", ""),
+        Some(crate::notify::Permission::Denied) => ("Turned off for Rune in System Settings.", ""),
+        Some(crate::notify::Permission::Unavailable) => ("Only the installed app can show notifications.", ""),
+    };
+    rsx! {
+        Group {
+            Row { label: "Notifications", note: text, tone,
+                if permission == Some(crate::notify::Permission::NotAsked) {
+                    button {
+                        class: "secondary-btn",
+                        onclick: move |_| {
+                            spawn(async move {
+                                crate::notify::request_permission().await;
+                                notif_refresh += 1;
+                                crate::notify::mark_dirty();
+                            });
+                        },
+                        "Turn on"
+                    }
+                }
+                if permission == Some(crate::notify::Permission::Denied) {
+                    button { class: "secondary-btn", onclick: move |_| crate::notify::open_settings(), "Open System Settings" }
+                }
+            }
+        }
+        Group { title: "Meetings",
+            Row {
+                label: "Meeting notes",
+                note: "Makes a notes page when a Teams meeting starts. Nothing is recorded.",
+                button {
+                    id: "meeting-notes-switch",
+                    class: if meeting_notes() { "switch on" } else { "switch" },
+                    role: "switch",
+                    "aria-checked": "{meeting_notes()}",
+                    "aria-label": "Meeting notes",
+                    onclick: move |_| {
+                        let on = !meeting_notes();
+                        crate::meeting::set_enabled(on);
+                        meeting_notes.set(on);
+                    },
+                    span { class: "knob" }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn DataSettings() -> Element {
+    let state = use_context::<AppState>();
+    let path = use_hook(|| store::db_path().map(|p| p.display().to_string()));
+    let backups = use_hook(|| store::db_path().map(|p| backup::dir_for(&p)));
+    let mut last = use_signal(backup::last);
+    let mut busy = use_signal(|| false);
+    let backup_note = match last() {
+        Some(t) => {
+            let ago = when::ago(t);
+            let ago = if ago == "Yesterday" { "yesterday".to_string() } else { ago };
+            format!("Every day. Last copy: {ago}. The newest {} are kept.", backup::KEPT)
+        },
+        None => format!("Every day. No copy yet. The newest {} are kept.", backup::KEPT),
+    };
+    rsx! {
+        Group {
+            Row {
+                label: "Workspace file",
+                note: path.clone().unwrap_or_else(|| "Kept in memory for this run only.".into()),
+                tone: "mono",
+                if let Some(p) = path.clone() {
+                    button {
+                        class: "secondary-btn",
+                        onclick: move |_| {
+                            let _ = std::process::Command::new("open").arg("-R").arg(&p).spawn();
+                        },
+                        "Show in Finder"
+                    }
+                }
+            }
+            if let Some(dir) = backups.clone() {
+                Row { label: "Backups", note: backup_note,
+                    if last().is_some() {
+                        button {
+                            class: "ghost-btn",
+                            onclick: move |_| {
+                                let _ = std::process::Command::new("open").arg(&dir).spawn();
+                            },
+                            "Show"
+                        }
+                    }
+                    button {
+                        class: "secondary-btn",
+                        id: "back-up-now",
+                        disabled: busy(),
+                        onclick: move |_| async move {
+                            busy.set(true);
+                            match backup::now().await {
+                                Ok(_) => {
+                                    last.set(backup::last());
+                                    state.toast("Backed up");
+                                }
+                                Err(e) => state.toast(format!("Couldn't back up: {e}")),
+                            }
+                            busy.set(false);
+                        },
+                        if busy() { "Backing up…" } else { "Back up now" }
+                    }
+                }
+            }
+        }
+        UpdateSettings {}
+        Group { title: "Export and import",
+            Row {
+                label: "Export",
+                note: "Every page as Markdown files.",
+                button { class: "secondary-btn", onclick: move |_| state.export_all(), "Export…" }
+            }
+            Row {
+                label: "Import",
+                note: "A Notion export (.zip) or Markdown files.",
+                button { class: "ghost-btn", onclick: move |_| state.import_folder(), "Folder…" }
+                button { class: "secondary-btn", onclick: move |_| state.import(), "Import…" }
+            }
+        }
+    }
+}
+
+/// Every open to-do of this space, grouped by the page it is on.
+#[component]
+pub fn TodosModal() -> Element {
+    let state = use_context::<AppState>();
+    let todos = use_memo(move || state.open_todos());
+    // Pages in the order their to-dos come (the pages edited last first).
+    let mut groups: Vec<(String, String, Vec<crate::state::OpenTodo>)> = Vec::new();
+    for t in todos.read().iter() {
+        match groups.last_mut() {
+            Some((page, _, list)) if *page == t.page => list.push(t.clone()),
+            _ => groups.push((t.page.clone(), t.page_title.clone(), vec![t.clone()])),
+        }
+    }
+    let count = todos.read().len();
+    rsx! {
+        div { class: "modal-backdrop soft", onclick: move |_| state.set_modal(None),
+            div { class: "modal todos", role: "dialog", "aria-label": "To do", onclick: move |e| e.stop_propagation(),
+                div { class: "modal-head",
+                    div { class: "modal-head-text",
+                        h2 { "To do" }
+                        div { class: "modal-sub", if count == 1 { "1 open to-do, from all your pages" } else { "{count} open to-dos, from all your pages" } }
+                    }
+                    button { class: "icon-btn", title: "Close", "aria-label": "Close", onclick: move |_| state.set_modal(None), Icon { name: "close", size: 15 } }
+                }
+                div { class: "todos-list",
+                    if groups.is_empty() {
+                        div { class: "history-empty", "Nothing to do." }
+                    }
+                    for (page, title, list) in groups {
+                        div { key: "{page}", class: "todos-group",
+                            button {
+                                class: "todos-page",
+                                onclick: {
+                                    let page = page.clone();
+                                    move |_| state.open_page(&page)
+                                },
+                                "{title}"
+                            }
+                            for t in list {
+                                super::page::TodoRow { key: "{t.block}", todo: t }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Ask your notes: a question (typed or spoken) is answered by the AI from
+/// the pages of this space that say most about it, and the answer names the
+/// pages it used.
+#[component]
+pub fn AskNotesModal() -> Element {
+    let state = use_context::<AppState>();
+    let mut question = use_signal(String::new);
+    let mut asked = use_signal(String::new);
+    let mut reply = use_signal(String::new);
+    let mut offered = use_signal(Vec::<crate::voice::Note>::new);
+    // "" idle · "work" · "done" · anything else: what went wrong.
+    let mut status = use_signal(String::new);
+    let ask = use_callback(move |_: ()| {
+        let q = question.peek().trim().to_string();
+        if q.is_empty() || status.peek().as_str() == "work" {
+            return;
+        }
+        let notes = state.notes_for(&q);
+        if notes.is_empty() {
+            status.set("There are no pages to look in yet.".into());
+            return;
+        }
+        let messages = vec![
+            ai::ChatMessage::system(crate::voice::ASK_NOTES),
+            ai::ChatMessage::user(crate::voice::ask_message(&q, &notes, 24_000)),
+        ];
+        asked.set(q);
+        offered.set(notes);
+        reply.set(String::new());
+        status.set("work".into());
+        let mut rx = ai::start(ai::Prefs::load(), messages);
+        spawn(async move {
+            while let Some(event) = rx.next().await {
+                match event {
+                    AiEvent::Delta(text) => reply.write().push_str(&text),
+                    AiEvent::Done => {
+                        status.set("done".into());
+                        break;
+                    }
+                    AiEvent::Error(e) => {
+                        status.set(e);
+                        break;
+                    }
+                }
+            }
+        });
+    });
+    let working = status.read().as_str() == "work";
+    let done = status.read().as_str() == "done";
+    let problem = if !working && !done { status.read().clone() } else { String::new() };
+    let (answer, sources) = crate::voice::split_answer(&ai::clean_reply(&reply.read()).0, &offered.read());
+    let lines = crate::markdown::to_blocks(&answer);
+    let read: Vec<String> = offered.read().iter().map(|n| n.title.clone()).collect();
+    let (answer_kept, sources_kept) = (answer.clone(), sources.clone());
+
+    rsx! {
+        div { class: "modal-backdrop soft", onclick: move |_| state.set_modal(None),
+            div { class: "modal ask-notes", role: "dialog", "aria-label": "Ask your notes", onclick: move |e| e.stop_propagation(),
+                div { class: "ask-row",
+                    span { class: "ask-icon", Icon { name: "sparkles", size: 18 } }
+                    input {
+                        id: "ask-notes-input",
+                        class: "ask-input",
+                        r#type: "text",
+                        placeholder: "Ask your notes anything…",
+                        "aria-label": "Ask your notes",
+                        onmounted: move |e: MountedEvent| async move {
+                            let _ = e.set_focus(true).await;
+                        },
+                        oninput: move |e: FormEvent| question.set(e.value()),
+                        onkeydown: move |e: KeyboardEvent| {
+                            if e.key() == Key::Enter {
+                                e.prevent_default();
+                                ask.call(());
+                            }
+                        },
+                    }
+                    button { class: "icon-btn mic-btn", "data-dictate": "ask-notes-input", title: "Speak your question", "aria-label": "Speak your question", Icon { name: "mic", size: 15 } }
+                    button { class: "primary-btn", id: "ask-notes-go", disabled: working || question.read().trim().is_empty(), onclick: move |_| ask.call(()), "Ask" }
+                }
+                if working || done {
+                    div { class: "ask-body",
+                        div { class: "ask-question", "{asked}" }
+                        if lines.is_empty() && working {
+                            div { class: "ask-wait", "Reading {read.len()} of your pages…" }
+                        }
+                        div { class: "ask-answer",
+                            for b in lines {
+                                VersionBlock { key: "{b.id}", block: b }
+                            }
+                        }
+                        if done && !sources.is_empty() {
+                            div { class: "ask-sources",
+                                span { class: "ask-sources-label", "From" }
+                                for n in sources.clone() {
+                                    button {
+                                        key: "{n.id}",
+                                        class: "chip ask-source",
+                                        onclick: {
+                                            let id = n.id.clone();
+                                            move |_| state.open_page(&id)
+                                        },
+                                        "{n.title}"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if !problem.is_empty() {
+                    div { class: "ask-problem", "{problem}" }
+                }
+                div { class: "modal-foot ask-foot",
+                    span { class: "modal-foot-note",
+                        if read.is_empty() {
+                            "The AI reads only the pages of this space that match your question."
+                        } else {
+                            "The AI read: {read.join(\", \")}."
+                        }
+                    }
+                    if done {
+                        button {
+                            class: "secondary-btn",
+                            id: "ask-notes-save",
+                            onclick: move |_| state.save_answer(&asked.peek(), &answer_kept, &sources_kept),
+                            "Save as a page"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// How long a pause in speech is taken to mean "that's all".
+const VOICE_PAUSE_MS: i64 = 4000;
+
+/// The voice box: macOS Dictation types what is said into it, and when the
+/// speaker pauses (or presses the button) the AI makes a page from it.
+#[component]
+pub fn VoiceModal() -> Element {
+    let state = use_context::<AppState>();
+    let mut text = use_signal(String::new);
+    let mut last_change = use_signal(crate::model::now_ms);
+    let mut on_pause = use_signal(|| store::setting("voice_on_pause").as_deref() != Some("off"));
+    let testing = std::env::var_os("NOTION2_SELFTEST").is_some();
+    // What it was opened for: (heading, button, hint while it waits for a
+    // pause, hint with the pause switch off, what to say).
+    let what = use_hook(|| state.ui.peek().voice.clone());
+    let (heading, button, when_paused, when_done, example) = match what {
+        VoiceFor::NewPage => (
+            "Speak a page",
+            "Create page",
+            "The page is made when you pause.",
+            "Press Create page when you are done.",
+            "Say what the page is about: a plan, a list, notes from a call. Or say something for your calendar, like \"lunch with Sam on Friday at 1\".",
+        ),
+        VoiceFor::Into { .. } => (
+            "Speak into this page",
+            "Write here",
+            "It is written into the page when you pause.",
+            "Press Write here when you are done.",
+            "Say what to write on this line.",
+        ),
+        VoiceFor::Edit { .. } => (
+            "Say what to do with the text",
+            "Change it",
+            "The text is changed when you pause.",
+            "Press Change it when you are done.",
+            "For example: make it shorter, turn it into a checklist, translate it to Spanish.",
+        ),
+    };
+    // A request to change text can be one word ("shorter").
+    let enough_words = if matches!(what, VoiceFor::Edit { .. }) { 1 } else { 3 };
+    let finish = use_callback(move |spoken: String| state.finish_voice(spoken));
+
+    // What hears the speaker: the Mac's Dictation, or (Settings) the app's
+    // own listener, which shows the words as they are said.
+    let own_ears = use_hook(crate::listen::own_ears);
+    let ears = use_hook(|| std::rc::Rc::new(std::cell::RefCell::new(None::<crate::listen::Listener>)));
+    use_hook({
+        let ears = ears.clone();
+        move || {
+            // The cursor goes in the box first.
+            document::eval("window.__n2 && window.__n2.focus('voice-text', -1)");
+            if !own_ears {
+                // Ask macOS to start Dictation for it.
+                spawn(async move {
+                    ai::sleep_ms(250).await;
+                    if !testing {
+                        crate::dictation::start();
+                    }
+                });
+                return;
+            }
+            match crate::listen::start(false) {
+                Ok((listener, mut heard)) => {
+                    *ears.borrow_mut() = Some(listener);
+                    spawn(async move {
+                        use crate::listen::Heard;
+                        let join = |said: &str, more: &str| if said.is_empty() { more.to_string() } else { format!("{said} {more}") };
+                        let mut said = String::new();
+                        while let Some(event) = heard.next().await {
+                            let shown = match event {
+                                Heard::Partial { text: more, .. } => join(&said, &more),
+                                Heard::Final { text: more, .. } => {
+                                    said = join(&said, &more);
+                                    said.clone()
+                                }
+                                Heard::Error(message) | Heard::Note(message) => {
+                                    state.notice(message);
+                                    continue;
+                                }
+                                Heard::Listening { .. } => continue,
+                                Heard::Done => break,
+                            };
+                            let value = serde_json::to_string(&shown).unwrap_or_default();
+                            document::eval(&format!(
+                                "(()=>{{const t=document.getElementById('voice-text');if(t){{t.value={value};t.scrollTop=t.scrollHeight;}}}})()"
+                            ));
+                            text.set(shown);
+                            last_change.set(crate::model::now_ms());
+                        }
+                    });
+                }
+                Err(e) => state.notice(e),
+            }
+        }
+    });
+    use_drop(move || {
+        if ears.borrow_mut().take().is_none() {
+            crate::dictation::stop();
+        }
+    });
+    // When the speaker pauses, make the page.
+    use_future(move || async move {
+        loop {
+            ai::sleep_ms(200).await;
+            let enough = text.peek().split_whitespace().count() >= enough_words;
+            if *on_pause.peek() && enough && crate::model::now_ms() - *last_change.peek() > VOICE_PAUSE_MS {
+                let spoken = text.peek().clone();
+                finish.call(spoken);
+                break;
+            }
+        }
+    });
+
+    let words = text.read().split_whitespace().count();
+    let waiting = on_pause() && words >= enough_words;
+    let hint = if words == 0 {
+        "Speak now. Your words appear here."
+    } else if waiting {
+        when_paused
+    } else if on_pause() {
+        "Keep going…"
+    } else {
+        when_done
+    };
+    let stamp = last_change();
+
+    rsx! {
+        div { class: "modal-backdrop soft", onclick: move |_| state.set_modal(None),
+            div { class: "modal voice", role: "dialog", "aria-label": "Speak a page", onclick: move |e| e.stop_propagation(),
+                div { class: "voice-top",
+                    span { class: if words == 0 { "voice-mic listening" } else { "voice-mic" }, Icon { name: "mic", size: 18 } }
+                    div { class: "voice-top-text",
+                        h2 { "{heading}" }
+                        div { class: "modal-sub", "{hint}" }
+                    }
+                    button { class: "icon-btn", title: "Close (esc)", "aria-label": "Close", onclick: move |_| state.set_modal(None), Icon { name: "close", size: 15 } }
+                }
+                textarea {
+                    id: "voice-text",
+                    class: "voice-text",
+                    placeholder: "{example}",
+                    "aria-label": "What you said",
+                    spellcheck: "false",
+                    oninput: move |e: FormEvent| {
+                        text.set(e.value());
+                        last_change.set(crate::model::now_ms());
+                    },
+                    onkeydown: move |e: KeyboardEvent| {
+                        if e.key() == Key::Enter && e.modifiers().meta() {
+                            e.prevent_default();
+                            let spoken = text.peek().clone();
+                            finish.call(spoken);
+                        }
+                    },
+                }
+                div { class: "voice-wait",
+                    if waiting {
+                        span { key: "{stamp}", class: "voice-wait-bar" }
+                    }
+                }
+                div { class: "modal-foot voice-foot",
+                    button {
+                        class: if on_pause() { "switch on" } else { "switch" },
+                        role: "switch",
+                        "aria-checked": "{on_pause()}",
+                        "aria-label": "Make the page when I pause",
+                        onclick: move |_| {
+                            let on = !on_pause();
+                            on_pause.set(on);
+                            last_change.set(crate::model::now_ms());
+                            store::set_setting("voice_on_pause", if on { "on" } else { "off" });
+                        },
+                        span { class: "knob" }
+                    }
+                    span { class: "modal-foot-note", "Finish when I pause" }
+                    button {
+                        class: "primary-btn",
+                        id: "voice-create",
+                        disabled: words == 0,
+                        title: "⌘↩",
+                        onclick: move |_| {
+                            let spoken = text.peek().clone();
+                            finish.call(spoken);
+                        },
+                        "{button}"
+                    }
+                }
+                if !own_ears {
+                    p { class: "voice-help",
+                        "This uses the Mac's Dictation. If no words appear, turn Dictation on in "
+                        button { class: "link-btn", onclick: move |_| crate::dictation::open_settings(), "Keyboard settings" }
+                        "."
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Page history: earlier versions of a page, kept as it is edited, with a
+/// read-only preview of each and a way to put one back.
+#[component]
+pub fn HistoryModal() -> Element {
+    let state = use_context::<AppState>();
+    let page_id = state.ui.read().history.clone().unwrap_or_default();
+    let versions = use_hook({
+        let id = page_id.clone();
+        move || store::with(|s| s.load_versions(&id)).unwrap_or_default()
+    });
+    let mut picked = use_signal(|| 0usize);
+    // Versions kept in the same minute get seconds, so they can be told apart.
+    let labels: Vec<String> = {
+        let short: Vec<String> = versions.iter().map(|v| when::moment(v.at)).collect();
+        versions
+            .iter()
+            .zip(&short)
+            .map(|(v, s)| if short.iter().filter(|o| *o == s).count() > 1 { when::moment_exact(v.at) } else { s.clone() })
+            .collect()
+    };
+    let title = state.page_title(&page_id);
+    let shown = versions.get(picked()).cloned();
+
+    rsx! {
+        div { class: "modal-backdrop soft", onclick: move |_| state.set_modal(None),
+            div { class: "modal history", role: "dialog", "aria-label": "Page history", onclick: move |e| e.stop_propagation(),
+                div { class: "modal-head",
+                    div { class: "modal-head-text",
+                        h2 { "Page history" }
+                        div { class: "modal-sub", "{title}" }
+                    }
+                    button { class: "icon-btn", title: "Close", "aria-label": "Close", onclick: move |_| state.set_modal(None), Icon { name: "close", size: 15 } }
+                }
+                if versions.is_empty() {
+                    div { class: "history-empty",
+                        "No earlier versions yet. As you edit this page, a copy of it is kept at most every ten minutes."
+                    }
+                } else {
+                    div { class: "history-body",
+                        div { class: "history-list",
+                            for (i, v) in versions.iter().enumerate() {
+                                button {
+                                    key: "{v.id}",
+                                    class: if i == picked() { "history-item on" } else { "history-item" },
+                                    onclick: move |_| picked.set(i),
+                                    span { class: "hi-when", "{labels[i]}" }
+                                    span { class: "hi-meta", "{word_count(&v.blocks)} words" }
+                                }
+                            }
+                        }
+                        if let Some(v) = shown.clone() {
+                            div { class: "history-preview", key: "{v.id}",
+                                h1 { class: "hp-title", if v.title.trim().is_empty() { "Untitled" } else { "{v.title}" } }
+                                for b in v.blocks {
+                                    VersionBlock { key: "{b.id}", block: b }
+                                }
+                            }
+                        }
+                    }
+                    div { class: "modal-foot",
+                        span { class: "modal-foot-note", "The page as it is now is kept too, so you can switch back." }
+                        if let Some(v) = shown {
+                            button {
+                                class: "primary-btn",
+                                id: "restore-version",
+                                onclick: {
+                                    let page_id = page_id.clone();
+                                    move |_| state.restore_version(&page_id, v.id)
+                                },
+                                "Restore this version"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn word_count(blocks: &[Block]) -> usize {
+    blocks.iter().map(|b| b.plain_text().split_whitespace().count()).sum()
+}
+
+/// One block of a kept version, drawn read-only.
+#[component]
+fn VersionBlock(block: Block) -> Element {
+    let state = use_context::<AppState>();
+    let indent = block.indent.min(8);
+    let class = format!("hp-block hp-{}{}", block.kind.as_str(), if block.checked { " checked" } else { "" });
+    match block.kind {
+        BlockKind::Divider => rsx! { hr { class: "hp-divider" } },
+        BlockKind::Drawing => rsx! { div { class: "{class}", style: "--indent: {indent}", "Drawing" } },
+        BlockKind::Image => rsx! { div { class: "{class}", style: "--indent: {indent}", "Image" } },
+        BlockKind::Table => rsx! { div { class: "{class}", style: "--indent: {indent}", "Table: {block.plain_text()}" } },
+        BlockKind::PageLink => {
+            let name = block.target.as_deref().map(|t| state.page_title(t)).unwrap_or_else(|| "Page".into());
+            rsx! { div { class: "{class}", style: "--indent: {indent}", "{name}" } }
+        }
+        kind => {
+            let html = crate::inline::to_html(kind, &block.text);
+            rsx! { div { class: "{class}", style: "--indent: {indent}", dangerous_inner_html: "{html}" } }
+        }
+    }
+}
+
+#[component]
+pub fn TrashModal() -> Element {
+    let state = use_context::<AppState>();
+    let mut confirm = use_signal(|| None::<String>);
+    let space = state.ui.read().space.clone();
+    let pages = state.pages.read();
+    let mut trashed: Vec<Page> = pages
+        .values()
+        .filter(|p| p.trashed && p.space_id == space && p.parent_id.as_ref().and_then(|pid| pages.get(pid)).is_none_or(|parent| !parent.trashed))
+        .cloned()
+        .collect();
+    drop(pages);
+    trashed.sort_by_key(|p| std::cmp::Reverse(p.updated_at));
+
+    rsx! {
+        div { class: "modal-backdrop soft", onclick: move |_| state.set_modal(None),
+            div { class: "modal trash", onclick: move |e| e.stop_propagation(),
+                div { class: "modal-head",
+                    h2 { "Trash" }
+                    button { class: "icon-btn", title: "Close", "aria-label": "Close", onclick: move |_| state.set_modal(None), Icon { name: "close", size: 15 } }
+                }
+                if trashed.is_empty() {
+                    div { class: "menu-empty", "Trash is empty." }
+                }
+                div { class: "trash-list",
+                    for p in trashed {
+                        div { key: "{p.id}", class: "trash-item",
+                            span { class: "tree-icon", PageIcon { icon: p.icon.clone(), size: 16 } }
+                            span { class: "trash-title", "{p.display_title()}" }
+                            button {
+                                class: "ghost-btn",
+                                onclick: {
+                                    let id = p.id;
+                                    move |_| state.restore_page(&id)
+                                },
+                                "Restore"
+                            }
+                            if confirm.read().as_deref() == Some(p.id.as_str()) {
+                                button {
+                                    class: "danger-btn",
+                                    onclick: {
+                                        let id = p.id.clone();
+                                        move |_| {
+                                            state.delete_forever(&id);
+                                            confirm.set(None);
+                                        }
+                                    },
+                                    "Delete forever?"
+                                }
+                            } else {
+                                button {
+                                    class: "ghost-btn",
+                                    title: "Permanently delete",
+                                    onclick: {
+                                        let id = p.id.clone();
+                                        move |_| confirm.set(Some(id.clone()))
+                                    },
+                                    "Delete"
+                                }
+                            }
+                        }
+                    }
+                }
+                p { class: "note pad", "Pages in Trash can be restored. “Delete forever” removes them from this Mac and can't be undone." }
+            }
+        }
+    }
+}

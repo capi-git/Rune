@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Drawing</title>
+    <style>
+      html,
+      body,
+      #root {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+      }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+      }
+      /* The expand button sits with Excalidraw's own top-right controls. */
+      .n2-expand {
+        width: var(--lg-button-size, 2.25rem);
+        height: var(--lg-button-size, 2.25rem);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: none;
+        border-radius: var(--border-radius-lg, 0.5rem);
+        background: var(--island-bg-color, #fff);
+        box-shadow: var(--shadow-island, 0 0 0 1px rgba(0, 0, 0, 0.08));
+        color: var(--icon-fill-color, #1b1b1f);
+        cursor: pointer;
+        padding: 0;
+      }
+      .n2-expand:hover {
+        background: var(--button-hover-bg, #f1f0ff);
+      }
+      .n2-expand:active {
+        transform: scale(0.96);
+      }
+      .n2-expand svg {
+        width: 16px;
+        height: 16px;
+      }
+    </style>
+    <script>
+      // Where the library finds its fonts and lazily loaded code: next to this page.
+      window.EXCALIDRAW_ASSET_PATH = new URL('vendor/', location.href).href;
+    </script>
+    <script src="vendor/react.production.min.js"></script>
+    <script src="vendor/react-dom.production.min.js"></script>
+    <script src="vendor/excalidraw.production.min.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script src="frame.js"></script>
+  </body>
+</html>

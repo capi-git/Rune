@@ -1,0 +1,140 @@
+/* ---------- icons (src/ui/icons.rs) ---------- */
+.theme-light,
+.theme-system {
+  --icon-gray: #7a7f87;
+  --icon-gray-soft: rgba(122, 127, 135, 0.13);
+  --icon-brown: #9a6a4a;
+  --icon-brown-soft: rgba(154, 106, 74, 0.13);
+  --icon-orange: #e0742a;
+  --icon-orange-soft: rgba(224, 116, 42, 0.13);
+  --icon-yellow: #cf9418;
+  --icon-yellow-soft: rgba(207, 148, 24, 0.13);
+  --icon-green: #3c9862;
+  --icon-green-soft: rgba(60, 152, 98, 0.13);
+  --icon-blue: #3a7dd2;
+  --icon-blue-soft: rgba(58, 125, 210, 0.13);
+  --icon-purple: #8858d4;
+  --icon-purple-soft: rgba(136, 88, 212, 0.13);
+  --icon-pink: #cf4f97;
+  --icon-pink-soft: rgba(207, 79, 151, 0.13);
+  --icon-red: #d94848;
+  --icon-red-soft: rgba(217, 72, 72, 0.13);
+}
+
+.theme-dark {
+  --icon-gray: #a4a9b1;
+  --icon-gray-soft: rgba(164, 169, 177, 0.17);
+  --icon-brown: #c99c7c;
+  --icon-brown-soft: rgba(201, 156, 124, 0.17);
+  --icon-orange: #f39b5e;
+  --icon-orange-soft: rgba(243, 155, 94, 0.17);
+  --icon-yellow: #f0c453;
+  --icon-yellow-soft: rgba(240, 196, 83, 0.17);
+  --icon-green: #6cc894;
+  --icon-green-soft: rgba(108, 200, 148, 0.17);
+  --icon-blue: #74a8ef;
+  --icon-blue-soft: rgba(116, 168, 239, 0.17);
+  --icon-purple: #b393f2;
+  --icon-purple-soft: rgba(179, 147, 242, 0.17);
+  --icon-pink: #ee8dc5;
+  --icon-pink-soft: rgba(238, 141, 197, 0.17);
+  --icon-red: #f47c7c;
+  --icon-red-soft: rgba(244, 124, 124, 0.17);
+}
+
+@media (prefers-color-scheme: dark) {
+  .theme-system {
+    --icon-gray: #a4a9b1;
+    --icon-gray-soft: rgba(164, 169, 177, 0.17);
+    --icon-brown: #c99c7c;
+    --icon-brown-soft: rgba(201, 156, 124, 0.17);
+    --icon-orange: #f39b5e;
+    --icon-orange-soft: rgba(243, 155, 94, 0.17);
+    --icon-yellow: #f0c453;
+    --icon-yellow-soft: rgba(240, 196, 83, 0.17);
+    --icon-green: #6cc894;
+    --icon-green-soft: rgba(108, 200, 148, 0.17);
+    --icon-blue: #74a8ef;
+    --icon-blue-soft: rgba(116, 168, 239, 0.17);
+    --icon-purple: #b393f2;
+    --icon-purple-soft: rgba(179, 147, 242, 0.17);
+    --icon-pink: #ee8dc5;
+    --icon-pink-soft: rgba(238, 141, 197, 0.17);
+    --icon-red: #f47c7c;
+    --icon-red-soft: rgba(244, 124, 124, 0.17);
+  }
+}
+
+.ico {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+  flex-shrink: 0;
+  vertical-align: middle;
+}
+.ico svg {
+  display: block;
+}
+
+/* A page or callout icon: the glyph in its colour. */
+.page-ico {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+  flex-shrink: 0;
+  color: var(--c, currentColor);
+}
+.page-ico.none {
+  color: var(--text-3, currentColor);
+}
+/* The big icon at the top of a page: the glyph on a soft tile of its colour. */
+.page-ico.large {
+  width: 72px;
+  height: 72px;
+  border-radius: 18px;
+  background: var(--c-soft, rgba(128, 128, 128, 0.12));
+}
+
+/* Icon picker helpers */
+.ip-grid {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 2px;
+}
+.ip-cell {
+  border: none;
+  background: transparent;
+  height: 36px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--c, var(--text-2, currentColor));
+  padding: 0;
+}
+.ip-cell:hover {
+  background: var(--hover, rgba(128, 128, 128, 0.1));
+}
+.ip-cell.on {
+  background: var(--c-soft, rgba(128, 128, 128, 0.14));
+}
+.ip-colors {
+  display: flex;
+  gap: 6px;
+  padding: 8px 4px 2px;
+}
+.ip-swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  border: none;
+  cursor: pointer;
+  background: var(--c);
+  padding: 0;
+}
+.ip-swatch.on {
+  box-shadow: 0 0 0 2px var(--bg, #fff), 0 0 0 4px var(--c);
+}
