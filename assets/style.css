@@ -6582,3 +6582,50 @@ body.ev-dragging .cal-event {
     transition: none;
   }
 }
+
+/* ---------- the event panel: the link to join the call, in a field of its own ---------- */
+.ed-link-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 4px 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+.ed-link-row:focus-within {
+  border-color: color-mix(in srgb, var(--text) 35%, transparent);
+}
+.ed-link-icon {
+  display: inline-flex;
+  color: var(--text-3);
+  flex-shrink: 0;
+}
+.ed-link {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: none;
+  outline: none;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 13.5px;
+  text-overflow: ellipsis;
+}
+.ed-link::placeholder {
+  color: var(--text-3);
+}
+
+/* ---------- the question on a meeting's notes: the page of the last time ---------- */
+.place-before {
+  color: var(--text-3);
+  white-space: nowrap;
+}
+.place-same {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

@@ -28,7 +28,7 @@ pub struct Version {
 /// The form of the notes file that this program writes. Make it one larger
 /// with each change that an older program would damage: a column it would
 /// write back empty, a kind of line it does not know.
-pub const SCHEMA: i64 = 4;
+pub const SCHEMA: i64 = 5;
 
 impl Store {
     /// `~/Library/Application Support/Notion 2.0/workspace.db`, or the file named
@@ -190,6 +190,12 @@ impl Store {
         if !has_repeat_column {
             self.conn.execute_batch("ALTER TABLE events ADD COLUMN repeat TEXT NOT NULL DEFAULT ''")?;
         }
+        // The link to join the call of an event (form 5 of the file).
+        let has_join_column: bool =
+            self.conn.prepare("SELECT 1 FROM pragma_table_info('events') WHERE name='join_url'")?.exists([])?;
+        if !has_join_column {
+            self.conn.execute_batch("ALTER TABLE events ADD COLUMN join_url TEXT NOT NULL DEFAULT ''")?;
+        }
         let has_cover_column: bool =
             self.conn.prepare("SELECT 1 FROM pragma_table_info('pages') WHERE name='cover'")?.exists([])?;
         if !has_cover_column {
@@ -266,7 +272,7 @@ impl Store {
             .optional()?
             .unwrap_or_default();
         let mut stmt = self.conn.prepare(
-            "SELECT id, space_id, title, start_ms, end_ms, all_day, color, notes, page_id, created_at, updated_at, remind_min, repeat
+            "SELECT id, space_id, title, start_ms, end_ms, all_day, color, notes, page_id, created_at, updated_at, remind_min, repeat, join_url
              FROM events ORDER BY start_ms",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -279,6 +285,7 @@ impl Store {
                 all_day: r.get::<_, i64>(5)? != 0,
                 color: r.get(6)?,
                 notes: r.get(7)?,
+                join: r.get(13)?,
                 page_id: r.get(8)?,
                 created_at: r.get(9)?,
                 updated_at: r.get(10)?,
@@ -299,10 +306,10 @@ impl Store {
 
     pub fn save_event(&self, e: &Event) -> rusqlite::Result<()> {
         self.conn.execute(
-            "INSERT INTO events(id, space_id, title, start_ms, end_ms, all_day, color, notes, page_id, created_at, updated_at, remind_min, repeat)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            "INSERT INTO events(id, space_id, title, start_ms, end_ms, all_day, color, notes, page_id, created_at, updated_at, remind_min, repeat, join_url)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(id) DO UPDATE SET space_id=?2, title=?3, start_ms=?4, end_ms=?5, all_day=?6,
-                color=?7, notes=?8, page_id=?9, updated_at=?11, remind_min=?12, repeat=?13",
+                color=?7, notes=?8, page_id=?9, updated_at=?11, remind_min=?12, repeat=?13, join_url=?14",
             params![
                 e.id,
                 e.space_id,
@@ -316,7 +323,8 @@ impl Store {
                 e.created_at,
                 e.updated_at,
                 e.remind,
-                crate::repeat::Repeat::to_json(e.repeat.as_ref())
+                crate::repeat::Repeat::to_json(e.repeat.as_ref()),
+                e.join
             ],
         )?;
         Ok(())

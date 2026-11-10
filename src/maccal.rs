@@ -71,6 +71,7 @@ impl MacEvent {
         e.color = color.to_string();
         // Its place, and under it the address to join by (the views look for it there).
         e.notes = [self.location.as_str(), self.join.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("\n");
+        e.join = self.join.clone();
         e.page_id = page;
         e
     }

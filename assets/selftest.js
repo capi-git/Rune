@@ -2006,6 +2006,7 @@ await run('Meeting notes in a page you choose', async () => {
   check('"No page" puts it back at the top of the list', await until(() => !looseCrumbs().includes('Getting Started') && treeItem('Loose page'), 3000), looseCrumbs().join(' / '));
   $('#meeting-place-done').click();
   await until(() => !$('#meeting-place'));
+  T().command('forget_meeting_slots');
 });
 
 await run('A meeting remembers its page', async () => {
@@ -2060,6 +2061,83 @@ await run('A meeting remembers its page', async () => {
   const list = await until(() => shownPane('Reading List'));
   const links = () => $$('.block-row.kind-page', list).filter((r) => r.textContent.includes('Apollo standup – ')).length;
   check('That page lists the two under "Meetings"', await until(() => links() === 2 && $$('.block-row.kind-heading2', list).some((r) => r.textContent.trim() === 'Meetings'), 3000), String(links()));
+  // The event goes away again, so that the checks after this one start clean.
+  $$('.tile').find((t) => t.title.startsWith('Calendar')).click();
+  await until(() => $('.calendar'));
+  $$('.cal-toolbar .segmented button').find((b) => b.textContent === 'Week').click();
+  await until(() => $('.cal-week:not(.one-day)'));
+  $('.cal-nav .secondary-btn').click();
+  const made = await until(() => $$('.cal-event[data-event]').find((e) => e.querySelector('.ev-title')?.textContent === 'Apollo standup'), 3000);
+  made?.click();
+  const del = await until(() => $('.cal-editor .ghost-btn.danger-text'), 3000);
+  del?.click();
+  await until(() => !$$('.cal-event[data-event]').some((e) => e.querySelector('.ev-title')?.textContent === 'Apollo standup'), 3000);
+  T().command('forget_meeting_slots');
+});
+
+await run('A meeting with no event is known by its time', async () => {
+  await oneTab();
+  T().command('forget_meeting_slots');
+  await wait(60);
+  for (let i = 0; i < 8 && $$('.pane').length > 1; i++) {
+    const n = $$('.pane').length;
+    T().command('close_split');
+    await until(() => $$('.pane').length < n, 1500);
+  }
+  await oneTab();
+  const dated = / – [A-Z][a-z]{2} \d{1,2}, \d{4}$/;
+  const named = (pane) => pane.querySelector('.title-input')?.value || '';
+  const crumbsOf = (pane) => $$('.pagebar .crumb', pane).map((c) => c.textContent.trim());
+  const seen = new Set();
+  // The notes of a meeting that starts now, with no event on the calendar.
+  const meet = async () => {
+    T().command('meeting_notes');
+    const pane = await until(() => $$('.pane').find((p) => dated.test(named(p)) && p.offsetParent && !seen.has(p.dataset.pane)), 4000);
+    if (pane) seen.add(pane.dataset.pane);
+    return pane;
+  };
+  const ask = async (pane) => {
+    $('.pagebar .icon-btn[title="Page options"]', pane).click();
+    $('#move-page', await until(() => $('.page-menu'))).click();
+    return until(() => !$('.page-menu') && $('#meeting-place', pane), 3000);
+  };
+
+  // The first one: the person says where its notes are kept.
+  const first = await meet();
+  check('The notes of a meeting with no event start in "Meeting notes"', first && named(first).startsWith('Meeting – ') && crumbsOf(first).includes('Meeting notes'), first && crumbsOf(first).join(' / '));
+  if (!first) return;
+  const place = await ask(first);
+  check('The first time, there is no page to propose', place && !$('.place-same', first));
+  place.value = [...place.options].find((o) => o.textContent.trim() === 'Reading List').value;
+  place.dispatchEvent(new Event('change', { bubbles: true }));
+  await until(() => crumbsOf(first).includes('Reading List'));
+  // The person gives these notes a name.
+  const title = first.querySelector('.title-input');
+  title.focus();
+  title.value = named(first).replace(/^Meeting/, 'Apollo standup');
+  title.dispatchEvent(new Event('input', { bubbles: true }));
+  await wait(150);
+  $('#meeting-place-done', first).click();
+  await until(() => !$('#meeting-place'));
+
+  // The next one at this time: the name is kept, and the page of the last time is one click away.
+  const second = await meet();
+  check('The next meeting at that time takes the name the person gave, and still starts in "Meeting notes"', second && named(second).startsWith('Apollo standup – ') && crumbsOf(second).includes('Meeting notes'), second && `${named(second)} in ${crumbsOf(second).join(' / ')}`);
+  if (!second) return;
+  await ask(second);
+  const same = await until(() => $('.place-same', second), 3000);
+  check('Its question proposes the page of the last time', same && same.textContent.trim() === 'Reading List' && $('.place-before', second), same?.textContent);
+  await wait(150);
+  snap('meeting-slot');
+  same?.click();
+  check('One click keeps the notes there, and the page says that the next ones go there by themselves', await until(() => crumbsOf(second).includes('Reading List') && !$('.place-same', second) && $('#meeting-place-kept', second)?.textContent.includes('by themselves'), 3000), $('#meeting-place-kept', second)?.textContent);
+  $('#meeting-place-done', second).click();
+  await until(() => !$('#meeting-place'));
+
+  // The third: by itself.
+  const third = await meet();
+  check('After two choices, the notes of the next meeting at that time start in that page', third && named(third).startsWith('Apollo standup – ') && crumbsOf(third).includes('Reading List') && !crumbsOf(third).includes('Meeting notes') && !$('#meeting-place', third), third && crumbsOf(third).join(' / '));
+  T().command('forget_meeting_slots');
 });
 
 await run('Meeting recap by voice', async () => {
@@ -2101,6 +2179,7 @@ await run('Meeting recap by voice', async () => {
 });
 
 await run('Listen to a meeting', async () => {
+  T().command('forget_meeting_slots');
   await oneTab();
   const datedName = / – [A-Z][a-z]{2} \d{1,2}, \d{4}$/;
   T().command('meeting_notes');
@@ -3036,8 +3115,27 @@ await run('Join a meeting from its event', async () => {
   const ev = () => $$('.cal-event[data-event]').find((e) => e.querySelector('.ev-title')?.textContent === 'Sync call');
   (await until(ev)).click();
   await until(() => $('.cal-editor #ev-notes'));
-  check('An event with no meeting address has no Join button', !$('#ev-join'));
+  check('An event has a field of its own for the meeting link, empty at first, and no Join button', $('#ev-link') && $('#ev-link').value === '' && !$('#ev-join') && $('#ev-link').getBoundingClientRect().bottom <= $('#ev-notes').getBoundingClientRect().top);
   const link = 'https://us02web.zoom.us/j/8123456789?pwd=abc';
+  // The field: a link typed there gives the Join button beside it.
+  const field = $('#ev-link');
+  field.value = 'teams.example.com/meet/standup';
+  field.dispatchEvent(new Event('input', { bubbles: true }));
+  const beside = await until(() => $('.ed-link-row #ev-join'), 3000);
+  delete document.body.dataset.opened;
+  beside?.click();
+  check('A link in that field gives Join beside it, and Join opens it (with https when it was left out)', beside && (await until(() => document.body.dataset.opened === 'https://teams.example.com/meet/standup', 3000)), document.body.dataset.opened);
+  $('#listen-no')?.click();
+  await oneTab();
+  await toCalendar('Week');
+  (await until(ev)).click();
+  await until(() => $('.cal-editor #ev-link')?.value === 'teams.example.com/meet/standup');
+  check('The link stays in its field, not in the notes', $('#ev-notes').value === '');
+  const again = $('#ev-link');
+  again.value = '';
+  again.dispatchEvent(new Event('input', { bubbles: true }));
+  await until(() => !$('#ev-join'));
+  // An older event has its link in its notes: it still joins, and the field shows it.
   const notes = $('#ev-notes');
   notes.value = `Agenda in the doc.\nJoin: <${link}>`;
   notes.dispatchEvent(new Event('input', { bubbles: true }));

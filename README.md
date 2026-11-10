@@ -38,14 +38,19 @@ It needs a Mac with Apple silicon and macOS 12 or later.
 6. **Calendar.** Press the calendar tile. Press **New event** and type it in
    words, for example `Lunch with Sam Friday 1pm`, then Return. Drag an event
    to move it. The **Day** view shows the notes of an event beside the day.
+   An event has a field for its meeting link (Teams, Zoom, Meet); **Join**
+   beside it opens the call and the notes of the event.
 7. **To-dos with a day.** On a to-do, press **Give it a day**. It then shows
    on Home and in the calendar. Drag it onto a time to plan it.
 8. **Meetings.** When a Teams meeting starts, Rune makes a notes page for it
    (you can turn this off in Settings → Notifications). **Listen** on that
    page writes down what is said and, with an AI connected, writes the notes.
    Rune never listens by itself. When the meeting is over, the page asks which
-   page to keep the notes in. If the meeting is an event in your calendar, the
-   next meeting of the same name goes there by itself.
+   page to keep the notes in. Rune learns from your answer: the next meeting
+   with the same calendar event name goes there by itself. A meeting with no
+   calendar event is known by its day and its start time: the second time you
+   get the same page as a one-click proposal, and after that the notes go
+   there by themselves.
 9. **Spaces.** A space is a separate set of pages (work, home, a project).
    The dots at the bottom of the sidebar are your spaces: click one, or move
    two fingers sideways on the sidebar. Click the space name at the top to

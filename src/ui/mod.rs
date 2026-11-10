@@ -577,7 +577,12 @@ fn PlaceBar(page: String) -> Element {
     let places = state.meeting_places(&page);
     let what = if state.is_notes_page(&page) { "Keep these notes in" } else { "Keep this page in" };
     // A meeting remembers its page: the next one of the same name starts there.
-    let kept = state.next_notes_go_here(&page).map(|name| format!("The next “{name}” notes go here too.")).unwrap_or_default();
+    let (before, by_itself) = state.slot_of_page(&page);
+    let kept = match state.next_notes_go_here(&page) {
+        Some(name) => format!("The next “{name}” notes go here too."),
+        None if by_itself => "The notes of a meeting at this time go here by themselves.".to_string(),
+        None => String::new(),
+    };
     let (p1, p2) = (page.clone(), page.clone());
     rsx! {
         div { class: "listen-bar place-bar", role: "group", "aria-label": "{what}",
@@ -591,6 +596,23 @@ fn PlaceBar(page: String) -> Element {
                 option { value: "", selected: here.is_empty(), "No page (top of the list)" }
                 for (id, title, depth) in places {
                     option { key: "{id}", value: "{id}", selected: id == here, "{\"\u{2003}\".repeat(depth)}{title}" }
+                }
+            }
+            // A meeting at this time was kept in these pages before: one click.
+            if !before.is_empty() {
+                span { class: "place-before", "Last time:" }
+                for (home, title) in before {
+                    button {
+                        key: "{home}",
+                        class: "secondary-btn small place-same",
+                        "data-home": "{home}",
+                        title: "Keep these notes in {title}, as the last time",
+                        onclick: {
+                            let (page, home) = (page.clone(), home.clone());
+                            move |_| state.keep_page_in(&page, &home)
+                        },
+                        "{title}"
+                    }
                 }
             }
             span { class: "listen-latest", id: "meeting-place-kept", "{kept}" }

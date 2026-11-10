@@ -188,7 +188,7 @@ pub fn fire_time(e: &Event) -> Option<i64> {
 
 fn reminder_text(e: &Event) -> String {
     // A meeting with an address to join by: a click on the reminder joins it.
-    if !e.all_day && crate::meeting::join_link(&e.notes).is_some() {
+    if !e.all_day && e.join_url().is_some() {
         return format!("{} · Click to join", reminder_when(e));
     }
     reminder_when(e)

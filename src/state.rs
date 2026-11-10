@@ -1369,6 +1369,42 @@ fn meeting_homes() -> HashMap<String, Id> {
     store::setting("meeting_homes").and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
 }
 
+/// The meetings that come again at one time of the day (slots.rs).
+fn meeting_slots() -> Vec<crate::slots::Slot> {
+    store::setting("meeting_slots").and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
+fn save_meeting_slots(slots: &[crate::slots::Slot]) {
+    store::set_setting("meeting_slots", &serde_json::to_string(slots).unwrap_or_default());
+}
+
+/// The notes pages of meetings with no calendar event (the newest few
+/// hundred): the day (0 Monday) and the minute each started at, and the
+/// name the app gave the page.
+fn slot_pages() -> Vec<(Id, u32, i64, String)> {
+    store::setting("meeting_slot_pages").and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
+fn remember_slot_page(page: &str, day: u32, minute: i64, title: &str) {
+    let mut pages = slot_pages();
+    pages.retain(|(p, ..)| p != page);
+    pages.push((page.to_string(), day, minute, title.to_string()));
+    let from = pages.len().saturating_sub(300);
+    store::set_setting("meeting_slot_pages", &serde_json::to_string(&pages[from..]).unwrap_or_default());
+}
+
+/// The day of the week (0 Monday) and the minute of the day of a moment.
+fn day_and_minute(ms: i64) -> (u32, i64) {
+    let at = when::local(ms);
+    (chrono::Datelike::weekday(&at).num_days_from_monday(), i64::from(chrono::Timelike::hour(&at)) * 60 + i64::from(chrono::Timelike::minute(&at)))
+}
+
+/// The name of a meeting from the name of its notes page ("Apollo standup –
+/// Nov 10, 2026" gives "Apollo standup").
+fn name_before_date(title: &str) -> &str {
+    title.rsplit_once(" – ").map(|(name, _)| name).unwrap_or(title).trim()
+}
+
 fn set_meeting_home(name: &str, home: Option<&str>) {
     let mut homes = meeting_homes();
     let key = name.trim().to_lowercase();
@@ -2048,7 +2084,7 @@ impl AppState {
     /// listen; the app never listens by itself.
     pub fn join_event(mut self, id: &str) {
         let Some(e) = self.any_event(id) else { return };
-        let Some(link) = crate::meeting::join_link(&e.notes) else { return };
+        let Some(link) = e.join_url() else { return };
         self.open_url(&link);
         let Some(page) = self.event_page(id) else { return };
         // This page is the notes of the meeting that starts now: when the
@@ -2075,7 +2111,7 @@ impl AppState {
     /// The reminder of an event was clicked: join its meeting when it has
     /// an address to join by, else show the event.
     pub fn reminder_clicked(self, id: &str) {
-        let joins = self.any_event(id).is_some_and(|e| crate::meeting::join_link(&e.notes).is_some());
+        let joins = self.any_event(id).is_some_and(|e| e.join_url().is_some());
         if joins { self.join_event(id) } else { self.show_event(id) }
     }
 
@@ -4428,18 +4464,37 @@ impl AppState {
             on.sort_by_key(|e| (e.start - now).abs());
             on.into_iter().next()
         };
-        let name = match (&event, app) {
+        let plain_name = match (&event, app) {
             (Some(e), _) => e.display_title().to_string(),
             (None, Some("Microsoft Teams")) => "Teams meeting".to_string(),
             (None, Some(app)) => format!("{app} meeting"),
             (None, None) => "Meeting".to_string(),
         };
+        // With no event on the calendar: the meeting that comes at this time
+        // of this day, if the person said before where its notes are kept.
+        let (day, minute) = day_and_minute(now);
+        let mut slots = meeting_slots();
+        let slot = if event.is_none() { self.slot_found(&slots, day, minute) } else { crate::slots::Found::Nothing };
+        let likely = match &slot {
+            crate::slots::Found::Keep(i) => Some(*i),
+            crate::slots::Found::Propose(list) if list.len() == 1 => Some(list[0]),
+            _ => None,
+        };
+        // The name the person gave its notes the last time, if they gave one.
+        let name = likely.and_then(|i| self.slot_name(&slots[i])).unwrap_or_else(|| plain_name.clone());
         let title = format!("{name} – {}", when::date_of(now).format("%b %-d, %Y"));
+        let plain_title = format!("{plain_name} – {}", when::date_of(now).format("%b %-d, %Y"));
         let color = event.as_ref().map(|e| e.color.clone()).unwrap_or_else(|| "blue".into());
 
         // Where the notes of this meeting were kept the last time (the
         // person chose it then); for a new meeting, "Meeting notes".
-        let parent = event.as_ref().and_then(|e| self.meeting_home(e.display_title())).unwrap_or_else(|| self.meetings_page());
+        let kept = match (&event, &slot) {
+            (Some(e), _) => self.meeting_home(e.display_title()),
+            (None, crate::slots::Found::Keep(i)) => Some(slots[*i].home.clone()),
+            _ => None,
+        };
+        let kept_title = kept.as_ref().map(|home| self.page_title(home));
+        let parent = kept.unwrap_or_else(|| self.meetings_page());
         // Newest first there.
         let before_first = children_of(&self.pages.peek(), Some(&parent)).first().map(|p| p.position - 1.0);
         let id = self.create_page(Some(parent.clone()));
@@ -4468,9 +4523,19 @@ impl AppState {
         // at the end of its event, or when the watcher says it ended, or
         // when listening stops. With none of those, after an hour.
         let over = event.as_ref().map(|e| e.end).filter(|end| *end > now).unwrap_or(now + when::HOUR);
+        match &event {
+            Some(e) => remember_meeting_name(&id, e.display_title()),
+            None => {
+                remember_slot_page(&id, day, minute, &plain_title);
+                if let crate::slots::Found::Keep(i) = slot {
+                    crate::slots::seen(&mut slots, i, day, minute, &id, now);
+                    save_meeting_slots(&slots);
+                }
+            }
+        }
         self.ask_place(&id, over);
-        if let Some(e) = &event {
-            remember_meeting_name(&id, e.display_title());
+        if let Some(home) = kept_title {
+            self.toast(format!("These notes are in “{home}”, as before"));
         }
         // A one-off event of the app with no notes page yet gets this one.
         if let Some(e) = event.filter(|e| e.repeat.is_none() && e.page_id.is_none() && !e.id.starts_with(crate::maccal::PREFIX)) {
@@ -4600,6 +4665,8 @@ impl AppState {
         };
         // The notes of the next meeting of this name start in the same place.
         let name = self.meeting_name(page).filter(|_| notes);
+        // A meeting with no event on the calendar is known by its day and its time.
+        let slot = slot_pages().into_iter().rev().find(|(p, ..)| p == page).filter(|_| notes && name.is_none());
         if home.is_empty() {
             if from.is_some() {
                 unlink(&from);
@@ -4607,6 +4674,11 @@ impl AppState {
             }
             if let Some(name) = &name {
                 set_meeting_home(name, None);
+            }
+            if let Some((_, day, minute, _)) = &slot {
+                let mut slots = meeting_slots();
+                crate::slots::forget(&mut slots, *day, *minute);
+                save_meeting_slots(&slots);
             }
             return;
         }
@@ -4616,6 +4688,13 @@ impl AppState {
         }
         if let Some(name) = &name {
             set_meeting_home(name, Some(home));
+        }
+        if let Some((_, day, minute, _)) = &slot {
+            if from.as_deref() != Some(home) {
+                let mut slots = meeting_slots();
+                crate::slots::learn(&mut slots, *day, *minute, home, page, now_ms());
+                save_meeting_slots(&slots);
+            }
         }
         if from.as_deref() == Some(home) {
             return;
@@ -4655,8 +4734,59 @@ impl AppState {
         (self.meeting_home(&name).as_deref() == Some(here.as_str())).then_some(name)
     }
 
+    /// What is known about a meeting at this day and time, with the pages
+    /// that are gone (or in another space) left out.
+    fn slot_found(&self, slots: &[crate::slots::Slot], day: u32, minute: i64) -> crate::slots::Found {
+        let space = self.ui.peek().space.clone();
+        let pages = self.pages.peek();
+        let live = |i: &usize| pages.get(&slots[*i].home).is_some_and(|p| !p.trashed && p.space_id == space);
+        match crate::slots::find(slots, day, minute) {
+            crate::slots::Found::Keep(i) if live(&i) => crate::slots::Found::Keep(i),
+            crate::slots::Found::Propose(list) => {
+                let list: Vec<usize> = list.into_iter().filter(live).collect();
+                if list.is_empty() { crate::slots::Found::Nothing } else { crate::slots::Found::Propose(list) }
+            }
+            _ => crate::slots::Found::Nothing,
+        }
+    }
+
+    /// The name the person gave the last notes of a meeting that comes
+    /// again (None while that page has the name the app gave it).
+    fn slot_name(&self, slot: &crate::slots::Slot) -> Option<String> {
+        let (_, _, _, plain) = slot_pages().into_iter().rev().find(|(p, ..)| *p == slot.page)?;
+        let title = self.pages.peek().get(&slot.page).filter(|p| !p.trashed)?.title.clone();
+        let name = name_before_date(&title);
+        (!name.is_empty() && name != name_before_date(&plain)).then(|| name.to_string())
+    }
+
+    /// For the notes of a meeting with no calendar event: the pages its
+    /// notes were kept in before at this day and time (to offer with one
+    /// click), and whether the next notes go where these are by themselves.
+    pub fn slot_of_page(&self, page: &str) -> (Vec<(Id, String)>, bool) {
+        let Some((_, day, minute, _)) = slot_pages().into_iter().rev().find(|(p, ..)| p == page) else { return (Vec::new(), false) };
+        let here = self.pages.peek().get(page).and_then(|p| p.parent_id.clone());
+        let slots = meeting_slots();
+        match self.slot_found(&slots, day, minute) {
+            crate::slots::Found::Keep(i) => {
+                let home = slots[i].home.clone();
+                if here.as_deref() == Some(home.as_str()) { (Vec::new(), true) } else { (vec![(home.clone(), self.page_title(&home))], false) }
+            }
+            crate::slots::Found::Propose(list) => (
+                list.into_iter().map(|i| slots[i].home.clone()).filter(|home| here.as_deref() != Some(home.as_str())).map(|home| (home.clone(), self.page_title(&home))).collect(),
+                false,
+            ),
+            crate::slots::Found::Nothing => (Vec::new(), false),
+        }
+    }
+
     /// From `from` on, this page asks which page to keep it in.
     fn ask_place(mut self, page: &str, from: i64) {
+        // Notes that are already in the page the person chose for meetings
+        // of this name do not ask again ("Move to…" in the menu of the page
+        // still does).
+        if self.next_notes_go_here(page).is_some() || self.slot_of_page(page).1 {
+            return;
+        }
         let mut asks = self.place_asks.peek().clone();
         asks.retain(|(p, _)| p != page);
         asks.push((page.to_string(), from));
@@ -6353,6 +6483,11 @@ impl AppState {
             "calendar" => self.navigate(Route::Calendar),
             "graph" => self.navigate(Route::Graph),
             "close_split" => self.close_pane(None),
+            // (For the self-test: what was learned about meetings by their time is forgotten.)
+            "forget_meeting_slots" => {
+                save_meeting_slots(&[]);
+                store::set_setting("meeting_homes", "");
+            }
             "space_next" => self.step_space(1),
             "space_prev" => self.step_space(-1),
             "trash" => self.set_modal(Some(Modal::Trash)),
@@ -6543,6 +6678,7 @@ mod tests {
             all_day,
             color: "blue".into(),
             notes: String::new(),
+            join: String::new(),
             page_id: None,
             remind: None,
             repeat: None,

@@ -334,7 +334,7 @@ fn DayNotes(event: Event) -> Element {
     let listening = state.listening.read().is_some();
     // A meeting can be listened to from a little before it starts until it ends.
     let can_listen = !event.all_day && !listening && now >= event.start - 15 * MINUTE && now < event.end;
-    let joins = crate::meeting::join_link(&event.notes).is_some();
+    let joins = event.join_url().is_some();
     let (i1, i2, i3) = (id.clone(), id.clone(), id.clone());
     let i4 = id.clone();
     rsx! {
@@ -757,7 +757,7 @@ fn MacEventPanel(event: Event) -> Element {
     };
     let has_page = event.page_id.is_some();
     // Its place, without the address to join by (that is the button).
-    let joins = crate::meeting::join_link(&event.notes).is_some();
+    let joins = event.join_url().is_some();
     let place = event.notes.lines().filter(|l| crate::meeting::join_link(l).is_none()).collect::<Vec<_>>().join("\n");
     let join_id = id.clone();
     rsx! {
@@ -1036,6 +1036,40 @@ fn EventEditor(event: Event) -> Element {
                     }
                 }
             }
+            div { class: "ed-link-row",
+                span { class: "ed-link-icon", Icon { name: "link", size: 14 } }
+                input {
+                    id: "ev-link",
+                    class: "ed-link",
+                    r#type: "text",
+                    placeholder: "Meeting link (Teams, Zoom, Meet…)",
+                    title: "The link to join the call of this event",
+                    "aria-label": "Meeting link",
+                    autocomplete: "off",
+                    spellcheck: false,
+                    // An older event with its link in its notes shows it here too.
+                    initial_value: "{event.join_url().unwrap_or_default()}",
+                    oninput: {
+                        let id = event.id.clone();
+                        move |e: FormEvent| {
+                            let v = e.value().trim().to_string();
+                            state.update_event(&id, |ev| ev.join = v);
+                        }
+                    },
+                }
+                if event.join_url().is_some() {
+                    button {
+                        class: "secondary-btn small",
+                        id: "ev-join",
+                        title: "Open the meeting and its notes",
+                        onclick: {
+                            let id = event.id.clone();
+                            move |_| state.join_event(&id)
+                        },
+                        "Join"
+                    }
+                }
+            }
             div { class: "ed-notes-wrap",
                 textarea {
                     id: "ev-notes",
@@ -1050,18 +1084,6 @@ fn EventEditor(event: Event) -> Element {
                 button { class: "icon-btn small mic-btn ed-notes-mic", "data-dictate": "ev-notes", title: "Speak the notes", "aria-label": "Speak the notes", Icon { name: "mic", size: 14 } }
             }
             div { class: "ed-actions",
-                if crate::meeting::join_link(&event.notes).is_some() {
-                    button {
-                        class: "secondary-btn",
-                        id: "ev-join",
-                        title: "Open the meeting and its notes",
-                        onclick: {
-                            let id = event.id.clone();
-                            move |_| state.join_event(&id)
-                        },
-                        "Join"
-                    }
-                }
                 button { class: "secondary-btn with-icon", onclick: move |_| state.event_notes(&i8),
                     Icon { name: "file", size: 14 }
                     span { if has_page { "Open notes page" } else { "Make a notes page" } }

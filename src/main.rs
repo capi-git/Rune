@@ -26,6 +26,7 @@ mod model;
 mod notify;
 mod player;
 mod quickadd;
+mod slots;
 mod state;
 mod store;
 mod sync;

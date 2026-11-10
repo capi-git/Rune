@@ -360,6 +360,9 @@ pub struct Event {
     /// Colour (see `ui/icons.rs` ICON_COLORS).
     pub color: String,
     pub notes: String,
+    /// The link to join its call by ("" for none). It has a field of its
+    /// own; an older event can have the link in its notes (see `join_url`).
+    pub join: String,
     /// A page holding longer notes for the event.
     pub page_id: Option<Id>,
     /// Minutes before the start to send a reminder (None: no reminder).
@@ -383,12 +386,24 @@ impl Event {
             all_day,
             color: "blue".into(),
             notes: String::new(),
+            join: String::new(),
             page_id: None,
             remind: None,
             repeat: None,
             created_at: now,
             updated_at: now,
         }
+    }
+
+    /// The link to join the call of this event by: the one in its own
+    /// field, or else the link of a meeting found in its notes.
+    pub fn join_url(&self) -> Option<String> {
+        let own = self.join.trim();
+        if own.is_empty() {
+            return crate::meeting::join_link(&self.notes);
+        }
+        // Typed without "https://": a link all the same.
+        Some(if own.contains("://") { own.to_string() } else { format!("https://{own}") })
     }
 
     pub fn display_title(&self) -> &str {
