@@ -15,10 +15,9 @@ Your notes stay on your Mac. There is no account and no server.
 1. Download `Rune.zip` from the
    [latest release](https://github.com/capi-git/Rune/releases/latest).
 2. Unzip it and move **Rune** into your Applications folder.
-3. Open it. The first time, macOS says that it cannot check the app (Apple has
-   not checked this build). Open **System Settings → Privacy & Security**,
-   scroll down to the line about Rune and press **Open Anyway**. You do this
-   one time only.
+3. Open it. The first time, macOS asks if you want to open an app from the
+   internet: press **Open**. Apple has checked this build for harmful
+   software.
 
 It needs a Mac with Apple silicon and macOS 12 or later.
 
