@@ -3246,9 +3246,31 @@ await run('Select all, copy and delete', async () => {
     move($('.kind-divider', pane()), 'mousemove', { ...at($('.kind-divider', pane())), buttons: 1 });
     await until(() => picked().length === 2, 3000);
     window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0 }));
+    // (The Mac then puts the caret in the line under the pointer.)
+    lines[0].focus();
+    await wait(150);
+    check('Let go, the lines stay picked, though the line under the pointer is clicked', picked().length === 2 && !document.activeElement?.classList.contains('blk'), `${picked().length} picked, focus in a line: ${!!document.activeElement?.classList.contains('blk')}`);
     delete document.body.dataset.copied;
     cmd(document.body, 'c');
     check('Let go, ⌘C copies the picked lines', await until(() => document.body.dataset.copied === 'First line\n\n---', 3000), JSON.stringify(document.body.dataset.copied));
+    key(document.body, 'Escape');
+    await until(() => picked().length === 0, 3000);
+  }
+
+  // With no drag: Escape in a line picks it; Shift with an arrow picks one more line.
+  {
+    await wait(600);
+    const first = $$('.blk', pane())[0];
+    first.focus();
+    T().setSel(first, 3);
+    key(first, 'Escape');
+    check('Escape in a line picks that line', await until(() => picked().length === 1 && picked()[0].querySelector('.blk') === first, 3000), String(picked().length));
+    key(document.body, 'ArrowDown', { shiftKey: true });
+    key(document.body, 'ArrowDown', { shiftKey: true });
+    check('Shift with the down arrow picks the lines below, one at a time', await until(() => picked().length === 3, 3000), String(picked().length));
+    delete document.body.dataset.copied;
+    cmd(document.body, 'c');
+    check('⌘C copies them', await until(() => document.body.dataset.copied === 'First line\n\n---\n\nLast line', 3000), JSON.stringify(document.body.dataset.copied));
     key(document.body, 'Escape');
     await until(() => picked().length === 0, 3000);
   }

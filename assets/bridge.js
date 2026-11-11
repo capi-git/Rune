@@ -804,6 +804,18 @@ document.addEventListener(
       return;
     }
     if (e.key === 'Escape' && !(isBlock(t) && t.dataset.menu === '1')) {
+      // With nothing open, Escape in a line picks the line (then ⌘C copies
+      // it, and Shift with an arrow picks the lines above or below).
+      const quiet = isBlock(t) && !document.querySelector('.popover, .modal-backdrop, .slash-menu') && !peeking() && !ctxFor && !findOpen();
+      if (quiet && t.dataset.page) {
+        e.preventDefault();
+        t.blur();
+        hideBar();
+        const sel = getSelection();
+        if (sel) sel.removeAllRanges();
+        send({ t: 'pick', page: t.dataset.page, id: t.dataset.id, extend: false });
+        return;
+      }
       // The list of a choice cell closes, and the caret goes back to its cell.
       const list = t.closest && t.closest('.choice-picker');
       const back = list && list.parentElement.querySelector('.cell.pick');
@@ -979,6 +991,12 @@ document.addEventListener(
 document.addEventListener('focusin', (e) => {
   const t = e.target;
   if (isBlock(t)) {
+    // A drag that picked whole lines just ended over this line: it stays
+    // picked, and the line does not take the caret.
+    if ((dragPick && dragPick.on) || performance.now() - dragPickEnded < 500) {
+      t.blur();
+      return;
+    }
     initBlock(t);
     send({ t: 'focus', page: t.dataset.page, id: t.dataset.id });
   }
@@ -2868,6 +2886,25 @@ window.addEventListener(
       e.stopImmediatePropagation();
       send(name === 'pick_clear' ? { t: 'pick_clear' } : { t: 'shortcut', name });
     };
+    if (e.shiftKey && !cmd && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+      const all = [...pickedRows()[0].parentElement.querySelectorAll(':scope > .block-row[data-id]')];
+      const on = all.map((r, i) => (r.classList.contains('picked') ? i : -1)).filter((i) => i >= 0);
+      // Keys pressed fast, before the marks of the last press are drawn: go
+      // on from where the last press reached.
+      const recent = pickReach && performance.now() - pickReach.at < 800 ? pickReach : null;
+      const top = Math.min(...on, recent ? recent.top : Infinity);
+      const end = Math.max(...on, recent ? recent.end : -Infinity);
+      const down = e.key === 'ArrowDown';
+      const i = down ? end + 1 : top - 1;
+      const to = all[i];
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (to) {
+        pickReach = { top: Math.min(top, i), end: Math.max(end, i), at: performance.now() };
+        send({ t: 'pick', page: to.dataset.page, id: to.dataset.id, extend: true });
+      }
+      return;
+    }
     if (cmd && key === 'c') act('picked_copy');
     else if (cmd && key === 'x') act('picked_cut');
     else if (e.key === 'Backspace' || e.key === 'Delete') act('picked_delete');
@@ -2901,6 +2938,9 @@ document.addEventListener(
 // together with another's): then ⌘C copies them, ⌘X cuts them, Delete takes
 // them out. Back in the first line, it is a text selection again.
 let dragPick = null;
+let dragPickEnded = -Infinity;
+// How far Shift with an arrow has picked, while its marks are not drawn yet.
+let pickReach = null;
 document.addEventListener(
   'mousedown',
   (e) => {
@@ -2953,6 +2993,9 @@ window.addEventListener(
     if (dragPick && dragPick.on) {
       const sel = getSelection();
       if (sel) sel.removeAllRanges();
+      dragPickEnded = performance.now();
+      const a = document.activeElement;
+      if (a && isBlock(a)) a.blur();
     }
     dragPick = null;
     document.body.classList.remove('drag-picking');
