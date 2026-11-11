@@ -791,7 +791,10 @@ pub fn build_messages(action: &AiAction, page_md: &str, block_text: &str, prompt
              the pages: write nothing before the mark and nothing after the last page, not even a line \
              on what you did, because every line after it goes into that page. \
              If the request is a question, or asks for something new that changes nothing that is \
-             there, reply with only the answer or the new content, and no `{REVISE_MARK}` line.",
+             there, reply with only the answer or the new content, and no `{REVISE_MARK}` line. \
+             Never draw a picture with characters (boxes, lines, arrows, shading), even when a diagram or a picture \
+             is asked for: a diagram is a code block of the language mermaid, which the app draws in its own colours (write no style \
+             or classDef lines); levels, prices or amounts go in a small table.",
             prompt.trim()
         ),
         AiAction::Continue => format!(

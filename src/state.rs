@@ -4175,7 +4175,7 @@ impl AppState {
         self.toast("Updating…");
         spawn_forever(async move {
             match crate::update::install(update).await {
-                Ok(app) => crate::update::relaunch(&app),
+                Ok((app, build)) => crate::update::relaunch(&app, build),
                 Err(e) => self.toast(format!("Couldn't update: {e}")),
             }
         });

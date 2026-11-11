@@ -207,6 +207,12 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
         if !primary || std::env::var_os("NOTION2_SELFTEST").is_some() || crate::update::own_build().is_none() {
             return;
         }
+        // The window is open: this build runs. Keep it, and say so after an update.
+        match crate::update::started() {
+            Some((true, problem)) => state.notice(problem),
+            Some((false, news)) => state.toast(news),
+            None => {}
+        }
         crate::ai::sleep_ms(15_000).await;
         loop {
             state.check_update(false);

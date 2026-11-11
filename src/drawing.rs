@@ -38,6 +38,8 @@ static FILES: &[(&str, &[u8])] = &[
     file!("vendor/excalidraw-assets/Assistant-Medium.woff2"),
     file!("vendor/excalidraw-assets/Assistant-SemiBold.woff2"),
     file!("vendor/excalidraw-assets/Assistant-Bold.woff2"),
+    // Diagrams of code blocks (see assets/mermaid/NOTICE.md).
+    ("mermaid.min.js", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/mermaid/mermaid.min.js")) as &[u8]),
 ];
 
 /// The frame's address for one drawing.

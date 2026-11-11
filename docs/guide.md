@@ -28,6 +28,14 @@ Rune looks for a newer version one time a day and offers it at the bottom of
 the sidebar. It asks the Rune page on GitHub and sends nothing of yours. You
 can turn this off in Settings → Data.
 
+**Updates.** Rune downloads a newer version by itself. Click **Update ready**
+to restart into it, or just open Rune next time: with "Update automatically"
+on, it updates as it opens. Before it installs anything, Rune checks that the
+download is complete, signed by the same developer, and checked by Apple. It
+keeps your current version until the new one has opened. If the new one does
+not open, Rune goes back to the version you had and tells you. Your notes are
+not touched by an update.
+
 ## A first walk through (five minutes)
 
 1. **Home.** The app opens on Home: today's date, the line of your day, a box

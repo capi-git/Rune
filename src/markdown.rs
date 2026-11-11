@@ -458,6 +458,16 @@ mod tests {
     }
 
     #[test]
+    fn a_diagram_goes_through_markdown_as_it_is() {
+        let md = "```mermaid\nflowchart LR\n  A[Plan] --> B[Enter]\n  B -. back .-> A\n```";
+        let blocks = to_blocks(md);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!((blocks[0].kind, blocks[0].language.as_deref()), (BlockKind::Code, Some("mermaid")));
+        assert_eq!(blocks[0].text, "flowchart LR\n  A[Plan] --> B[Enter]\n  B -. back .-> A");
+        assert!(from_blocks("Steps", &blocks, |id| id.to_string()).contains(md), "{}", from_blocks("Steps", &blocks, |id| id.to_string()));
+    }
+
+    #[test]
     fn page_renders_to_markdown() {
         let mut todo = Block::new(BlockKind::Todo, "ship");
         todo.checked = true;

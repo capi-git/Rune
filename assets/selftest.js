@@ -2884,6 +2884,48 @@ await run('The AI makes a database', async () => {
   snap('ai-database');
 });
 
+await run('Diagrams', async () => {
+  await oneTab();
+  const title = await newPage('Diagram home');
+  key(title, 'Enter');
+  const first = await until(() => document.activeElement?.classList.contains('blk') && document.activeElement);
+  typeIn(first, 'Home.');
+  await wait(200);
+  askAi();
+  const box = await until(() => $('.ai-dock #ai-input'));
+  // A page with a diagram, as the AI writes one, and one with a mistake in it.
+  const md = ['Steps of a trade.', '', '```mermaid', 'flowchart LR', '  A[Plan] --> B[Enter]', '  B --> C[Manage]', '  C --> D[Exit]', '  D --> E[Review]', '  E -. lessons .-> A', '```', '', '```mermaid', 'flowchart LR', '  A[Broken --> ', '```'].join('\n');
+  box.value = `make a diagram of my trade steps [[tool: create_page ${JSON.stringify({ title: 'Trade steps', markdown: md })}]] [[reply: I made the page Trade steps.]]`;
+  box.dispatchEvent(new Event('input', { bubbles: true }));
+  await until(() => $('#ai-send'));
+  key(box, 'Enter');
+  check('The AI makes the page with the diagram', await until(() => treeItem('Trade steps'), 8000));
+  ($('#ai-ok') || $('#ai-done-run'))?.click();
+  treeItem('Trade steps')?.click();
+  const pane = await until(() => shownPane('Trade steps'), 3000);
+  if (!pane) return;
+  const wraps = () => $$('.diagram-wrap', pane);
+  const drawn = await until(() => $('.diagram svg', pane), 10000);
+  check('A code block of the language Mermaid is drawn as a diagram', drawn && wraps().length === 2, `${wraps().length} diagrams | ${$$('.diagram', pane).map((d) => `${d.className} [${d.dataset.drawn ? 'tried' : 'not tried'}] ${d.textContent.slice(0, 160)}`).join(' / ')} | lib ${typeof window.mermaid}`);
+  if (!drawn) return;
+  const words = drawn.textContent;
+  check('The diagram has every step and the label of the way back', ['Plan', 'Enter', 'Manage', 'Exit', 'Review', 'lessons'].every((w) => words.includes(w)), words);
+  const box1 = drawn.querySelector('.node rect, .node polygon, .node path');
+  const fill = box1 && getComputedStyle(box1).fill;
+  check('Its boxes take the colours of the app, not the library’s own', fill && !/236, 236, 255/.test(fill) && !/ececff/i.test(fill), fill);
+  check('Its code is out of sight while it shows the diagram, and its language says Mermaid', getComputedStyle($('.diagram-code', wraps()[0])).display === 'none' && $('.code-lang', wraps()[0])?.value === 'Mermaid', $('.code-lang', wraps()[0])?.value);
+  check('Its boxes have round corners', [...drawn.querySelectorAll('.node rect')].some((r) => Number(r.getAttribute('rx')) > 0));
+  const wrong = await until(() => $('.diagram.wrong', pane), 6000);
+  check('A diagram with a mistake says so in the page', wrong && /cannot be drawn/.test(wrong.textContent), wrong?.textContent);
+  check('…and no error drawing of the library is left in the window', !$('body > [id^="dn2-diagram"], body > svg[id^="n2-diagram"]'));
+  $('[data-diagram-toggle]', wraps()[0]).click();
+  check('"Edit" shows the code under the diagram', await until(() => wraps()[0].classList.contains('coding') && getComputedStyle($('.diagram-code', wraps()[0])).display === 'block' && $('.diagram-code .blk', wraps()[0])?.textContent.includes('flowchart LR'), 3000));
+  $('[data-diagram-toggle]', wraps()[0]).click();
+  check('"Done" goes back to the diagram', await until(() => !wraps()[0].classList.contains('coding'), 3000));
+  await wait(300);
+  snap('diagram');
+});
+
 await run('The AI does things in Rune with its tools', async () => {
   await oneTab();
   const title = await newPage('Tools page');

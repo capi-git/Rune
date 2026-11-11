@@ -4204,6 +4204,167 @@ window.addEventListener(
   );
 })();
 
+// ----- diagrams: code blocks of the language Mermaid ---------------------------
+//
+// The block shows `.diagram[data-diagram]` with the code; this draws it with
+// Mermaid (built into the app, see assets/mermaid), in the colours of the app.
+// The library loads the first time a page shows a diagram.
+
+const DIAGRAM_LIB = 'n2draw://app/mermaid.min.js';
+let diagramLib = null;
+const loadDiagramLib = () => {
+  if (!diagramLib) {
+    diagramLib = new Promise((ok, no) => {
+      const s = document.createElement('script');
+      s.src = DIAGRAM_LIB;
+      s.onload = () => (window.mermaid ? ok(window.mermaid) : no(new Error('The diagram drawer did not start.')));
+      s.onerror = () => {
+        diagramLib = null;
+        no(new Error('The diagram drawer could not be loaded.'));
+      };
+      document.head.appendChild(s);
+    });
+  }
+  return diagramLib;
+};
+
+// A colour of the app as an opaque "#rrggbb": see-through ones are laid
+// over the page's own ground, as they show.
+const diagramColors = () => {
+  const app = document.querySelector('.app') || document.body;
+  const probe = document.createElement('span');
+  probe.style.display = 'none';
+  app.appendChild(probe);
+  const rgba = (token) => {
+    probe.style.color = `var(${token})`;
+    const m = getComputedStyle(probe).color.match(/[\d.]+/g) || ['0', '0', '0'];
+    return m.map(Number).concat(m.length < 4 ? [1] : []);
+  };
+  const ground = rgba('--bg');
+  const hex = (token) => {
+    const [r, g, b, a] = rgba(token);
+    return '#' + [r, g, b].map((v, i) => Math.round(v * a + ground[i] * (1 - a)).toString(16).padStart(2, '0')).join('');
+  };
+  const look = {
+    text: hex('--text'),
+    soft: hex('--text-2'),
+    fill: hex('--fill-3'),
+    fill2: hex('--fill-4'),
+    edge: hex('--sep'),
+    accent: hex('--accent'),
+    ground: hex('--bg'),
+  };
+  probe.remove();
+  look.dark = parseInt(look.ground.slice(1, 3), 16) < 128;
+  return look;
+};
+
+let diagramCount = 0;
+let diagramLook = '';
+const drawDiagram = async (el, look, key) => {
+  const mermaid = await loadDiagramLib();
+  if (diagramLook !== key) {
+    diagramLook = key;
+    mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: 'strict',
+      theme: 'base',
+      fontFamily: `${getComputedStyle(document.body).fontFamily}, -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif`,
+      themeVariables: {
+        darkMode: look.dark,
+        background: look.ground,
+        fontSize: '14px',
+        primaryColor: look.fill,
+        primaryTextColor: look.text,
+        primaryBorderColor: look.edge,
+        secondaryColor: look.fill2,
+        secondaryTextColor: look.text,
+        secondaryBorderColor: look.edge,
+        tertiaryColor: look.fill2,
+        tertiaryTextColor: look.text,
+        tertiaryBorderColor: look.edge,
+        lineColor: look.soft,
+        textColor: look.text,
+        mainBkg: look.fill,
+        nodeBorder: look.edge,
+        clusterBkg: look.fill2,
+        clusterBorder: look.edge,
+        edgeLabelBackground: look.ground,
+        actorBkg: look.fill,
+        actorBorder: look.edge,
+        actorTextColor: look.text,
+        signalColor: look.soft,
+        signalTextColor: look.text,
+        noteBkgColor: look.fill2,
+        noteTextColor: look.text,
+        noteBorderColor: look.edge,
+      },
+      flowchart: { curve: 'basis', padding: 14, htmlLabels: true },
+    });
+  }
+  const source = el.dataset.diagram;
+  // (Its own name: Mermaid works in a part of the page with that name.)
+  const name = `n2-diagram-${++diagramCount}`;
+  try {
+    await mermaid.parse(source);
+    const { svg } = await mermaid.render(name, source);
+    if (el.dataset.diagram !== source) return; // changed while it drew
+    el.innerHTML = svg;
+    // Round corners on the plain boxes, as the app's cards have.
+    el.querySelectorAll('.node rect.label-container, .node rect.basic').forEach((r) => {
+      if (!r.getAttribute('rx') || r.getAttribute('rx') === '0') {
+        r.setAttribute('rx', '6');
+        r.setAttribute('ry', '6');
+      }
+    });
+    el.classList.remove('wrong');
+  } catch (e) {
+    if (el.dataset.diagram !== source) return;
+    // Mermaid leaves its own error drawing in the page: take it away.
+    document.querySelectorAll(`#d${name}, #${name}`).forEach((n) => n.remove());
+    el.classList.add('wrong');
+    const line = String((e && e.message) || e).split('\n').filter((l) => l.trim()).slice(0, 3).join(' ');
+    el.textContent = `This diagram cannot be drawn: ${line}`;
+  }
+  el.dataset.drawn = `${key}\n${source}`;
+};
+
+let diagramsQueued = false;
+let diagramQueue = Promise.resolve();
+const drawDiagrams = () => {
+  if (diagramsQueued) return;
+  diagramsQueued = true;
+  requestAnimationFrame(() => {
+    diagramsQueued = false;
+    const all = document.querySelectorAll('.diagram[data-diagram]');
+    if (!all.length) return;
+    const look = diagramColors();
+    const key = JSON.stringify(look);
+    all.forEach((el) => {
+      if (el.dataset.drawn !== `${key}\n${el.dataset.diagram}`) {
+        el.dataset.drawn = `${key}\n${el.dataset.diagram}`;
+        // One at a time: Mermaid cannot draw two diagrams at once.
+        diagramQueue = diagramQueue
+          .then(() => drawDiagram(el, look, key))
+          .catch((e) => {
+            el.classList.add('wrong');
+            el.textContent = String((e && e.message) || e);
+          });
+      }
+    });
+  });
+};
+new MutationObserver((mutations) => {
+  for (const m of mutations) {
+    if (m.type === 'attributes' ? m.target.classList?.contains('diagram') || m.target.classList?.contains('app') : [...m.addedNodes].some((n) => n.nodeType === 1 && (n.matches('.diagram') || n.querySelector('.diagram')))) {
+      drawDiagrams();
+      return;
+    }
+  }
+}).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-diagram', 'class'] });
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', drawDiagrams);
+drawDiagrams();
+
 window.__n2_test = { selIn, setSel, command: (name) => send({ t: 'shortcut', name }) };
 
 // Keep this script alive so dioxus.send() stays connected.

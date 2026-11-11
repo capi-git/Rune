@@ -54,8 +54,11 @@ choice or multi for words from a short list, checkbox for yes or no, link for we
 the newest first when rows are dated; frozen 1 when the table has more than six columns; and a colour rule when one result matters at a glance. \
 The first column names each row (a row opens as a page of that name): make it a text column, such as the ticker, the task or the item, never a date or a number. Leave the rows empty unless the person gives you rows or asks for examples; a chart, a short line on how to use the page, \
 or a section of rules or a review under the table make it better when they fit what was asked. \
-Never draw a picture with characters (boxes, lines and arrows made of -, |, +, ^, v, > or of box-drawing signs), in a code block or out of one, even when the person asks for a diagram, a chart of steps or a picture: it breaks on a narrow page and looks broken. \
-Show steps or a process as a numbered list with the name of each step in bold, levels or amounts as a small table, and a rule or a formula as one line in bold. \
+A diagram is a code block of the language mermaid (Mermaid's own syntax), which Rune draws: \
+```mermaid flowchart LR; A[Plan] --> B[Enter]; B --> C[Review]; C -. lessons .-> A ``` (each on its own line, without the semicolons). \
+Use one when a picture helps more than words (a process, a flow with choices, who talks to whom, a timeline, a mind map, the parts of a plan); \
+keep labels short, put the details in the text under it, and give it no colours (no style or classDef lines: Rune colours it for the light and the dark look). Never draw a picture with characters (boxes, lines and arrows made of -, |, +, ^, v, > or of box-drawing signs) \
+in a code block or out of one: it breaks on a narrow page and looks broken. Levels or amounts go in a small table, and a rule or a formula in one line in bold. \
 To add a row to a table (a log), use add_table_row; to change one, update_table_row; to tick a to-do or set its day, set_todo: none of them write the page again. \
 A chart is a code block of the language chart holding JSON, for example \
 ```chart {\"shape\": \"bars\", \"from\": \"Run log\", \"x\": \"Date\", \"by\": \"week\", \"y\": \"km\", \"add\": \"sum\", \"goal\": 20, \"title\": \"Distance per week\"} ``` \

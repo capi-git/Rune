@@ -857,8 +857,14 @@ fn roman(mut n: usize) -> String {
 
 const CODE_LANGUAGES: &[&str] = &[
     "Plain text", "Rust", "JavaScript", "TypeScript", "Python", "Go", "Swift", "Java", "C", "C++", "SQL",
-    "Bash", "JSON", "YAML", "HTML", "CSS", "Markdown",
+    "Bash", "JSON", "YAML", "HTML", "CSS", "Markdown", "Mermaid",
 ];
+
+/// A code block of this language is drawn as a diagram (see `drawDiagrams`
+/// in bridge.js, and assets/mermaid).
+fn is_diagram(language: Option<&str>) -> bool {
+    language.is_some_and(|l| l.trim().eq_ignore_ascii_case("mermaid"))
+}
 
 #[component]
 fn BlockRow(
@@ -878,6 +884,8 @@ fn BlockRow(
     #[props(default)] side_last: bool,
 ) -> Element {
     let state = use_context::<AppState>();
+    // A diagram shows its code only while it is edited (an empty one always does).
+    let mut diagram_code = use_signal(|| false);
     let id = block.id.clone();
     let kind = block.kind;
     // A free picture is at a side of the page; the lines after it run beside it.
@@ -1016,6 +1024,46 @@ fn BlockRow(
                     BlockKind::Image => rsx! { ImageView { page_id: page_id.clone(), id: id.clone(), name: block.data.clone(), place: block.place, caption: block.text.clone() } },
                     BlockKind::Table => rsx! { super::tables::TableView { page_id: page_id.clone(), id: id.clone(), data: block.data.clone() } },
                     BlockKind::Chart => rsx! { super::charts::ChartView { page_id: page_id.clone(), id: id.clone(), data: block.data.clone() } },
+                    BlockKind::Code if is_diagram(block.language.as_deref()) => {
+                        let empty = block.text.trim().is_empty();
+                        let coding = diagram_code() || empty;
+                        let source = block.text.clone();
+                        rsx! {
+                            div { class: if coding { "code-wrap diagram-wrap coding" } else { "code-wrap diagram-wrap" },
+                                div { class: "diagram-tools",
+                                    select {
+                                        class: "code-lang",
+                                        onchange: {
+                                            let (pid, bid) = (page_id.clone(), id.clone());
+                                            move |e: FormEvent| {
+                                                let v = e.value();
+                                                state.set_code_language(&pid, &bid, if v == "Plain text" { String::new() } else { v });
+                                            }
+                                        },
+                                        for lang in CODE_LANGUAGES {
+                                            option { value: "{lang}", selected: *lang == "Mermaid", "{lang}" }
+                                        }
+                                    }
+                                    if !empty {
+                                        button {
+                                            class: "ghost-btn small diagram-toggle",
+                                            "data-diagram-toggle": "",
+                                            title: if coding { "Show the diagram" } else { "Change the diagram's code" },
+                                            onclick: move |e| {
+                                                e.stop_propagation();
+                                                diagram_code.set(!diagram_code());
+                                            },
+                                            if coding { "Done" } else { "Edit" }
+                                        }
+                                    }
+                                }
+                                if !empty {
+                                    div { class: "diagram", "data-diagram": "{source}", "aria-label": "Diagram", role: "img" }
+                                }
+                                div { class: "diagram-code", {editor} }
+                            }
+                        }
+                    }
                     BlockKind::Code => rsx! {
                         div { class: "code-wrap",
                             select {

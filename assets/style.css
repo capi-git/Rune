@@ -1617,6 +1617,67 @@ body[data-resizing="rows"] * {
   overflow-wrap: normal;
   tab-size: 2;
 }
+/* A diagram (a code block of the language Mermaid): the drawing, and its
+   code only while it is changed. */
+.diagram-wrap {
+  background: transparent;
+  border: 1px solid var(--sep);
+  padding: 38px 18px 18px;
+}
+.diagram-wrap.coding {
+  background: var(--code-bg);
+  border-color: transparent;
+}
+.diagram-tools {
+  position: absolute;
+  top: 8px;
+  left: 14px;
+  right: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.diagram-tools .code-lang {
+  position: static;
+}
+.diagram-toggle {
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.diagram-wrap:hover .diagram-toggle,
+.diagram-wrap.coding .diagram-toggle,
+.diagram-toggle:focus-visible {
+  opacity: 1;
+}
+.diagram {
+  display: flex;
+  justify-content: center;
+  overflow-x: auto;
+  min-height: 24px;
+}
+.diagram svg {
+  max-width: 100%;
+  height: auto;
+}
+.diagram.wrong {
+  justify-content: flex-start;
+  color: var(--danger);
+  font-size: 13px;
+}
+.diagram-wrap .diagram-code {
+  display: none;
+}
+.diagram-wrap.coding .diagram-code {
+  display: block;
+  margin-top: 10px;
+}
+.diagram-wrap.coding .diagram {
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--sep);
+}
+.diagram-wrap.coding .diagram:empty {
+  display: none;
+}
 .code-lang {
   position: absolute;
   top: 8px;

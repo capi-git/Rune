@@ -61,6 +61,12 @@ fn main() {
     // whether that counts as a Teams meeting (for checking during a real one).
     // `notion2 --update-check` / `--update-install`: what the updater sees,
     // and the swap itself, with no window and no restart.
+    // `notion2 --update-watch <app> <build>`: the old program, after an
+    // update, opens the new copy and puts itself back if that does not start.
+    if std::env::args().skip(1).any(|arg| arg == "--update-watch") {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        std::process::exit(update::watch_command(&args));
+    }
     if let Some(flag) = std::env::args().skip(1).find(|arg| arg == "--update-check" || arg == "--update-install") {
         std::process::exit(update::command_line(flag == "--update-install"));
     }
