@@ -820,9 +820,10 @@ document.addEventListener(
         send({ t: 'pick', page: t.dataset.page, id: t.dataset.id, extend: false });
         return;
       }
-      // The list of a choice cell closes, and the caret goes back to its cell.
-      // (In a table the list is beside the box of the table, and says its cell.)
-      const list = t.closest && t.closest('.choice-picker');
+      // The list of a choice cell (or the month of a date cell) closes, and
+      // the caret goes back to its cell. (In a table the list is beside the
+      // box of the table, and says its cell.)
+      const list = t.closest && t.closest('.choice-picker, .date-picker');
       const hung = list && list.parentElement.closest('.hung');
       const back = hung ? hung.closest('.table-frame').querySelector(`.table-block .cell.pick[data-r="${hung.dataset.r}"][data-c="${hung.dataset.c}"]`) : list && list.parentElement.querySelector('.cell.pick');
       if (back) setTimeout(() => back.isConnected && back.focus(), 80);
@@ -1541,7 +1542,10 @@ const hangsFrom = (menu) => {
   const a = el.getBoundingClientRect();
   // The menu of a row is at the left edge of the table; that of a cell or
   // a heading under it, at the part of it that shows in the box.
-  const left = hang === 'row' ? b.left : Math.max(b.left, Math.min(a.left, b.right - 40));
+  // (A table with kinds has the strip of its boxes at its left, inside its
+  // box: the menu of a row is at the first cell, past that strip.)
+  const strip = (parseFloat(getComputedStyle(box).paddingLeft) || 0) * (b.width / box.offsetWidth || 1);
+  const left = hang === 'row' ? b.left + strip : Math.max(b.left + strip, Math.min(a.left, b.right - 40));
   return { left, bottom: a.bottom, edge: all };
 };
 const placeTableMenu = (menu) => {
@@ -2374,11 +2378,12 @@ const intoCell = (cell) => {
   // (A choice cell is a button: there is no caret in it.)
   if (cell.setSelectionRange) cell.setSelectionRange(cell.value.length, cell.value.length);
 };
-// A letter typed on a choice cell opens its list with that letter in the box.
+// A letter typed on a choice cell opens its list with that letter in the box
+// (on a date cell, its month: the letter starts the day that is typed).
 const seedPicker = (letter) => {
   let tries = 0;
   const tick = () => {
-    const box = document.querySelector('.choice-picker .pick-input');
+    const box = document.querySelector('.choice-picker .pick-input, .date-picker .pick-input');
     if (box) {
       box.value = letter;
       box.dispatchEvent(new Event('input', { bubbles: true }));
@@ -2454,6 +2459,21 @@ document.addEventListener(
   },
   true,
 );
+// ⌘ and a click on an address in a table (a link, an email, a phone number)
+// opens it, as its small button does; a plain click puts the caret in it.
+document.addEventListener(
+  'click',
+  (e) => {
+    if (!e.metaKey || e.button !== 0 || !e.target.closest) return;
+    const cell = e.target.closest('.cell-link');
+    const go = cell && cell.querySelector('[data-go]');
+    if (!go || e.target.closest('[data-go]')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    go.click();
+  },
+  true,
+);
 // The table with the caret keeps the order of its rows while the caret is
 // in it (see `HELD` in ui/tables.rs): the app is told when it comes and goes.
 let heldTable = null;
@@ -2514,15 +2534,19 @@ document.addEventListener('focusout', (e) => {
 // headings has a handle too, with the plus alone: a new first row. (In a
 // table with no line of its name above it, the handle of the table as a
 // line of the page is at that height: there it shows, not a second one.)
+// The row at the handle shows its box to pick it (in a table with kinds).
 const ROW_LINE = 33;
-const ROW_STRIP = 76;
+const ROW_STRIP = 106;
 let nearHandle = null;
 let nearLine = null;
+let handRow = null;
 const leaveHandle = () => {
   if (nearHandle) nearHandle.classList.remove('near');
   if (nearLine) nearLine.classList.remove('at-strip');
+  if (handRow) handRow.classList.remove('hand');
   nearHandle = null;
   nearLine = null;
+  handRow = null;
 };
 const placeRowHandle = (tr) => {
   const frame = tr.closest('.table-frame');
@@ -2548,8 +2572,10 @@ const placeRowHandle = (tr) => {
       return;
     }
   }
-  if (nearHandle !== handle || nearLine) leaveHandle();
+  if (nearHandle !== handle || nearLine || handRow !== tr) leaveHandle();
   nearHandle = handle;
+  handRow = tr;
+  tr.classList.add('hand');
   const top = `${Math.round(((t.top - f.top) / z + (line - (handle.offsetHeight || 24)) / 2) * 2) / 2}px`;
   if (handle.dataset.r === tr.dataset.r && handle.style.top === top && handle.classList.contains('near')) return;
   handle.dataset.r = tr.dataset.r;
@@ -2562,7 +2588,11 @@ const placeRowHandle = (tr) => {
 const rowAt = (x, y, el) => {
   if (!el || !el.closest) return null;
   const own = el.closest('.table-block, .popover, .backdrop, .picked-bar, .table-side');
-  if (own) return own.classList.contains('table-block') ? el.closest('tr[data-r]') : null;
+  if (own && !own.classList.contains('table-block')) return null;
+  // (In the strip of the boxes that pick rows, at the left inside the box
+  // of a table with kinds, the row is found by its height, as beside it.)
+  const tr = own && el.closest('tr[data-r]');
+  if (tr || (own && !own.classList.contains('typed'))) return tr;
   const pane = el.closest('.pane') || document;
   for (const frame of pane.querySelectorAll('.table-frame')) {
     const box = frame.querySelector(':scope > .table-block');
@@ -2639,6 +2669,8 @@ const pickedHead = (e) => {
 document.addEventListener(
   'mousedown',
   (e) => {
+    // (A box that picks rows takes no caret, and ⇧ on it selects no words.)
+    if (e.target.closest && e.target.closest('.table-block [data-check]')) return e.preventDefault();
     // (No caret in the heading, and no words selected by the ⇧.)
     if (pickedHead(e)) return e.preventDefault();
     // (Nor does ⇧ on a handle select the words of the page up to it.)
@@ -2649,6 +2681,15 @@ document.addEventListener(
 );
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !document.querySelector('.popover')) unpick();
+  // ⌘D: a copy of each picked row (from the menu of the rows too).
+  if (e.metaKey && !e.shiftKey && !e.altKey && !e.ctrlKey && e.key.toLowerCase() === 'd' && pickedTable && pickedTable.isConnected && pickedTable.querySelector('tr.picked')) {
+    const t = e.target.closest ? e.target : null;
+    if (t && t.closest('input, textarea, select, [contenteditable]') && !t.closest('.row-menu')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    tableOp(pickedTable, 'duplicate-picked', 0, 0);
+    return;
+  }
   if ((e.key !== 'Backspace' && e.key !== 'Delete') || !pickedTable || e.metaKey || e.ctrlKey || e.altKey || e.isComposing) return;
   // (A key typed in a box is for the box.)
   if (e.target.closest && e.target.closest('input, textarea, select, [contenteditable]')) return;
@@ -2659,6 +2700,18 @@ document.addEventListener('keydown', (e) => {
 document.addEventListener(
   'click',
   (e) => {
+    // The box at the left of a row picks it, or lets it go (⇧: all rows
+    // from the one picked last); the box of the headings, all or none.
+    const check = e.target.closest && e.target.closest('.table-block [data-check]');
+    if (check) {
+      e.preventDefault();
+      e.stopPropagation();
+      const box = check.closest('.table-block');
+      caretOut();
+      pickedTable = box;
+      if (check.dataset.check === 'all') return tableOp(box, 'pick-all', 0, 0);
+      return tableOp(box, 'pick-row', Number(check.dataset.check) || 0, e.shiftKey ? 1 : 2);
+    }
     const head = pickedHead(e);
     if (head) {
       e.preventDefault();

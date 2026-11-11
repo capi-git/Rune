@@ -2049,3 +2049,380 @@ span.value-name {
   color: var(--text-3);
   text-align: right;
 }
+
+/* ----- editors of a cell, by the kind of its column --------------------- */
+/* A date cell: the day as a button that opens its month. */
+.table-block .cell.pick.date,
+.row-values .cell.pick.date {
+  align-items: flex-start;
+  padding: 6px 9px;
+  font-size: 14px;
+  line-height: 1.45;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.cell.pick .date-words {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cell.pick .cell-empty {
+  color: var(--text-3);
+}
+/* A cell its kind cannot read: grey and slanted, with why in its tip. */
+.table-block .cell.odd,
+.row-values .cell.odd {
+  color: var(--text-3);
+  font-style: italic;
+}
+/* What a cell of its kind looks like ("$0.00", "0:00") shows only in the
+   cell that has the caret. */
+.cell.hinted:not(:focus)::placeholder {
+  color: transparent;
+}
+.table-block .cell.computed {
+  cursor: pointer;
+}
+.table-block .cell.computed:hover,
+.table-block .cell.computed.open,
+.row-values .cell.computed.open {
+  background: var(--hover);
+}
+/* The month of a date cell. */
+.date-picker {
+  top: calc(100% + 2px);
+  left: 0;
+  width: 280px;
+  padding: 0 0 6px;
+  overflow: hidden;
+  font-size: 13px;
+}
+.date-picker .pick-bar {
+  margin-bottom: 4px;
+}
+.date-head {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 8px 2px 14px;
+}
+.date-month {
+  flex: 1;
+  font-weight: 600;
+}
+.date-today,
+.date-step {
+  height: 24px;
+  min-width: 24px;
+  padding: 0 6px;
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: default;
+}
+.date-step {
+  padding: 0;
+}
+.date-today:hover,
+.date-step:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+.date-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  justify-items: center;
+  row-gap: 1px;
+  padding: 0 8px;
+}
+.date-grid .wd {
+  height: 26px;
+  line-height: 26px;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+.date-day {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+}
+.date-day:hover,
+.date-day.at {
+  background: var(--hover);
+}
+.date-day.other {
+  color: var(--text-3);
+}
+/* Today in red, as the day picker of the calendar marks it. */
+.date-day.today {
+  color: var(--icon-red, var(--danger));
+  font-weight: 700;
+}
+/* The chosen day: filled, as in the day picker of the calendar. */
+.date-day.on {
+  background: var(--fill-2);
+  font-weight: 700;
+}
+.date-day:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--text) 45%, transparent);
+  outline-offset: -2px;
+}
+.date-picker .ai-menu-row {
+  width: calc(100% - 12px);
+  margin: 0 6px;
+}
+.date-picker .ai-menu-row:disabled {
+  color: var(--text-3);
+}
+/* What a worked-out cell is worked out from. */
+.worked-out {
+  top: calc(100% + 2px);
+  left: 0;
+  width: 260px;
+}
+.worked-from {
+  padding: 2px 10px 6px;
+  color: var(--text);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.worked-from.code {
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12.5px;
+}
+
+/* ----- the boxes that pick rows ------------------------------------------ */
+/* A table with kinds has a strip at its left, inside the box that scrolls
+   it, for a box at each row that picks the row (as Notion has): the handle
+   of the row is at the left of that strip. */
+.table-block.typed {
+  --gut: 30px;
+  margin-left: calc(-1 * var(--gut));
+  padding-left: var(--gut);
+  max-width: calc(100% + var(--gut));
+}
+.table-frame:has(> .table-block.typed) > .row-handle {
+  left: -76px;
+}
+.table-block.typed td.first,
+.table-block.typed tr.head-row > td:first-child {
+  position: relative;
+}
+.table-block.typed td.first.frozen,
+.table-block.typed tr.head-row > td.frozen:first-child {
+  position: sticky;
+}
+.row-check,
+.head-check {
+  position: absolute;
+  top: 8px;
+  left: -25px;
+  z-index: 1;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--text) 32%, transparent);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--bg);
+  opacity: 0;
+  cursor: default;
+  transition: opacity 150ms ease, background-color 120ms ease;
+}
+/* It shows at the row under the pointer (or at its handle), and stays on a
+   row that is picked; the box of the headings while any row is picked. */
+.table-block tr:hover > td > .row-check,
+.table-block tr.hand > td > .row-check,
+.table-block tr.picked > td > .row-check,
+.table-block tr.head-row:hover .head-check,
+.table-block tr.head-row.hand .head-check,
+.head-check.some,
+.head-check.all {
+  opacity: 1;
+}
+.row-check:hover,
+.head-check:hover {
+  border-color: color-mix(in srgb, var(--text) 55%, transparent);
+}
+/* Ticked: filled in the colour of the text, as a ticked box of a checkbox
+   column is. */
+.table-block tr.picked > td > .row-check,
+.head-check.some,
+.head-check.all {
+  border-color: var(--text);
+  background: var(--text);
+}
+
+/* ----- the menu of rows: a box to find a command, and its foot ---------- */
+.row-menu {
+  width: 264px;
+}
+.menu-search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  margin: 0 0 4px;
+  padding: 0 9px;
+  border-radius: 7px;
+  background: var(--fill-4);
+  box-shadow: inset 0 0 0 1px var(--sep);
+  color: var(--text-3);
+}
+.menu-search:focus-within {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 35%, transparent);
+}
+.menu-search-input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.menu-search-input::placeholder {
+  color: var(--text-3);
+}
+/* The command the arrows are at. */
+.table-menu .ai-menu-row.kb {
+  background: var(--hover);
+}
+.table-menu .ai-menu-row.sep-above {
+  position: relative;
+  margin-top: 13px;
+}
+.table-menu .ai-menu-row.sep-above::before {
+  content: '';
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  top: -7px;
+  height: 1px;
+  background: var(--sep);
+}
+.row-menu .ai-menu-aside {
+  font-size: 12px;
+  color: var(--text-3);
+}
+.row-menu-foot {
+  padding: 2px 10px 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+.row-menu-when {
+  color: var(--text-2);
+}
+/* (The bar of what is picked is over the strip of the boxes too.) */
+.table-frame:has(> .table-block.typed) > .picked-rail {
+  left: -30px;
+}
+/* A frozen first column covers the strip at its left too: what scrolls
+   under the frozen columns does not show beside the boxes that pick rows. */
+.table-block.typed td.first.frozen::before,
+.table-block.typed tr.head-row > td.frozen:first-child::before {
+  content: '';
+  position: absolute;
+  top: -1px;
+  bottom: -1px;
+  left: calc(-1 * var(--gut) - 1px);
+  width: var(--gut);
+  background: var(--bg);
+}
+
+/* ----- the day picker: an end, a time, a reminder ------------------------- */
+.date-day.in-range {
+  background: var(--fill-3);
+  border-radius: 0;
+}
+.date-hint {
+  padding: 4px 14px 0;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+.date-option .switch {
+  transform: scale(0.85);
+  transform-origin: right center;
+}
+.date-option {
+  display: flex;
+  align-items: center;
+  height: 30px;
+  margin: 0 6px;
+  padding: 0 10px;
+  border-radius: 8px;
+}
+.date-option-name {
+  flex: 1;
+}
+.date-times {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 6px 4px;
+  padding: 0 4px;
+}
+.date-time {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 6px;
+  outline: none;
+  background: var(--fill-4);
+  box-shadow: inset 0 0 0 1px var(--sep);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.date-time:focus {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 35%, transparent);
+}
+.date-to {
+  color: var(--text-3);
+  font-size: 12px;
+}
+.date-reminders {
+  margin: 0 6px 2px 22px;
+  padding-left: 6px;
+  border-left: 1px solid var(--sep);
+}
+.date-reminders .ai-menu-row {
+  width: 100%;
+  height: 28px;
+  margin: 0;
+}
+.date-at {
+  color: var(--text-3);
+}
+/* A date with a reminder: a small bell after it. */
+.cell.pick .date-bell {
+  display: inline-flex;
+  margin-left: 2px;
+  color: var(--text-3);
+  align-self: center;
+}

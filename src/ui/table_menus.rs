@@ -7,6 +7,7 @@ use super::icons::{format_icon, parse_icon, Icon, ICON_COLORS};
 use crate::state::{AppState, Open, Popover};
 use crate::table::money::{self, CURRENCIES};
 use crate::table::{holds_part, Kind, Layout, Rule, Show, Table};
+use chrono::Datelike;
 use dioxus::prelude::*;
 
 /// How many kinds of money the list of formats shows at first.
@@ -840,68 +841,309 @@ pub fn PaintMenu(page_id: String, id: String, table: Table) -> Element {
     }
 }
 
-/// The menu of the picked rows: open one, nest them, copy them, take them out.
+/// One thing the menu of rows can do: what it is called (and what a search
+/// finds it by), its icon, its key, and whether it opens a second list.
+#[derive(Clone, Debug, PartialEq)]
+struct Act {
+    name: String,
+    label: String,
+    icon: &'static str,
+    aside: &'static str,
+    more: bool,
+}
+
+fn act(name: impl Into<String>, label: impl Into<String>, icon: &'static str, aside: &'static str) -> Act {
+    Act { name: name.into(), label: label.into(), icon, aside, more: false }
+}
+
+/// The commands of the menu of rows, as a search shows them: those of the
+/// first list, with those of its second lists ("Open in", "Edit property")
+/// in their place, named in full; only those whose name has the words
+/// searched for. With nothing searched for: the first list.
+fn row_acts(main: &[Act], subs: &[(&str, &str, Vec<Act>)], query: &str) -> Vec<Act> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return main.to_vec();
+    }
+    let words: Vec<&str> = q.split_whitespace().collect();
+    let found = |label: &str| {
+        let low = label.to_lowercase();
+        words.iter().all(|w| low.contains(w))
+    };
+    let mut out = Vec::new();
+    for a in main {
+        match subs.iter().find(|(name, _, _)| *name == a.name) {
+            Some((_, prefix, leaves)) => out.extend(leaves.iter().map(|l| Act { label: format!("{prefix} {}", l.label), ..l.clone() }).filter(|l| found(&l.label))),
+            None if found(&a.label) => out.push(a.clone()),
+            None => {}
+        }
+    }
+    out
+}
+
+/// "Today at 2:04 PM", "Yesterday at 9 AM", "Nov 3 at 2:04 PM" (with the
+/// year when it is not this year's).
+fn edited_words(ms: i64) -> String {
+    let day = crate::when::date_of(ms);
+    let today = crate::when::today();
+    let time = crate::when::time_label(ms);
+    match (today - day).num_days() {
+        0 => format!("Today at {time}"),
+        1 => format!("Yesterday at {time}"),
+        _ if day.year() == today.year() => format!("{} at {time}", day.format("%b %-d")),
+        _ => format!("{} at {time}", day.format("%b %-d, %Y")),
+    }
+}
+
+/// "2 words, 8 characters".
+fn count_words(texts: &[&str]) -> String {
+    let words: usize = texts.iter().map(|t| t.split_whitespace().count()).sum();
+    let chars: usize = texts.iter().map(|t| t.trim().chars().count()).sum();
+    format!("{words} {}, {chars} {}", if words == 1 { "word" } else { "words" }, if chars == 1 { "character" } else { "characters" })
+}
+
+/// The menu of the picked rows, as Notion's menu of a row: a box that
+/// finds a command as it is typed in (it has the keyboard when the menu
+/// opens; ↑ ↓ and Return choose), the commands with their keys, second
+/// lists to open the row in a place and to change one of its values, and
+/// at its foot when the row's page was last changed and how long it is.
 #[component]
 pub fn RowMenu(page_id: String, id: String, table: Table, rows: Vec<usize>) -> Element {
     let state = use_context::<AppState>();
+    let mut query = use_signal(String::new);
+    let mut active = use_signal(|| 0usize);
+    let mut sub = use_signal(|| "");
+    let mut sub_active = use_signal(|| 0usize);
     let one = (rows.len() == 1).then(|| rows[0]);
     let nested = rows.iter().any(|&r| table.indent(r) > 0);
     let can_nest = rows.iter().any(|&r| r >= 2 && table.indent(r) <= table.indent(r - 1) && table.indent(r) < crate::table::MOST_NESTING)
         // ("The row above" is the row that is kept above: with a sort or a filter the screen shows another.)
         && table.view.filter.is_empty()
         && table.view.sort.is_empty();
-    let favorite = one.and_then(|r| table.row_id(r)).and_then(|row| state.row_pages(&id).remove(row)).is_some_and(|page| state.pages.peek().get(&page).is_some_and(|p| p.favorite));
-    let many = |op: &'static str| {
+    // The page of the row, if it has one.
+    let page = one.and_then(|r| table.row_id(r)).and_then(|row| state.row_pages(&id).remove(row)).and_then(|pid| state.pages.peek().get(&pid).cloned());
+    let favorite = page.as_ref().is_some_and(|p| p.favorite);
+    let foot = one.map(|r| {
+        let body: Vec<String> = page.as_ref().map(|p| state.blocks.peek().get(&p.id).map(|bs| bs.iter().map(|b| b.text.clone()).collect()).unwrap_or_default()).unwrap_or_default();
+        let mut texts: Vec<&str> = vec![table.title(r)];
+        texts.extend(body.iter().map(String::as_str));
+        (page.as_ref().map(|p| edited_words(p.updated_at)), count_words(&texts))
+    });
+
+    // The first list.
+    let mut main = Vec::new();
+    if one.is_some() {
+        main.push(act("favorite", if favorite { "Remove from Favorites" } else { "Add to Favorites" }, "star", ""));
+        if table.columns() > 1 {
+            main.push(Act { more: true, ..act("property", "Edit property", "sliders", "") });
+        }
+        main.push(Act { more: true, ..act("open", "Open in", "side", "") });
+        main.push(act("copy-link", "Copy link", "link", ""));
+    }
+    main.push(act("duplicate", "Duplicate", "duplicate", "⌘D"));
+    if can_nest {
+        main.push(act("nest", "Nest under the row above", "indent", ""));
+    }
+    if nested {
+        main.push(act("unnest", "Move out", "outdent", ""));
+    }
+    main.push(act(
+        "delete",
+        match rows.len() {
+            1 => "Delete".to_string(),
+            n => format!("Delete {n} rows"),
+        },
+        "trash",
+        "Del",
+    ));
+    // The second lists.
+    let open_in = vec![act("side", "Side peek", "side", ""), act("full", "Full page", "expand", ""), act("tab", "New tab", "new-tab", "⌘ click")];
+    let properties: Vec<Act> = (1..table.columns()).map(|c| act(format!("cell-{c}"), table.heading(c), table.kind(c).icon(), "")).collect();
+    let subs = [("open", "Open in", open_in), ("property", "Edit", properties)];
+    let q = query();
+    let shown = row_acts(&main, &subs, &q);
+    let at = active().min(shown.len().saturating_sub(1));
+    let leaves: Vec<Act> = subs.iter().find(|(name, _, _)| *name == sub()).map(|(_, _, l)| l.clone()).unwrap_or_default();
+    let sub_at = sub_active().min(leaves.len().saturating_sub(1));
+
+    // What a command does.
+    let run = {
         let (p, b, rows) = (page_id.clone(), id.clone(), rows.clone());
-        move |_| state.rows_op(&p, &b, &rows, op)
-    };
-    let open = |how: Open| {
-        let (p, b) = (page_id.clone(), id.clone());
-        move |_| {
-            if let Some(r) = one {
-                state.open_row(&p, &b, r, how);
+        move |name: String| {
+            let (mut sub, mut sub_active) = (sub, sub_active);
+            let r = one;
+            match name.as_str() {
+                "property" | "open" => {
+                    let open: &'static str = if name == "open" { "open" } else { "property" };
+                    sub.set(if sub() == open { "" } else { open });
+                    sub_active.set(0);
+                }
+                "duplicate" | "delete" | "nest" | "unnest" => state.rows_op(&p, &b, &rows, &name),
+                "favorite" | "copy-link" => {
+                    if let Some(r) = r {
+                        state.row_page_do(&p, &b, r, &name);
+                    }
+                }
+                "side" | "full" | "tab" => {
+                    if let Some(r) = r {
+                        state.open_row(&p, &b, r, match name.as_str() {
+                            "side" => Open::Side,
+                            "full" => Open::Full,
+                            _ => Open::Tab,
+                        });
+                    }
+                }
+                cell => {
+                    if let (Some(r), Some(c)) = (r, cell.strip_prefix("cell-").and_then(|c| c.parse::<usize>().ok())) {
+                        state.edit_table_cell(&p, &b, r, c);
+                    }
+                }
             }
         }
     };
-    let page_do = |what: &'static str| {
-        let (p, b) = (page_id.clone(), id.clone());
-        move |_| {
-            if let Some(r) = one {
-                state.row_page_do(&p, &b, r, what);
+    let keys = {
+        let run = run.clone();
+        let shown = shown.clone();
+        let leaves = leaves.clone();
+        move |e: KeyboardEvent| {
+            let in_sub = !sub().is_empty() && query().trim().is_empty();
+            let (len, now) = if in_sub { (leaves.len(), sub_at) } else { (shown.len(), at) };
+            let step = |n: usize| if len == 0 { 0 } else { n % len };
+            match e.key() {
+                Key::ArrowDown | Key::ArrowUp => {
+                    e.prevent_default();
+                    let next = if e.key() == Key::ArrowDown { step(now + 1) } else { step(now + len.max(1) - 1) };
+                    if in_sub {
+                        sub_active.set(next);
+                    } else {
+                        active.set(next);
+                    }
+                }
+                Key::ArrowRight if !in_sub => {
+                    if let Some(a) = shown.get(at).filter(|a| a.more) {
+                        e.prevent_default();
+                        run(a.name.clone());
+                    }
+                }
+                Key::ArrowLeft if in_sub => {
+                    e.prevent_default();
+                    sub.set("");
+                }
+                Key::Enter => {
+                    e.prevent_default();
+                    let pick = if in_sub { leaves.get(sub_at) } else { shown.get(at) };
+                    if let Some(a) = pick {
+                        run(a.name.clone());
+                    }
+                }
+                _ => {}
             }
         }
+    };
+    let rows_label = match rows.len() {
+        1 => "Row".to_string(),
+        n => format!("{n} rows"),
     };
     rsx! {
         div { class: "popover table-menu row-menu", role: "menu", onclick: move |e| e.stop_propagation(),
-            if one.is_some() {
-                MenuRow { icon: "side", label: "Open at the side", name: "side", onpick: open(Open::Side) }
-                MenuRow { icon: "expand", label: "Open as a full page", name: "full", onpick: open(Open::Full) }
-                MenuRow { icon: "new-tab", label: "Open in a new tab", aside: "⌘ click", name: "tab", onpick: open(Open::Tab) }
+            div { class: "menu-search",
+                Icon { name: "search", size: 13 }
+                input {
+                    class: "menu-search-input",
+                    placeholder: "Search actions…",
+                    "aria-label": "Search actions",
+                    spellcheck: false,
+                    value: "{q}",
+                    onmounted: move |e: MountedEvent| async move {
+                        let _ = e.set_focus(true).await;
+                    },
+                    oninput: move |e: FormEvent| {
+                        query.set(e.value());
+                        active.set(0);
+                        sub.set("");
+                    },
+                    onkeydown: keys,
+                }
+            }
+            if q.trim().is_empty() {
+                div { class: "ai-menu-label", "{rows_label}" }
+            }
+            if shown.is_empty() {
+                div { class: "menu-hint", "No actions found" }
+            }
+            for (i, a) in shown.iter().cloned().enumerate() {
+                button {
+                    key: "{a.name}",
+                    // (A line above the commands that change the rows, and above Delete.)
+                    class: format!(
+                        "ai-menu-row{}{}{}",
+                        if i == at && sub().is_empty() { " kb" } else { "" },
+                        if a.more && sub() == a.name { " active" } else { "" },
+                        if i > 0 && (a.name == "delete" || (a.name == "duplicate" && one.is_some() && q.trim().is_empty())) { " sep-above" } else { "" }
+                    ),
+                    role: "menuitem",
+                    "data-item": "{a.name}",
+                    onmouseenter: move |_| active.set(i),
+                    onclick: {
+                        let run = run.clone();
+                        let name = a.name.clone();
+                        move |e: MouseEvent| {
+                            e.stop_propagation();
+                            run(name.clone());
+                        }
+                    },
+                    span { class: "ai-menu-value",
+                        Icon { name: a.icon, size: 14 }
+                        "{a.label}"
+                    }
+                    if a.more || !a.aside.is_empty() {
+                        span { class: "ai-menu-aside",
+                            "{a.aside}"
+                            if a.more {
+                                Icon { name: "chevron-right", size: 12 }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some((edited, words)) = foot.filter(|_| q.trim().is_empty()) {
                 div { class: "ai-menu-sep" }
+                div { class: "row-menu-foot",
+                    if let Some(edited) = edited {
+                        div { "Last edited" }
+                        div { class: "row-menu-when", "{edited}" }
+                    }
+                    div { "{words}" }
+                }
             }
-            if can_nest {
-                MenuRow { icon: "indent", label: "Nest under the row above", name: "nest", onpick: many("nest") }
+            if !leaves.is_empty() && q.trim().is_empty() {
+                div { class: "popover column-sub", role: "menu",
+                    for (i, a) in leaves.into_iter().enumerate() {
+                        button {
+                            key: "{a.name}",
+                            class: if i == sub_at { "ai-menu-row kb" } else { "ai-menu-row" },
+                            role: "menuitem",
+                            "data-item": "{a.name}",
+                            onmouseenter: move |_| sub_active.set(i),
+                            onclick: {
+                                let run = run.clone();
+                                let name = a.name.clone();
+                                move |e: MouseEvent| {
+                                    e.stop_propagation();
+                                    run(name.clone());
+                                }
+                            },
+                            span { class: "ai-menu-value",
+                                Icon { name: a.icon, size: 14 }
+                                "{a.label}"
+                            }
+                            if !a.aside.is_empty() {
+                                span { class: "ai-menu-aside", "{a.aside}" }
+                            }
+                        }
+                    }
+                }
             }
-            if nested {
-                MenuRow { icon: "outdent", label: "Move out", name: "unnest", onpick: many("unnest") }
-            }
-            MenuRow { icon: "duplicate", label: "Duplicate", name: "duplicate", onpick: many("duplicate") }
-            if one.is_some() {
-                MenuRow { icon: "link", label: "Copy link", name: "copy-link", onpick: page_do("copy-link") }
-                MenuRow { icon: "star", label: if favorite { "Remove from Favorites" } else { "Add to Favorites" }, name: "favorite", onpick: page_do("favorite") }
-            }
-            div { class: "ai-menu-sep" }
-            MenuRow {
-                icon: "trash",
-                label: match rows.len() {
-                    1 => "Delete".to_string(),
-                    n => format!("Delete {n} rows"),
-                },
-                name: "delete",
-                onpick: many("delete"),
-            }
-            div { class: "ai-menu-sep" }
-            div { class: "menu-hint", "⌘ or ⇧ click picks more rows" }
         }
     }
 }
@@ -985,5 +1227,55 @@ pub fn CellMenu(page_id: String, id: String, r: usize, c: usize, from: String, t
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod row_menu_tests {
+    use super::*;
+
+    fn names(acts: &[Act]) -> Vec<String> {
+        acts.iter().map(|a| a.label.clone()).collect()
+    }
+
+    #[test]
+    fn a_search_finds_commands_and_those_of_the_second_lists() {
+        let main = vec![
+            act("favorite", "Add to Favorites", "star", ""),
+            Act { more: true, ..act("open", "Open in", "side", "") },
+            Act { more: true, ..act("property", "Edit property", "sliders", "") },
+            act("duplicate", "Duplicate", "duplicate", "⌘D"),
+            act("delete", "Delete", "trash", "Del"),
+        ];
+        let subs = [
+            ("open", "Open in", vec![act("side", "Side peek", "side", ""), act("tab", "New tab", "new-tab", "")]),
+            ("property", "Edit", vec![act("cell-1", "Amount", "hash", ""), act("cell-2", "Date", "calendar", "")]),
+        ];
+        // Nothing searched for: the first list as it is.
+        assert_eq!(row_acts(&main, &subs, "  "), main);
+        // A word of a command, in any case.
+        assert_eq!(names(&row_acts(&main, &subs, "DUP")), ["Duplicate"]);
+        // A second list shows its commands, named in full, in its place.
+        assert_eq!(names(&row_acts(&main, &subs, "open")), ["Open in Side peek", "Open in New tab"]);
+        assert_eq!(names(&row_acts(&main, &subs, "tab")), ["Open in New tab"]);
+        assert_eq!(names(&row_acts(&main, &subs, "edit date")), ["Edit Date"]);
+        let edit = row_acts(&main, &subs, "amount");
+        assert_eq!((edit[0].name.as_str(), edit[0].more), ("cell-1", false));
+        assert!(row_acts(&main, &subs, "zebra").is_empty());
+    }
+
+    #[test]
+    fn the_foot_counts_words_and_characters() {
+        assert_eq!(count_words(&["Side Gig"]), "2 words, 8 characters");
+        assert_eq!(count_words(&["Rent", " Paid on the first. "]), "5 words, 22 characters");
+        assert_eq!(count_words(&["A"]), "1 word, 1 character");
+        assert_eq!(count_words(&[""]), "0 words, 0 characters");
+    }
+
+    #[test]
+    fn when_a_page_was_edited_in_words() {
+        let now = chrono::Local::now().timestamp_millis();
+        assert!(edited_words(now).starts_with("Today at "));
+        assert!(edited_words(now - 86_400_000).starts_with("Yesterday at "));
     }
 }

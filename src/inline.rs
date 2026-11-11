@@ -654,10 +654,13 @@ fn html_escape(s: &str) -> String {
     out
 }
 
-/// Links the editor may open: the web, mail, and this app's own page links.
+/// Links the editor may open: the web, mail, phone numbers and this app's
+/// own page links.
 pub fn safe_url(url: &str) -> bool {
     let lower = url.trim().to_ascii_lowercase();
     ["http://", "https://", "mailto:", PAGE_URL, OLD_PAGE_URL].iter().any(|p| lower.starts_with(p))
+        // A phone number, as a phone cell of a table writes it: digits only.
+        || lower.strip_prefix("tel:").is_some_and(|n| !n.is_empty() && n.trim_start_matches('+').bytes().all(|b| b.is_ascii_digit()))
 }
 
 fn run_html(r: &Run) -> String {
@@ -878,5 +881,6 @@ mod tests {
         assert_eq!(html, "<strong>&lt;b&gt;</strong> <a href=\"https://a.b\">x</a>");
         assert_eq!(to_html(BlockKind::Code, "a<b\n"), "a&lt;b\n<br>");
         assert!(safe_url("https://a") && !safe_url("javascript:alert(1)"));
+        assert!(safe_url("tel:+15550102000") && !safe_url("tel:") && !safe_url("tel:1;open"));
     }
 }

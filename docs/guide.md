@@ -177,7 +177,18 @@ NOTION2_DB=/tmp/notion2-test.db NOTION2_SELFTEST=/tmp/notion2-report.json cargo 
   total at the foot. Type `$3,500` in a cell and its column becomes US
   Dollar. A click on a choice cell opens its list: pick an option, or type
   a new one and press Return; the dots beside an option change its name
-  and colour. A table can have a name and an icon, stand beside another table,
+  and colour. A click on a date cell opens a month: pick a day, or type one
+  ("12 Dec", "tomorrow") in the box at its top and press Return; ↓ goes to
+  the month, where the arrows move the day; **Clear** empties the cell.
+  Under the month, **End date** gives it an end (click the first day, then
+  the last), **Include time** gives it a time of day, and **Remind** sends a
+  Mac notification before it (a day with no time reminds at 9 AM). The cell
+  says it in words, as `Tue 3 Nov 2:30 PM → 4 PM ⏰ 15 min before`, and a
+  small bell shows a reminder.
+  ⌘ click (or the small button at its end) opens a link, writes to an email
+  address or calls a phone number. A cell that its kind cannot read (words in
+  a number column) is grey, and its tip says why; a click on a formula or a
+  pace says what it is worked out from. A table can have a name and an icon, stand beside another table,
   and show its rows as a board, a list, a gallery or a calendar. Its menu
   (the ⋯ at its top right) also filters, sorts, groups and colours its rows,
   and locks its columns; a filter or a sort shows as a small chip above the
@@ -185,9 +196,14 @@ NOTION2_DB=/tmp/notion2-test.db NOTION2_SELFTEST=/tmp/notion2-report.json cargo 
   the values of the row at the top and room to write below. The handle at
   the left of a row adds a row, moves it, nests it under the row above, or
   takes it out; it shows when the pointer is on the row or beside it at the
-  left of the table. To take several out at once, pick them: ⌘ click the handle
-  of each row (⇧ click picks all the rows up to it), or ⌘ click and ⇧ click
-  the headings of columns. A small bar over the table says how many are
+  left of the table. Its menu has a box at its top that finds a command as
+  you type (**Edit property** changes one value of the row, **Open in** opens
+  it at the side, as a full page or in a new tab), and at its foot how long
+  the row's page is. To take several out at once, pick them: the box at the
+  left of each row picks it (⇧ click picks all the rows up to it, and the box
+  in the headings picks all or none), ⌘ click the handle of a row does the
+  same, and ⌘ click and ⇧ click pick the headings of columns. ⌘D copies the
+  picked rows. A small bar over the table says how many are
   picked; **Delete** there, or the Delete key, takes them out, and one Undo
   brings them all back. New rows can start from a template; in a table with a date
   column, **New row for today** starts a row. A chart block (type `/chart`)

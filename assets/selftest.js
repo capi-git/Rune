@@ -195,6 +195,16 @@ const fillCell = (cell, text) => {
   cell.dispatchEvent(new Event('input', { bubbles: true }));
   cell.dispatchEvent(new Event('change', { bubbles: true }));
 };
+// A date cell opens a month: the day is typed in its box, and Return writes it.
+const fillDate = async (cell, text) => {
+  cell.click();
+  const box = await until(() => $('.date-picker .pick-input'));
+  if (!box) throw new Error('no day picker came');
+  box.value = text;
+  box.dispatchEvent(new Event('input', { bubbles: true }));
+  key(box, 'Enter');
+  await until(() => !$('.date-picker'), 1500);
+};
 
 await wait(600);
 
@@ -2242,7 +2252,7 @@ await run('Tables as databases', async () => {
   check('The chips go with the filter and the sort', !$('.table-chips', wrap()) && shown() === 'Rent,Groceries,Dinner', shown());
 
   // Groups, and the other views of the same rows.
-  fillCell(cell(3, 3), 'today');
+  await fillDate(cell(3, 3), 'today');
   document.activeElement.blur();
   await columnDo(box(), 2, 'group');
   const groups = () => $$('.group-row', box()).map((g) => g.textContent.trim()).join(',');
@@ -2275,7 +2285,7 @@ await run('Tables as databases', async () => {
   // Rows are picked by their handle, and stay picked when their menu closes.
   $('[data-row-op="row-menu"]', await rowHandle(box(), 1)).click();
   const rowMenu = await until(() => $('.row-menu', box().parentElement));
-  check('The handle of a row opens its menu, on top of the page', rowMenu && onTop($('[data-item="side"]', rowMenu)) && $('.table-picked', wrap())?.textContent === '1 row selected', $('.table-picked', wrap())?.textContent);
+  check('The handle of a row opens its menu, on top of the page', rowMenu && onTop($('[data-item="open"]', rowMenu)) && $('.table-picked', wrap())?.textContent === '1 row selected', $('.table-picked', wrap())?.textContent);
   await wait(150);
   snap('table-row-menu');
   await closeMenu();
@@ -2578,6 +2588,8 @@ await run('Table menus, handles and picking', async () => {
     return { ok: Math.abs(m.left - left) < 3 && (raised ? m.top < a.bottom + 4 : Math.abs(m.top - (a.bottom + 4)) < 3), detail: `menu at ${Math.round(m.left)},${Math.round(m.top)}; hangs from ${Math.round(left)},${Math.round(a.bottom)}; zoom ${z.toFixed(2)}${raised ? '; raised at the foot of the window' : ''}` };
   };
   const both = (...parts) => ({ ok: parts.every((p) => p.ok), detail: parts.map((p) => p.detail).join(' | ') });
+  // Where the menu of a row hangs: at the first cell, past the strip of the boxes that pick rows.
+  const rowLeft = () => rect(box()).left + parseFloat(getComputedStyle(box()).paddingLeft) * scale();
   const openRowMenu = async (r) => {
     $('[data-row-op="row-menu"]', await rowHandle(box(), r)).click();
     const menu = await until(() => $('.row-menu.anchored', frame()));
@@ -2587,7 +2599,7 @@ await run('Table menus, handles and picking', async () => {
   let menu = null;
   const rowMenuCheck = async (name, r) => {
     const menu = await openRowMenu(r);
-    const got = menu ? both(whole(menu), under(menu, tr(r), rect(box()).left)) : { ok: false, detail: 'no menu' };
+    const got = menu ? both(whole(menu), under(menu, tr(r), rowLeft())) : { ok: false, detail: 'no menu' };
     check(name, got.ok && $('[data-item="duplicate"]', menu) && $('[data-item="delete"]', menu), got.detail);
     return menu;
   };
@@ -2905,7 +2917,7 @@ await run('Table menus, handles and picking', async () => {
   await clickHandle(5);
   menu = await until(() => $('.row-menu.anchored', frame()));
   await wait(220);
-  got = menu ? both(whole(menu), under(menu, tr(5), rect(box()).left)) : { ok: false, detail: 'no menu' };
+  got = menu ? both(whole(menu), under(menu, tr(5), rowLeft())) : { ok: false, detail: 'no menu' };
   check('A click on the handle of a picked row opens the menu of them all, under that row', got.ok && $('[data-item="delete"]', menu)?.textContent.includes('Delete 2 rows') && picked() === '5,7', `${got.detail} | ${menu && $('[data-item="delete"]', menu)?.textContent} | ${picked()}`);
   $('[data-item="delete"]', menu).click();
   check('…and Delete there takes them all out', await until(() => names() === 'Alpha,Beta,Gamma,Delta,Zeta' && picked() === ''), names());
@@ -2913,7 +2925,7 @@ await run('Table menus, handles and picking', async () => {
   await until(() => names() === ALL_NAMES, 3000);
   await clickHandle(3);
   await until(() => $('.row-menu', frame()));
-  check('A plain click on a handle still picks that row alone and opens its menu', picked() === '3' && bar() === '1 row selected' && $('.row-menu [data-item="side"]', frame()), state());
+  check('A plain click on a handle still picks that row alone and opens its menu', picked() === '3' && bar() === '1 row selected' && $('.row-menu [data-item="open"]', frame()), state());
   await closeMenu();
   $('[data-picked="clear"]', wrap()).click();
   check('The cross in the bar lets the rows go', await until(() => picked() === '' && !$('.picked-bar', wrap())), state());
@@ -3010,6 +3022,284 @@ await run('Table menus, handles and picking', async () => {
   await closeMenu();
   $('[data-peek="close"]', shownPane('Alpha'))?.click();
   await until(() => $$('.pane').filter((p) => p.offsetParent).length === 1);
+});
+
+await run('Cell editors, row boxes and row search', async () => {
+  // Asked on 2026-11-11, from Notion: a date cell opens a month to pick a day
+  // from, and each kind of cell has a fitting editor; a box at the left of
+  // each row picks it (one in the headings picks all); the menu of a row
+  // has a box that finds its commands.
+  await oneTab();
+  while ($$('.pane').filter((p) => p.offsetParent).length > 1) {
+    T().command('close_split');
+    await wait(150);
+  }
+  const title = await newPage('Editors check');
+  key(title, 'Enter');
+  const first = await until(() => document.activeElement?.classList.contains('blk') && document.activeElement);
+  const pane = () => shownPane('Editors check');
+  const md = [
+    '| Item | When | Price | Qty | Cost | Phone | Mail | Time |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- |',
+    '| Pens | 2026-11-03 | $2.00 | 3 |  | +1 (555) 010-2000 | sam@example.com | 34:00 |',
+    '| Paper |  |  | 2 |  | call Sam | nobody | soon |',
+    '| Ink | 2026-10-20 | lots | 1 |  |  |  |  |',
+    '<!-- columns: text | date | number USD | number | formula USD = Price * Qty | phone | email | time -->',
+    '<!-- table: Supplies | frozen 1 -->',
+    '',
+    'End',
+  ].join('\n');
+  const clip = new DataTransfer();
+  clip.setData('text/plain', md);
+  first.dispatchEvent(new ClipboardEvent('paste', { clipboardData: clip, bubbles: true, cancelable: true }));
+  const wrap = () => $('.table-wrap', pane());
+  const box = () => $('.table-block', wrap());
+  const frame = () => box().parentElement;
+  await until(() => wrap() && $$('tr[data-r]', box()).length === 4, 4000);
+  await wait(250);
+  const cell = (r, c) => $(`.cell[data-r="${r}"][data-c="${c}"]`, box());
+  const tr = (r) => $(`tr[data-r="${r}"]`, box());
+  const rect = (el) => el.getBoundingClientRect();
+  const onTopAt = (el) => {
+    const b = rect(el);
+    const at = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+    return !!at && el.contains(at);
+  };
+  const inWindow = (el) => {
+    const b = rect(el);
+    return b.width > 0 && b.left >= 0 && b.top >= 0 && b.right <= innerWidth + 0.5 && b.bottom <= innerHeight + 0.5;
+  };
+  const closeAll = async () => {
+    $('.backdrop')?.click();
+    await until(() => !$('.table-menu'), 1500);
+  };
+  // A day as a date column writes it: "Tue 3 Nov", with the year when not this year's.
+  const dayWords = (d) => {
+    const w = d.toLocaleDateString('en-GB', { weekday: 'short' }).slice(0, 3);
+    const m = d.toLocaleDateString('en-GB', { month: 'short' }).slice(0, 3);
+    return `${w} ${d.getDate()} ${m}${d.getFullYear() === new Date().getFullYear() ? '' : ' ' + d.getFullYear()}`;
+  };
+  const picker = () => $('.date-picker.anchored', frame());
+
+  // ----- a date cell: a month to pick a day from -------------------------------
+  const date = cell(1, 1);
+  check('A date cell is a button that shows its day', date && date.tagName === 'BUTTON' && date.textContent.trim() === dayWords(new Date(2026, 10, 3)), date && `${date.tagName} "${date.textContent.trim()}"`);
+  date.click();
+  let p = await until(picker);
+  await wait(220);
+  const field = p && $('.pick-input', p);
+  check('A click on it opens the day picker: the box with its day, its month, today marked', p && field && document.activeElement === field && field.value === date.value && $('.date-month', p)?.textContent === 'November 2026' && $('.date-day.on', p)?.dataset.day === '2026-11-03' && $('.date-day.today', p)?.dataset.day === (() => { const t = new Date(); return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`; })(), p && `${field?.value} | ${$('.date-month', p)?.textContent} | on ${$('.date-day.on', p)?.dataset.day} | today ${$('.date-day.today', p)?.dataset.day} | keys in ${document.activeElement?.className}`);
+  check('…all of it in the window, on top, under its cell', p && inWindow(p) && onTopAt($('.date-day', p)) && onTopAt($('[data-item="clear"]', p)) && (Math.abs(rect(p).top - (rect(date.closest('td')).bottom + 4)) < 3 || (rect(p).bottom >= innerHeight - 10 && rect(p).top < rect(date.closest('td')).bottom + 4)), p && `${[rect(p).left, rect(p).top, rect(p).right, rect(p).bottom].map(Math.round)} under ${Math.round(rect(date.closest('td')).bottom)}`);
+  snap('date-picker');
+  $('.date-step[aria-label="Next month"]', p).click();
+  await until(() => $('.date-month', p)?.textContent === 'December 2026');
+  $('.date-day[data-day="2026-12-09"]', p).click();
+  check('A click on a day writes it in the cell and closes the picker', await until(() => !picker() && cell(1, 1).value === dayWords(new Date(2026, 11, 9))), `${cell(1, 1)?.value}`);
+  // Typed in its box: the month follows, Return writes it.
+  cell(2, 1).click();
+  p = await until(picker);
+  typeIn($('.pick-input', p), '14 Feb 2027');
+  check('A day typed in the box moves the month to it', await until(() => $('.date-month', p)?.textContent === 'February 2027'), $('.date-month', p)?.textContent);
+  key($('.pick-input', p), 'Enter');
+  check('…and Return writes it in the cell, as the column writes days, and gives the cell back the keyboard', await until(() => !picker() && cell(2, 1).value === dayWords(new Date(2027, 1, 14)) && document.activeElement === cell(2, 1)), `${cell(2, 1)?.value} | keys in ${document.activeElement?.className}`);
+  // The keyboard: a letter opens it to type in; ↓ goes to the month, the arrows move the day, Return picks it.
+  key(cell(2, 1), '3');
+  p = await until(picker);
+  check('A key typed on a date cell opens its picker with that key in the box', p && (await until(() => $('.pick-input', p)?.value === '3')), p && $('.pick-input', p)?.value);
+  const typed = $('.pick-input', p);
+  typed.value = '';
+  typed.dispatchEvent(new Event('input', { bubbles: true }));
+  typeIn(typed, '2026-11-20');
+  await until(() => $('.date-month', p)?.textContent === 'November 2026');
+  key(typed, 'ArrowDown');
+  const atDay = await until(() => document.activeElement?.classList.contains('date-day') && document.activeElement);
+  check('↓ goes from the box to the month, on the day typed', atDay && atDay.dataset.day === '2026-11-20', atDay?.dataset.day || document.activeElement?.className);
+  key(atDay, 'ArrowRight');
+  key(document.activeElement, 'ArrowDown');
+  const moved = await until(() => document.activeElement?.dataset.day === '2026-11-28' && document.activeElement);
+  check('…where → moves a day and ↓ a week', moved, document.activeElement?.dataset.day);
+  moved?.click();
+  check('…and that day is written', await until(() => !picker() && cell(2, 1).value === dayWords(new Date(2026, 10, 28))), cell(2, 1)?.value);
+  // Clear, and Escape.
+  cell(3, 1).click();
+  p = await until(picker);
+  $('[data-item="clear"]', p).click();
+  check('Clear empties the cell', await until(() => !picker() && cell(3, 1).value === ''), cell(3, 1)?.value);
+  cell(1, 1).click();
+  p = await until(picker);
+  key($('.pick-input', p), 'Escape');
+  check('Escape closes the picker, the day as it was, and the keyboard goes back to the cell', await until(() => !picker() && document.activeElement === cell(1, 1), 1500) && cell(1, 1).value === dayWords(new Date(2026, 11, 9)), `${cell(1, 1)?.value} | keys in ${document.activeElement?.className}`);
+
+  // ----- an end date, a time of day, a reminder (as Notion's picker has) -------
+  const nine = dayWords(new Date(2026, 11, 9));
+  cell(1, 1).click();
+  p = await until(picker);
+  $('[data-item="time"]', p).click();
+  check('Include time gives the day a time, 9 AM, in a box to change it', await until(() => cell(1, 1).value === `${nine} 9 AM` && $('[data-item="start-time"]', picker())?.value === '9 AM'), `${cell(1, 1).value} | ${$('[data-item="start-time"]', picker())?.value}`);
+  const startTime = $('[data-item="start-time"]', picker());
+  startTime.value = '2:30 pm';
+  startTime.dispatchEvent(new Event('change', { bubbles: true }));
+  check('A time typed in its box is written as the column writes times', await until(() => cell(1, 1).value === `${nine} 2:30 PM`), cell(1, 1).value);
+  $('[data-item="end"]', picker()).click();
+  check('End date gives it an end: an hour later the same day', await until(() => cell(1, 1).value === `${nine} 2:30 PM → 3:30 PM` && $('[data-item="end-time"]', picker())?.value === '3:30 PM'), cell(1, 1).value);
+  $('.date-day[data-day="2026-12-12"]', picker()).click();
+  check('…a click on a day then sets the end, the picker stays open, and the days between are marked', await until(() => cell(1, 1).value === `${nine} 2:30 PM → ${dayWords(new Date(2026, 11, 12))} 3:30 PM` && picker() && $('.date-day[data-day="2026-12-10"]', picker())?.classList.contains('in-range') && $('.date-day[data-day="2026-12-12"]', picker())?.classList.contains('on')), cell(1, 1).value);
+  $('[data-item="remind"]', picker()).click();
+  const fifteen = await until(() => $('[data-remind="15"]', picker()));
+  check('Remind lists the times before it to be reminded', fifteen && $$('[data-remind]', picker()).length === 10, `${$$('[data-remind]', picker()).length} choices`);
+  fifteen?.click();
+  check('…and one chosen is written after the day, with a bell in the cell', await until(() => cell(1, 1).value.endsWith('⏰ 15 min before') && $('.date-bell', cell(1, 1)) && !cell(1, 1).textContent.includes('⏰')), `${cell(1, 1).value} | ${cell(1, 1).textContent}`);
+  await wait(200);
+  snap('date-picker-full');
+  $('[data-item="end"]', picker()).click();
+  await until(() => !cell(1, 1).value.includes('→'));
+  $('[data-item="time"]', picker()).click();
+  check('Both switched off: the day alone, with its reminder at 9 AM', await until(() => cell(1, 1).value === `${nine} ⏰ 15 min before` && !$('[data-item="start-time"]', picker())), cell(1, 1).value);
+  $('[data-item="remind"]', picker()).click();
+  (await until(() => $('[data-remind=""]', picker())))?.click();
+  check('Remind: None takes the reminder away', await until(() => cell(1, 1).value === nine && !$('.date-bell', cell(1, 1))), cell(1, 1).value);
+  await closeAll();
+
+  // ----- numbers, times, addresses, formulas -----------------------------------
+  const price = cell(3, 2);
+  check('A cell of a money column that is no number is grey, and says why', price.classList.contains('odd') && /Not a number/.test(price.title) && !cell(1, 2).classList.contains('odd'), `${price.className} "${price.title}"`);
+  const empty = cell(2, 2);
+  check('An empty cell of a money column shows what goes in it ($0.00), only while it has the keyboard', empty.placeholder === '$0.00' && empty.classList.contains('hinted'), `"${empty.placeholder}" ${empty.className}`);
+  check('A time cell that is no length of time is grey too', cell(2, 7).classList.contains('odd') && !cell(1, 7).classList.contains('odd'), cell(2, 7).className);
+  delete document.body.dataset.opened;
+  const phoneGo = $('[data-go]', cell(1, 5).closest('.cell-link'));
+  phoneGo?.click();
+  check('A phone number has a button that calls it', phoneGo && (await until(() => document.body.dataset.opened === 'tel:+15550102000', 1500)), `${!!phoneGo} ${document.body.dataset.opened}`);
+  check('…and words that are no phone number have none, and are grey', !$('[data-go]', cell(2, 5).closest('.cell-link')) && cell(2, 5).classList.contains('odd'), cell(2, 5).className);
+  delete document.body.dataset.opened;
+  cell(1, 6).dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, metaKey: true, button: 0 }));
+  check('⌘ and a click on an email address writes to it', await until(() => document.body.dataset.opened === 'mailto:sam@example.com', 1500), document.body.dataset.opened);
+  delete document.body.dataset.opened;
+  cell(1, 6).dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
+  check('…a plain click does not (the caret goes in it)', !(await until(() => document.body.dataset.opened, 600)), document.body.dataset.opened);
+  const cost = cell(1, 4);
+  check('A formula cell shows what it works out', cost.value === '$6.00', cost.value);
+  cost.click();
+  const note = await until(() => $('.worked-out.anchored', frame()));
+  check('A click on a formula cell says what it is worked out from, and that it is not typed in', note && /= Price \* Qty/.test(note.textContent) && /cannot be typed in/.test(note.textContent) && inWindow(note), note?.textContent);
+  $('[data-item="edit-formula"]', note).click();
+  check('…and opens the menu of its column, where the formula is', await until(() => $('.column-menu [data-item="formula"]', frame())), $('.table-menu')?.className);
+  await closeAll();
+
+  // ----- the boxes that pick rows ---------------------------------------------
+  const picked = () => $$('tr.picked', box()).map((t) => t.dataset.r).join(',');
+  const bar = () => $('.picked-bar .table-picked', wrap())?.textContent || '';
+  const check1 = $('.row-check', tr(1));
+  tr(1).dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
+  await wait(220);
+  const cb = rect(check1);
+  const fc = rect($('td[data-col="0"]', tr(1)));
+  check('A row with the pointer shows a box at its left, beside its first cell, inside the table and on top', getComputedStyle(check1).opacity === '1' && cb.right <= fc.left + 1 && cb.left >= rect(box()).left - 0.5 && onTopAt(check1) && Math.abs(cb.top + cb.height / 2 - (fc.top + 16.5)) < 2.5, `${[cb.left, cb.top, cb.right, cb.bottom].map(Math.round)}; cell ${Math.round(fc.left)},${Math.round(fc.top)}; seen ${getComputedStyle(check1).opacity}`);
+  const handle = await rowHandle(box(), 1);
+  const grip = rect($('[data-row-op="row-menu"]', handle));
+  check('…with the handle of the row at its left', grip.right <= cb.left + 0.5 && cb.left - grip.right < 12, `handle ends at ${Math.round(grip.right)}, box from ${Math.round(cb.left)}`);
+  check('A row with no pointer hides its box', getComputedStyle($('.row-check', tr(3))).opacity === '0', getComputedStyle($('.row-check', tr(3))).opacity);
+  // Scrolled sideways: the frozen first column stays right of the strip of
+  // the boxes, its box stays, and no cell that scrolls shows in the strip.
+  box().scrollLeft = 260;
+  await wait(150);
+  const strip = parseFloat(getComputedStyle(box()).paddingLeft);
+  const fcs = rect($('td[data-col="0"]', tr(1)));
+  const inStrip = document.elementFromPoint(rect(box()).left + 4, fcs.top + 6);
+  const boxNow = rect($('.row-check', tr(1)));
+  check('A table scrolled sideways keeps its frozen first column right of the strip of the boxes, and its box beside it', box().scrollLeft > 100 && Math.abs(fcs.left - (rect(box()).left + strip)) < 1.5 && Math.abs(boxNow.left - cb.left) < 1 && (!inStrip || !inStrip.closest('td') || inStrip.closest('td').dataset.col === '0'), `scrolled ${box().scrollLeft}; first cell at ${Math.round(fcs.left)}, box ${Math.round(rect(box()).left)} + ${strip}; check at ${Math.round(boxNow.left)} (was ${Math.round(cb.left)}); in the strip: ${inStrip?.className} of column ${inStrip?.closest('td')?.dataset.col}`);
+  box().scrollLeft = 0;
+  await wait(100);
+  check1.click();
+  check('A click on the box picks the row, with no menu', await until(() => picked() === '1' && bar() === '1 row selected' && !$('.row-menu') && $('.row-check', tr(1)).getAttribute('aria-checked') === 'true'), `${picked()} | ${bar()}`);
+  const head = () => $('.head-check', box());
+  check('…and the box of the headings shows that some are picked', await until(() => head().classList.contains('some') && head().getAttribute('aria-checked') === 'mixed' && getComputedStyle(head()).opacity === '1'), `${head().className} ${head().getAttribute('aria-checked')} ${getComputedStyle(head()).opacity}`);
+  $('.row-check', tr(3)).dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, shiftKey: true }));
+  check('⇧ and a click on a box picks the rows up to it', await until(() => picked() === '1,2,3' && bar() === '3 rows selected'), picked());
+  snap('row-boxes');
+  check('…then the box of the headings is ticked', await until(() => head().classList.contains('all') && head().getAttribute('aria-checked') === 'true'), head().className);
+  $('.row-check', tr(2)).click();
+  check('A click on a ticked box lets that row go', await until(() => picked() === '1,3'), picked());
+  head().click();
+  check('The box of the headings picks all rows', await until(() => picked() === '1,2,3'), picked());
+  head().click();
+  check('…and, with all picked, none', await until(() => picked() === '' && !$('.picked-bar', wrap())), picked());
+  $('.row-check', tr(2)).click();
+  await until(() => picked() === '2');
+  const rowsNow = $$('tr[data-r]', box()).length;
+  document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'd', metaKey: true, bubbles: true, cancelable: true }));
+  check('⌘D with a picked row adds a copy of it', await until(() => $$('tr[data-r]', box()).length === rowsNow + 1 && $$('tr[data-r]', box()).filter((t) => $('.cell[data-c="0"]', t)?.value === 'Paper').length === 2), `${$$('tr[data-r]', box()).length} rows`);
+  T().command('undo');
+  await until(() => $$('tr[data-r]', box()).length === rowsNow, 3000);
+  key(document.body, 'Escape');
+  await until(() => picked() === '', 1500);
+
+  // ----- the menu of a row, with a box to find a command -----------------------
+  $('[data-row-op="row-menu"]', await rowHandle(box(), 1)).click();
+  const menu = await until(() => $('.row-menu.anchored', frame()));
+  await wait(220);
+  const search = menu && $('.menu-search-input', menu);
+  const items = () => $$('.ai-menu-row', menu).filter((b) => !b.closest('.column-sub')).map((b) => b.dataset.item);
+  check('The menu of a row has a box to find a command, with the keyboard in it', search && document.activeElement === search && search.placeholder === 'Search actions…', `${search?.placeholder} | keys in ${document.activeElement?.className}`);
+  check('…then its commands: Favorites, Edit property, Open in, Copy link, Duplicate (⌘D), Delete (Del)', items().join(',') === 'favorite,property,open,copy-link,duplicate,delete' && /⌘D/.test($('[data-item="duplicate"]', menu).textContent) && /Del/.test($('[data-item="delete"]', menu).textContent) && $('.ai-menu-label', menu)?.textContent === 'Row', items().join(','));
+  check('…and at its foot how long the row is', /1 word, 4 characters/.test($('.row-menu-foot', menu)?.textContent), $('.row-menu-foot', menu)?.textContent);
+  check('All of the menu is in the window and on top', inWindow(menu) && onTopAt($('[data-item="delete"]', menu)) && onTopAt(search), `${[rect(menu).left, rect(menu).top, rect(menu).right, rect(menu).bottom].map(Math.round)}`);
+  snap('row-menu-search');
+  typeIn(search, 'dup');
+  check('Typed words keep only the commands that have them', await until(() => items().join(',') === 'duplicate'), items().join(','));
+  search.value = '';
+  search.dispatchEvent(new Event('input', { bubbles: true }));
+  typeIn(search, 'tab');
+  check('…the commands of its second lists too, named in full', await until(() => items().join(',') === 'tab' && $('[data-item="tab"]', menu).textContent.includes('Open in New tab')), items().join(','));
+  search.value = '';
+  search.dispatchEvent(new Event('input', { bubbles: true }));
+  typeIn(search, 'zzz');
+  check('…and says when none has them', await until(() => items().length === 0 && /No actions found/.test(menu.textContent)), menu.textContent);
+  search.value = '';
+  search.dispatchEvent(new Event('input', { bubbles: true }));
+  await until(() => items().length === 6);
+  $('[data-item="open"]', menu).click();
+  const sub = await until(() => $('.column-sub', menu));
+  check('"Open in" opens a second list: Side peek, Full page, New tab', sub && $$('.ai-menu-row', sub).map((b) => b.dataset.item).join(',') === 'side,full,tab' && onTopAt($('[data-item="tab"]', sub)), sub && $$('.ai-menu-row', sub).map((b) => b.dataset.item).join(','));
+  $('[data-item="property"]', menu).click();
+  const props = await until(() => $('.column-sub [data-item="cell-1"]', menu) && $('.column-sub', menu));
+  check('"Edit property" lists the other columns', props && $$('.ai-menu-row', props).length === 7 && $('[data-item="cell-1"]', props).textContent.includes('When'), props && $$('.ai-menu-row', props).map((b) => b.textContent).join(','));
+  $('[data-item="cell-1"]', props).click();
+  check('…and a date there opens the day picker of that row', await until(() => picker() && !$('.row-menu') && $('.hung[data-hang="cell"]', frame())?.dataset.r === '1'), $('.hung', frame())?.dataset.r);
+  await closeAll();
+  // The keyboard: ↓ and Return in the box.
+  $('[data-row-op="row-menu"]', await rowHandle(box(), 2)).click();
+  const menu2 = await until(() => $('.row-menu.anchored', frame()));
+  const s2 = menu2 && $('.menu-search-input', menu2);
+  typeIn(s2, 'dupl');
+  await until(() => $$('.ai-menu-row', menu2).length === 1);
+  const before = $$('tr[data-r]', box()).length;
+  key(s2, 'Enter');
+  check('Return runs the command the box found', await until(() => $$('tr[data-r]', box()).length === before + 1 && !$('.row-menu')), `${$$('tr[data-r]', box()).length} rows`);
+  T().command('undo');
+  await until(() => $$('tr[data-r]', box()).length === before, 3000);
+  key(document.body, 'Escape');
+
+  // ----- the same editors at the top of the row's page --------------------------
+  $('tr[data-r="1"] .row-open', box()).click();
+  const side = await until(() => shownPane('Pens'), 4000);
+  await wait(400);
+  const sideDate = side && $('.row-values .cell.pick.date[data-c="1"]', side);
+  sideDate?.click();
+  const sidePicker = await until(() => side && $('.row-values .date-picker.anchored', side));
+  await wait(250);
+  check("A date at the top of a row's page opens the day picker there, all of it in sight", sidePicker && inWindow(sidePicker) && onTopAt($('.date-day', sidePicker)), sidePicker ? `${[rect(sidePicker).left, rect(sidePicker).top, rect(sidePicker).right, rect(sidePicker).bottom].map(Math.round)}` : 'no picker');
+  snap('date-picker-row-page');
+  if (sidePicker && !$('.date-day[data-day="2026-12-24"]', sidePicker)) $('.date-step[aria-label="Next month"]', sidePicker)?.click();
+  const eve = await until(() => sidePicker && $('.date-day[data-day="2026-12-24"]', sidePicker));
+  eve?.click();
+  check('…and a day picked there is the day of the row in the table too', await until(() => cell(1, 1).value === dayWords(new Date(2026, 11, 24)) && $('.row-values .cell.pick.date[data-c="1"]', side)?.textContent.trim() === dayWords(new Date(2026, 11, 24))), `${cell(1, 1).value} | ${side && $('.row-values .cell.pick.date[data-c="1"]', side)?.textContent}`);
+  side && $('.row-values .cell.computed[data-c="4"]', side)?.click();
+  const sideNote = await until(() => side && $('.row-values .worked-out', side));
+  check("A formula at the top of a row's page says what it is worked out from", sideNote && /= Price \* Qty/.test(sideNote.textContent) && !$('[data-item="edit-formula"]', sideNote), sideNote?.textContent);
+  await closeAll();
+  T().command('close_split');
+  await wait(200);
 });
 
 await run('Choices like Notion', async () => {

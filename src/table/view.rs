@@ -3,7 +3,7 @@
 //! the rows as they are kept.
 
 use super::{checked, day, number, parts, seconds, Kind, Table};
-use chrono::Datelike;
+use chrono::{Datelike, Timelike};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
@@ -407,7 +407,10 @@ impl Table {
         match kind {
             Kind::Checkbox => Key::Amount(if checked(text) { 1.0 } else { 0.0 }),
             _ if text.is_empty() => Key::None,
-            Kind::Date => day(text, crate::when::today()).map(|d| Key::Amount(d.num_days_from_ce() as f64)).unwrap_or_else(words),
+            // (By day, then by time: a day with no time comes first that day.)
+            Kind::Date => super::date::When::read(text, crate::when::today(), false)
+                .map(|w| Key::Amount(w.start.num_days_from_ce() as f64 + w.time.map_or(0.0, |t| (t.num_seconds_from_midnight() as f64 + 1.0) / 86_401.0)))
+                .unwrap_or_else(words),
             // (In the order of its options, as Notion sorts them.)
             Kind::Choice | Kind::Status => self.option_place(c, text).map(|at| Key::Amount(at as f64)).unwrap_or_else(words),
             _ if kind.is_amount() => self.value(r, c).map(Key::Amount).unwrap_or_else(words),

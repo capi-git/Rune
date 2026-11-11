@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use std::cell::OnceCell;
 
 pub mod choice;
+pub mod date;
 pub mod money;
 pub mod view;
 pub use choice::{Choice, Color};
@@ -1115,6 +1116,43 @@ impl Table {
         (distance > 0.0).then(|| time / distance)
     }
 
+    /// What a worked-out column is worked out from, in words (shown when one
+    /// of its cells is clicked): "" for a column that is typed in.
+    pub fn worked_out_from(&self, c: usize) -> String {
+        match self.kind(c) {
+            Kind::Formula => {
+                let formula = self.column(c).formula;
+                if formula.trim().is_empty() {
+                    "No formula yet. Write one in the column's menu.".to_string()
+                } else {
+                    format!("= {}", formula.trim())
+                }
+            }
+            Kind::Pace => match (self.first_of(Kind::Number), self.first_of(Kind::Time)) {
+                (Some(n), Some(t)) => {
+                    let unit = self.column(n).unit.filter(|u| !u.trim().is_empty()).unwrap_or_else(|| "unit".to_string());
+                    format!("{} ÷ {}: the time for each {unit}", self.heading(t), self.heading(n))
+                }
+                _ => "Needs a number column (the distance) and a time column.".to_string(),
+            },
+            _ => String::new(),
+        }
+    }
+
+    /// The reminders of the date cells of the table: (row, column, when).
+    pub fn date_reminders(&self, today: NaiveDate) -> Vec<(usize, usize, chrono::NaiveDateTime)> {
+        let columns: Vec<usize> = (0..self.columns()).filter(|&c| self.kind(c) == Kind::Date).collect();
+        let mut out = Vec::new();
+        for r in self.body() {
+            for &c in &columns {
+                if let Some(at) = date::When::read(self.cell(r, c), today, false).and_then(|w| w.remind_at()) {
+                    out.push((r, c, at));
+                }
+            }
+        }
+        out
+    }
+
     /// The day in a cell of a date column.
     pub fn day(&self, r: usize, c: usize, today: NaiveDate) -> Option<NaiveDate> {
         day(self.cell(r, c), today)
@@ -1275,7 +1313,7 @@ impl Table {
         let col = self.column(c);
         let tidy = match col.kind {
             Kind::Number if !col.format.is_empty() || col.places.is_some() => self.tidy_number(c, &text),
-            Kind::Date => whole_day(&text, today).map(|d| format_day(d, today)),
+            Kind::Date => date::When::read(&text, today, true).map(|w| w.write(today)),
             Kind::Time => seconds(&text).map(clock),
             _ => None,
         };
@@ -1291,7 +1329,7 @@ impl Table {
     pub fn put(&mut self, r: usize, c: usize, text: &str, today: NaiveDate) {
         let text = text.trim();
         let tidy = match self.kind(c) {
-            Kind::Date => whole_day(text, today).map(|d| format_day(d, today)),
+            Kind::Date => date::When::read(text, today, true).map(|w| w.write(today)),
             Kind::Time => seconds(text).map(clock),
             Kind::Number => self.tidy_number(c, text),
             Kind::Checkbox => Some(if checked(text) { "x".to_string() } else { String::new() }),
@@ -1841,7 +1879,9 @@ pub fn checked(text: &str) -> bool {
 /// "Dec 1, 2026", "today", "yesterday". With no year: the nearest such day
 /// ("3 January" in December is next month).
 pub fn day(text: &str, today: NaiveDate) -> Option<NaiveDate> {
-    let text = text.trim().to_lowercase();
+    // (The start of a date cell that says more: an end, a reminder; see date.rs.)
+    let text = text.split([date::TO.chars().next().unwrap_or('→'), date::REMIND.chars().next().unwrap_or('⏰')]).next().unwrap_or("");
+    let text = text.split("->").next().unwrap_or("").trim().to_lowercase();
     match text.as_str() {
         "" => return None,
         "today" => return Some(today),
@@ -1946,6 +1986,39 @@ mod tests {
     /// The budget of the mocks: what was spent, as plain text at first.
     fn spending() -> Table {
         table(&[&["Item", "Amount", "Category"], &["Rent", "2000", "Home"], &["Groceries", "150", "Food"], &["Dinner", "65", "Food"]])
+    }
+
+    #[test]
+    fn the_days_of_a_table_with_a_reminder_are_listed_with_their_time() {
+        let mut t = table(&[&["Bill", "Due", "Paid on"], &["Rent", "Tue 1 Dec ⏰ 1 day before", "Mon 30 Nov 2 PM ⏰ 15 min before"], &["Gym", "Wed 2 Dec", ""]]);
+        t.set_kind(1, Kind::Date);
+        t.set_kind(2, Kind::Date);
+        let today = d(2026, 11, 11);
+        let at = |y, m, day, h, min| d(y, m, day).and_hms_opt(h, min, 0).unwrap();
+        assert_eq!(t.date_reminders(today), vec![(1, 1, at(2026, 11, 30, 9, 0)), (1, 2, at(2026, 11, 30, 13, 45))]);
+        // A day with a time, an end and a reminder is written in full, and sorts after the same day with no time.
+        t.put(2, 2, "30 nov 9am -> 11am", today);
+        assert_eq!(t.cell(2, 2), "Mon 30 Nov 9 AM → 11 AM");
+        t.put(2, 1, "1 dec", today);
+        assert_eq!(t.cell(2, 1), "Tue 1 Dec");
+    }
+
+    #[test]
+    fn a_worked_out_cell_says_what_it_is_worked_out_from() {
+        let mut runs = log();
+        runs.set_unit(2, "km");
+        assert_eq!(runs.worked_out_from(4), "Time ÷ km: the time for each km");
+        assert_eq!(runs.worked_out_from(1), "");
+        let mut t = table(&[&["Item", "Price", "Qty", "Cost"], &["Pen", "2", "3", ""]]);
+        t.set_kind(3, Kind::Formula);
+        assert!(t.worked_out_from(3).starts_with("No formula yet"));
+        t.set_formula(3, " Price * Qty ");
+        assert_eq!(t.worked_out_from(3), "= Price * Qty");
+        // A pace with no time column cannot be worked out.
+        let mut lone = table(&[&["Run", "km", "Pace"], &["Easy", "3", ""]]);
+        lone.set_kind(1, Kind::Number);
+        lone.set_kind(2, Kind::Pace);
+        assert!(lone.worked_out_from(2).starts_with("Needs"));
     }
 
     #[test]

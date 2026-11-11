@@ -7115,6 +7115,7 @@ impl AppState {
     /// (its page, its line, the page's name, the words, when).
     pub fn todo_reminders(&self) -> Vec<(Id, Id, String, String, i64)> {
         let now = now_ms();
+        let today = crate::when::today();
         let pages = self.pages.peek();
         let blocks = self.blocks.peek();
         let mut out = Vec::new();
@@ -7123,6 +7124,18 @@ impl AppState {
             for b in list {
                 if let Some(at) = b.remind_at().filter(|&t| t > now) {
                     out.push((page.clone(), b.id.clone(), p.display_title().to_string(), b.plain_text(), at));
+                }
+                // The days of a table with a reminder: "Rent · Due".
+                if b.kind == BlockKind::Table {
+                    let table = crate::table::Table::parse(&b.data);
+                    for (r, c, at) in table.date_reminders(today) {
+                        let at = crate::when::at(at.date(), at.time());
+                        if at > now {
+                            let row = table.title(r);
+                            let words = if row.is_empty() { table.heading(c) } else { format!("{row} · {}", table.heading(c)) };
+                            out.push((page.clone(), format!("{}-{r}-{c}", b.id), p.display_title().to_string(), words, at));
+                        }
+                    }
                 }
             }
         }

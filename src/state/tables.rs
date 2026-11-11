@@ -390,6 +390,27 @@ impl AppState {
         self.focus_cell(id, row, column);
     }
 
+    /// Change one value of a row from its menu ("Edit property"): a box
+    /// is ticked or cleared, a picture is chosen, a cell with a list or a
+    /// month opens it, and any other cell takes the caret.
+    pub fn edit_table_cell(self, page: &str, id: &str, row: usize, column: usize) {
+        let Some(table) = self.table_at(page, id).filter(|t| row >= 1 && row < t.rows.len() && column < t.columns()) else { return };
+        match table.kind(column) {
+            Kind::Checkbox => {
+                self.set_popover(None);
+                self.toggle_table_check(page, id, row, column);
+            }
+            Kind::File => {
+                self.set_popover(None);
+                self.pick_cell_picture(page, id, row, column);
+            }
+            k if k.has_options() || k.is_worked_out() || matches!(k, Kind::Date | Kind::Relation) => {
+                self.set_popover(Some(Popover::TableCell { block_id: id.to_string(), row, column, on_page: false }));
+            }
+            _ => self.close_table_cell(id, row, column),
+        }
+    }
+
     /// Give an option another name. Returns the name it has now.
     pub fn rename_table_option(self, page: &str, id: &str, column: usize, old: &str, new: &str) -> String {
         let mut kept = old.to_string();
@@ -470,8 +491,24 @@ impl AppState {
             "pick-row" => return self.pick_row(page, id, row, if column == 1 { Pick::Range } else { Pick::Toggle }),
             // The same on the heading of a column (`row` says which key).
             "pick-column" => return self.pick_column(page, id, column, if row == 1 { Pick::Range } else { Pick::Toggle }),
+            // The box in the row of the headings: all rows, or none.
+            "pick-all" => {
+                let Some(table) = self.table_at(page, id) else { return };
+                self.set_popover(None);
+                crate::ui::tables::pick_all(id, &table);
+                return;
+            }
             // The Delete key, with rows or columns picked.
             "delete-picked" => return self.delete_picked_in_table(page, id),
+            // ⌘D, with rows picked: a copy of each under it.
+            "duplicate-picked" => {
+                let Some(table) = self.table_at(page, id) else { return };
+                let rows = crate::ui::tables::picked(id, &table).0;
+                if !rows.is_empty() {
+                    self.rows_op(page, id, &rows, "duplicate");
+                }
+                return;
+            }
             "open-row" => return self.open_row(page, id, row, if column == 1 { Open::Tab } else { Open::Auto }),
             "row-menu" => return self.row_menu(page, id, row),
             "fold-row" => return self.edit_table(page, id, |t| t.toggle_closed(row)),

@@ -5,6 +5,7 @@
 
 use super::icons::{Icon, PageIcon};
 use super::table_choices::{tag_class, ChoicePicker, Tag};
+use super::table_editors::{DatePicker, WorkedOut};
 use super::table_menus::{CellMenu, ChipMenu, ColumnMenu, ColumnsMenu, IconMenu, KindsMenu, PaintMenu, RowMenu, TableMenu};
 use super::table_views::{Board, Calendar, Gallery, List};
 use crate::state::{AppState, Open, Popover};
@@ -131,6 +132,20 @@ pub fn pick_column(id: &str, table: &Table, column: usize, how: Pick) -> Vec<usi
     let columns = pick_in(picked(id, table).1, column, how, &table.shown_columns());
     set_picked(id, table, Vec::new(), columns.clone());
     columns
+}
+
+/// Pick all the rows that show (the box in the row of the headings), or
+/// none when all of them are picked already. Returns the rows picked now.
+pub fn pick_all(id: &str, table: &Table) -> Vec<usize> {
+    let order = shown_order(id, table);
+    let rows = if all_of(&picked(id, table).0, &order) { Vec::new() } else { order };
+    set_picked(id, table, rows.clone(), Vec::new());
+    rows
+}
+
+/// Every row that shows is picked (and one shows).
+fn all_of(picked: &[usize], order: &[usize]) -> bool {
+    !order.is_empty() && order.iter().all(|r| picked.contains(r))
 }
 
 /// Let the picked rows or columns of a table go.
@@ -471,7 +486,7 @@ fn Grid(page_id: String, id: String, table: Table, order: Vec<usize>, picked: Ve
     };
     let row_menu = menu_rows.last().copied();
     // The cell with an open list, and which list it is.
-    let cell_list = cell_menu.filter(|&(r, c)| r < table.rows.len() && c < table.columns()).map(|(r, c)| (r, c, table.column(c), table.cell(r, c).to_string()));
+    let cell_list = cell_menu.filter(|&(r, c)| r < table.rows.len() && c < table.columns()).map(|(r, c)| (r, c, table.column(c), table.cell(r, c).to_string(), table.heading(c), table.worked_out_from(c)));
     let cols_picked = |c: usize| picked_cols.contains(&c);
     let kinds_open = matches!(open, Some(Popover::TableKinds { .. }));
     let menu_open = matches!(open, Some(Popover::TableMenu { .. }));
@@ -500,7 +515,14 @@ fn Grid(page_id: String, id: String, table: Table, order: Vec<usize>, picked: Ve
     let room: usize = widths.iter().sum();
     // (The first column, the names of the rows, takes what is left.)
     let wide = |n: usize| if typed && n > 0 { format!("width: {}px;", widths[n]) } else { String::new() };
+    // (A table with kinds has a strip at its left for the boxes that pick
+    // its rows, in the padding of the box that scrolls it: WebKit keeps a
+    // frozen column at the edge inside that padding, right of the strip.)
     let sticky = |n: usize| if n < frozen { format!("left: var(--f{n}, 0px);") } else { String::new() };
+    // Whether all the rows that show are picked, some, or none: the box of
+    // the row of the headings says it.
+    let all_picked = all_of(&picked, &order);
+    let head_check = if all_picked { "all" } else if picked.is_empty() { "none" } else { "some" };
     if frozen > 0 {
         document::eval(&format!("window.__n2 && window.__n2.freezeColumns && window.__n2.freezeColumns({})", serde_json::to_string(&id).unwrap_or_default()));
     }
@@ -518,6 +540,22 @@ fn Grid(page_id: String, id: String, table: Table, order: Vec<usize>, picked: Ve
                                     class: format!("head{}{}{}", if menu_col == Some(c) { " menu-open" } else { "" }, if n < frozen { " frozen" } else { "" }, if cols_picked(c) { " col-picked" } else { "" }),
                                     style: "{wide(n)}{sticky(n)}",
                                     "data-col": "{c}",
+                                    if typed && n == 0 {
+                                        button {
+                                            class: "head-check {head_check}",
+                                            role: "checkbox",
+                                            tabindex: "-1",
+                                            title: if all_picked { "Pick no rows" } else { "Pick all rows" },
+                                            "aria-label": "Pick all rows",
+                                            "aria-checked": match head_check { "all" => "true", "some" => "mixed", _ => "false" },
+                                            "data-check": "all",
+                                            match head_check {
+                                                "all" => rsx! { Icon { name: "check", size: 11 } },
+                                                "some" => rsx! { Icon { name: "minus", size: 11 } },
+                                                _ => rsx! {},
+                                            }
+                                        }
+                                    }
                                     HeadCell {
                                         page_id: page_id.clone(),
                                         id: id.clone(),
@@ -560,6 +598,20 @@ fn Grid(page_id: String, id: String, table: Table, order: Vec<usize>, picked: Ve
                                                     class: cell_class(table.kind(c), n == 0, n < frozen, cols_picked(c)),
                                                     style: "{sticky(n)}",
                                                     "data-col": "{c}",
+                                                    if n == 0 && typed {
+                                                        button {
+                                                            class: "row-check",
+                                                            role: "checkbox",
+                                                            tabindex: "-1",
+                                                            title: "Pick this row (⇧ click: all rows up to it)",
+                                                            "aria-label": "Pick row {r}",
+                                                            "aria-checked": if picked.contains(&r) { "true" } else { "false" },
+                                                            "data-check": "{r}",
+                                                            if picked.contains(&r) {
+                                                                Icon { name: "check", size: 11 }
+                                                            }
+                                                        }
+                                                    }
                                                     if n == 0 {
                                                         div { class: "first-cell", style: "padding-left: {indent * 18}px;",
                                                             if kids {
@@ -666,9 +718,9 @@ fn Grid(page_id: String, id: String, table: Table, order: Vec<usize>, picked: Ve
                         RowMenu { page_id: page_id.clone(), id: id.clone(), table: table.clone(), rows: menu_rows.clone() }
                     }
                 }
-                for (r, c, column, text) in cell_list {
+                for (r, c, column, text, heading, from) in cell_list {
                     div { key: "cell-{r}-{c}", class: "hung", "data-hang": "cell", "data-r": "{r}", "data-c": "{c}",
-                        CellList { page_id: page_id.clone(), id: id.clone(), r, c, column, text }
+                        CellList { page_id: page_id.clone(), id: id.clone(), r, c, column, text, heading, from, in_table: true }
                     }
                 }
             }
@@ -726,13 +778,17 @@ fn cell_class(kind: Kind, first: bool, frozen: bool, picked: bool) -> String {
     format!("{by_kind}{}{}{}", if first { " first" } else { "" }, if frozen { " frozen" } else { "" }, if picked { " col-picked" } else { "" })
 }
 
-/// The list that opens from a cell: the options of a choice cell, or the
-/// rows a relation cell can name. No other kind of cell has one.
+/// What opens from a cell, by the kind of its column: the options of a
+/// choice cell, the rows a relation cell can name, the month of a date
+/// cell, or what a worked-out cell is worked out from (`from`). The other
+/// kinds are typed in, in the cell.
 #[component]
-fn CellList(page_id: String, id: String, r: usize, c: usize, column: Column, text: String) -> Element {
+pub fn CellList(page_id: String, id: String, r: usize, c: usize, column: Column, text: String, heading: String, from: String, in_table: bool) -> Element {
     match column.kind {
         k if k.has_options() => rsx! { ChoicePicker { page_id, id, r, c, column, text } },
         Kind::Relation => rsx! { CellMenu { page_id, id, r, c, from: column.from.clone(), text } },
+        Kind::Date => rsx! { DatePicker { page_id, id, r, c, text } },
+        k if k.is_worked_out() => rsx! { WorkedOut { id, c, heading, from, formula: k == Kind::Formula, in_table } },
         _ => rsx! {},
     }
 }
@@ -853,10 +909,32 @@ pub fn CellBody(
     /// Its list is drawn here, in the cell (at the top of a row's page). A
     /// table draws the lists of its cells itself: see [`Grid`].
     own_menu: bool,
+    /// What a worked-out cell is worked out from (see `Table::worked_out_from`).
+    #[props(default)]
+    from: String,
 ) -> Element {
     let state = use_context::<AppState>();
     let kind = column.kind;
     let label = format!("Row {}, {}", r + 1, heading);
+    let today = crate::when::today();
+    // What a cell of its kind looks like, shown in an empty cell that has
+    // the caret ("$0.00", "0:00"), and a cell that its kind cannot read
+    // (grey, with why in its tip: totals and sorts leave it out).
+    let filled = !text.trim().is_empty();
+    let odd = match kind {
+        Kind::Number => (filled && crate::table::number(&text).is_none()).then_some("Not a number: the total leaves it out"),
+        Kind::Time => (filled && crate::table::seconds(&text).is_none()).then_some("Not a length of time: write 34:00, 1:02:30 or 1h 5m"),
+        Kind::Email => (filled && !text.contains('@')).then_some("Not an email address"),
+        Kind::Phone => (filled && phone_url(&text).is_none()).then_some("Not a phone number"),
+        _ => None,
+    };
+    let kind_hint = hint.is_empty() && matches!(kind, Kind::Number | Kind::Time);
+    let hint = match kind {
+        Kind::Number if kind_hint => crate::table::money::write(&column.format, 0.0, column.places.map(usize::from)),
+        Kind::Time if kind_hint => "0:00".to_string(),
+        _ => hint,
+    };
+    let odd_class = format!("{}{}", if odd.is_some() { " odd" } else { "" }, if kind_hint { " hinted" } else { "" });
     // A gain green and a loss red, in a column that asks for it.
     let amount = if kind.is_worked_out() { crate::table::number(&shown) } else { crate::table::number(&text).or_else(|| crate::table::number(&shown)) };
     let sign = match amount {
@@ -872,12 +950,13 @@ pub fn CellBody(
     let field = |class: &'static str| {
         rsx! {
             textarea {
-                class: "{class}{sign}",
+                class: "{class}{sign}{odd_class}",
                 rows: "1",
                 spellcheck: kind == Kind::Text,
                 "data-r": "{r}",
                 "data-c": "{c}",
                 "aria-label": "{label}",
+                title: odd.unwrap_or_default(),
                 placeholder: "{hint}",
                 value: "{text}",
                 oninput: typing.clone(),
@@ -912,21 +991,68 @@ pub fn CellBody(
                 }
             }
         }
-        Kind::Pace | Kind::Formula => rsx! {
-            div { class: "cell-meter",
-                textarea {
-                    class: "cell computed{sign}",
-                    rows: "1",
-                    readonly: true,
-                    tabindex: "-1",
+        Kind::Pace | Kind::Formula => {
+            let block = id.clone();
+            rsx! {
+                div { class: "cell-meter",
+                    textarea {
+                        class: if menu_open { "cell computed open{sign}" } else { "cell computed{sign}" },
+                        rows: "1",
+                        readonly: true,
+                        tabindex: "-1",
+                        "data-r": "{r}",
+                        "data-c": "{c}",
+                        "aria-label": "{label}, worked out",
+                        value: "{shown}",
+                        onclick: move |e| {
+                            e.stop_propagation();
+                            state.set_popover((!menu_open).then(|| Popover::TableCell { block_id: block.clone(), row: r, column: c, on_page: own_menu }));
+                        },
+                    }
+                    {meter}
+                    if menu_open && own_menu {
+                        WorkedOut { id: id.clone(), c, heading: heading.clone(), from: from.clone(), formula: kind == Kind::Formula, in_table: false }
+                    }
+                }
+            }
+        }
+        Kind::Date => {
+            let block = id.clone();
+            // (Its day, time and end; a bell says it has a reminder.)
+            let read = crate::table::date::When::read(&text, today, true);
+            let shown = match read {
+                Some(w) => w.shown(today),
+                None => text.trim().to_string(),
+            };
+            let bell = read.is_some_and(|w| w.remind.is_some());
+            let odd = !shown.is_empty() && crate::table::date::When::read(&text, today, false).is_none();
+            rsx! {
+                button {
+                    class: format!("cell pick date{}{}", if menu_open { " open" } else { "" }, if odd { " odd" } else { "" }),
+                    value: "{text}",
                     "data-r": "{r}",
                     "data-c": "{c}",
-                    "aria-label": "{label}, worked out",
-                    value: "{shown}",
+                    "aria-label": "{label}",
+                    "aria-haspopup": "dialog",
+                    title: if odd { "Not a day: the calendar and the sorts leave it out" } else { "" },
+                    onclick: move |e| {
+                        e.stop_propagation();
+                        state.set_popover((!menu_open).then(|| Popover::TableCell { block_id: block.clone(), row: r, column: c, on_page: own_menu }));
+                    },
+                    if shown.is_empty() {
+                        span { class: "cell-empty", "{hint}" }
+                    } else {
+                        span { class: "date-words", "{shown}" }
+                        if bell {
+                            span { class: "date-bell", title: "With a reminder", Icon { name: "bell", size: 12 } }
+                        }
+                    }
                 }
-                {meter}
+                if menu_open && own_menu {
+                    DatePicker { page_id: page_id.clone(), id: id.clone(), r, c, text: text.clone() }
+                }
             }
-        },
+        }
         Kind::Number if meter.is_some() => rsx! {
             div { class: "cell-meter",
                 {field("cell")}
@@ -957,19 +1083,28 @@ pub fn CellBody(
                 }
             }
         }
-        Kind::Link | Kind::Email => {
+        // An address: a click puts the caret in it, ⌘ and a click (or the
+        // small button at its end) opens it (see the page script).
+        Kind::Link | Kind::Email | Kind::Phone => {
             let address = text.trim().to_string();
             let url = match kind {
-                Kind::Email => format!("mailto:{address}"),
-                _ if address.contains("://") => address.clone(),
-                _ => format!("https://{address}"),
+                Kind::Email => (address.contains('@')).then(|| format!("mailto:{address}")),
+                Kind::Phone => phone_url(&address),
+                _ if address.contains("://") => Some(address.clone()),
+                _ if address.is_empty() => None,
+                _ => Some(format!("https://{address}")),
+            };
+            let (go_word, go_icon) = match kind {
+                Kind::Email => ("Write to", "mail"),
+                Kind::Phone => ("Call", "phone"),
+                _ => ("Open", "arrow-up-right"),
             };
             rsx! {
                 div { class: "cell-link",
                     {field("cell link")}
-                    if !address.is_empty() {
-                        button { class: "cell-go", title: "Open", "aria-label": "Open {address}", tabindex: "-1", onclick: move |_| state.open_url(&url),
-                            Icon { name: "arrow-up-right", size: 12 }
+                    if let Some(url) = url {
+                        button { class: "cell-go", "data-go": "1", title: "{go_word} (⌘ click)", "aria-label": "{go_word} {address}", tabindex: "-1", onclick: move |_| state.open_url(&url),
+                            Icon { name: go_icon, size: 12 }
                         }
                     }
                 }
@@ -1054,6 +1189,18 @@ pub fn CellBody(
     }
 }
 
+/// The address that calls a phone number: its digits, with a + before
+/// them if it has one ("+1 (555) 010-2000" is tel:+15550102000). None for
+/// words that are not a phone number.
+pub fn phone_url(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() || !text.chars().all(|ch| ch.is_ascii_digit() || " +-().".contains(ch)) {
+        return None;
+    }
+    let digits: String = text.chars().filter(char::is_ascii_digit).collect();
+    (digits.len() >= 3).then(|| format!("tel:{}{digits}", if text.starts_with('+') { "+" } else { "" }))
+}
+
 /// The values of a row, at the top of the row's page: one line for each
 /// column after the first (the first is the page's title), each to change in
 /// place, and a line to add a column. For the page of a template: what a new
@@ -1107,6 +1254,7 @@ pub fn RowValues(page_id: String) -> Element {
                                     share: share_of(&table, r, c, fulls[c]),
                                     menu_open: cell_menu == Some((r, c)),
                                     own_menu: true,
+                                    from: table.worked_out_from(c),
                                 }
                             }
                         }
@@ -1153,6 +1301,27 @@ pub fn RowValues(page_id: String) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_box_of_the_headings_picks_all_rows_that_show_or_none() {
+        let order = [3, 1, 2];
+        assert!(all_of(&[1, 2, 3], &order));
+        assert!(all_of(&[2, 3, 1, 4], &order));
+        assert!(!all_of(&[1, 2], &order));
+        // A table with no row that shows has nothing to pick.
+        assert!(!all_of(&[], &[]));
+    }
+
+    #[test]
+    fn a_phone_number_is_called_by_its_digits() {
+        assert_eq!(phone_url("+1 (555) 010-2000").as_deref(), Some("tel:+15550102000"));
+        assert_eq!(phone_url(" 020 7946 0958 ").as_deref(), Some("tel:02079460958"));
+        // Words, a short number and a link are no phone numbers.
+        assert_eq!(phone_url("call Sam"), None);
+        assert_eq!(phone_url("12"), None);
+        assert_eq!(phone_url("tel:123; rm"), None);
+        assert_eq!(phone_url(""), None);
+    }
 
     #[test]
     fn a_click_picks_one_and_shift_or_command_pick_more() {

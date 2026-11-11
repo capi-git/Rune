@@ -11,6 +11,7 @@ pub mod pad;
 mod page;
 mod sidebar;
 mod table_choices;
+mod table_editors;
 mod table_menus;
 mod table_views;
 pub mod tables;
