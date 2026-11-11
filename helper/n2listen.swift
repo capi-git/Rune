@@ -19,6 +19,8 @@
 //   n2listen --meeting   the microphone and the Mac's sound (a meeting)
 //   n2listen --system    the Mac's sound only, as "others" (started by
 //                        --meeting itself, as a second copy of this program)
+//   n2listen --system --from-app P   only the sound of the app with process id P
+//                        and the helpers it plays through (a video in Rune's player)
 //   n2listen --check     say what is allowed, ask for nothing, hear nothing
 //   n2listen --file F    as if the microphone heard the sound file F (a test
 //                        of the recognition that needs no microphone)
@@ -353,8 +355,41 @@ final class SystemSound {
         return uid as String
     }
 
-    func start(_ sink: @escaping (AVAudioPCMBuffer) -> Void) throws {
-        let description = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
+    /// The programs that play sound for the app `app` (its own program, and
+    /// the helpers it plays through: a web view plays through WebKit's own
+    /// programs), as Core Audio knows them now. macOS says which app each
+    /// program works for.
+    static func soundOf(app: pid_t) -> [AudioObjectID] {
+        typealias Responsible = @convention(c) (pid_t) -> pid_t
+        let responsible: Responsible? = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "responsibility_get_pid_responsible_for_pid").map { unsafeBitCast($0, to: Responsible.self) }
+        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyProcessObjectList, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size) == noErr, size > 0 else { return [] }
+        var objects = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &objects) == noErr else { return [] }
+        let me = getpid()
+        return objects.filter { object in
+            var pid: pid_t = 0
+            var where_ = AudioObjectPropertyAddress(mSelector: kAudioProcessPropertyPID, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            var pidSize = UInt32(MemoryLayout<pid_t>.size)
+            guard AudioObjectGetPropertyData(object, &where_, 0, nil, &pidSize, &pid) == noErr, pid > 0, pid != me else { return false }
+            return pid == app || responsible?(pid) == app
+        }
+    }
+
+    /// With `app`, only the sound of that app (a video in Rune's player, not
+    /// a call in another program); without it, all that the Mac plays.
+    func start(app: pid_t? = nil, _ sink: @escaping (AVAudioPCMBuffer) -> Void) throws {
+        let description: CATapDescription
+        if let app {
+            let own = SystemSound.soundOf(app: app)
+            if own.isEmpty {
+                throw NSError(domain: "n2listen", code: 3, userInfo: [NSLocalizedDescriptionKey: "Rune's player has no sound yet. Play the video, then try again."])
+            }
+            description = CATapDescription(stereoMixdownOfProcesses: own)
+        } else {
+            description = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
+        }
         description.uuid = UUID()
         description.name = "Rune listener"
         description.isPrivate = true
@@ -571,6 +606,11 @@ if arguments.contains("--check") {
 let meeting = arguments.contains("--meeting")
 // The second copy, started by `--meeting`: the Mac's sound only.
 let systemOnly = arguments.contains("--system")
+// `--from-app <pid>` (a video): only the sound of that app.
+var fromApp: pid_t?
+if let i = arguments.firstIndex(of: "--from-app"), i + 1 < arguments.count, let pid = Int32(arguments[i + 1]), pid > 0 {
+    fromApp = pid
+}
 var soundFile: String?
 if let i = arguments.firstIndex(of: "--file"), i + 1 < arguments.count {
     soundFile = arguments[i + 1]
@@ -625,7 +665,7 @@ var others: Others?
 me.begin()
 if systemOnly {
     do {
-        try systemSound.start { me.append($0) }
+        try systemSound.start(app: fromApp) { me.append($0) }
     } catch {
         systemSound.stop()
         fail("system-audio", error.localizedDescription)

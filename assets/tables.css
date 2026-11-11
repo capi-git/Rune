@@ -758,6 +758,16 @@ button.table-chip:hover,
   display: grid;
 }
 /* Pictures, and rows of another table. */
+/* A picture cell that is chosen takes a pasted screenshot; one under a
+   dragged picture says that it takes it. */
+.cell-pics[data-pic-cell]:focus {
+  outline: none;
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+}
+.cell-pics.pic-drop {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+}
 .cell-pics {
   position: relative;
   display: flex;

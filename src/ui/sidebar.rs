@@ -193,17 +193,65 @@ fn SpaceMenu(current: String) -> Element {
     let spaces = state.spaces.read().clone();
     let mut adding = use_signal(|| false);
     let mut name = use_signal(String::new);
+    // A space being dragged to another place in the list, and the row (and
+    // its half) it would land at.
+    let mut dragged = use_signal(|| None::<String>);
+    let mut over = use_signal(|| None::<(String, bool)>);
+    let many = spaces.len() > 1;
     rsx! {
         div { class: "popover space-menu", onclick: move |e| e.stop_propagation(),
             div { class: "menu-section", "Spaces" }
             for sp in spaces {
                 div {
                     key: "{sp.id}",
-                    class: "menu-item compact",
+                    class: match over().filter(|(at, _)| *at == sp.id && dragged().is_some_and(|d| d != sp.id)) {
+                        Some((_, true)) => "menu-item compact space-row drop-after",
+                        Some((_, false)) => "menu-item compact space-row drop-before",
+                        None if dragged().as_deref() == Some(sp.id.as_str()) => "menu-item compact space-row dragging",
+                        None => "menu-item compact space-row",
+                    },
+                    "data-space": "{sp.id}",
+                    title: if many { "Drag to change the order" } else { "" },
+                    draggable: if many { "true" } else { "false" },
+                    ondragstart: {
+                        let id = sp.id.clone();
+                        move |_| dragged.set(Some(id.clone()))
+                    },
+                    ondragover: {
+                        let id = sp.id.clone();
+                        move |e: DragEvent| {
+                            e.prevent_default();
+                            // The lower half of a row is after it.
+                            let after = e.element_coordinates().y > 15.0;
+                            if over() != Some((id.clone(), after)) {
+                                over.set(Some((id.clone(), after)));
+                            }
+                        }
+                    },
+                    ondrop: {
+                        let id = sp.id.clone();
+                        move |e: DragEvent| {
+                            e.prevent_default();
+                            if let (Some(moved), Some((at, after))) = (dragged(), over()) {
+                                if at == id {
+                                    state.move_space(&moved, &at, after);
+                                }
+                            }
+                            dragged.set(None);
+                            over.set(None);
+                        }
+                    },
+                    ondragend: move |_| {
+                        dragged.set(None);
+                        over.set(None);
+                    },
                     onclick: {
                         let id = sp.id;
                         move |_| state.switch_space(&id)
                     },
+                    if many {
+                        span { class: "space-grip", "aria-hidden": "true", Icon { name: "grip", size: 12 } }
+                    }
                     SpaceBadge { space: sp.clone() }
                     span { class: "grow", "{sp.display_name()}" }
                     if sp.id == current {

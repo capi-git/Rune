@@ -179,7 +179,8 @@ pub enum Source {
     Mic,
     /// The microphone and what the Mac plays (a meeting).
     Meeting,
-    /// Only what the Mac plays (a video): the microphone is not used.
+    /// Only what Rune itself plays (a video in its player): not the
+    /// microphone, and not a call or anything else on the Mac.
     Sound,
 }
 
@@ -190,12 +191,16 @@ pub fn start_from(source: Source) -> Result<(Listener, UnboundedReceiver<Heard>)
         return Ok((stand_in(tx, source), rx));
     }
     let program = helper().ok_or("This copy of Rune has no listener. Use the installed app.")?;
-    let mut child = Command::new(program)
-        .arg(match source {
-            Source::Mic => "--mic",
-            Source::Meeting => "--meeting",
-            Source::Sound => "--system",
-        })
+    let mut command = Command::new(program);
+    command.arg(match source {
+        Source::Mic => "--mic",
+        Source::Meeting => "--meeting",
+        Source::Sound => "--system",
+    });
+    if source == Source::Sound {
+        command.arg("--from-app").arg(std::process::id().to_string());
+    }
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

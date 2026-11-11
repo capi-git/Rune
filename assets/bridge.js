@@ -534,8 +534,10 @@ const updateBar = () => {
   const w = b.offsetWidth;
   const left = Math.max(8, Math.min(window.innerWidth - w - 8, rect.left + rect.width / 2 - w / 2));
   const top = rect.top - b.offsetHeight - 8 < 8 ? rect.bottom + 8 : rect.top - b.offsetHeight - 8;
-  b.style.left = left + 'px';
-  b.style.top = top + 'px';
+  // (In a zoomed page, its place is in the page's own points.)
+  const bz = zoomOf(b);
+  b.style.left = left / bz + 'px';
+  b.style.top = top / bz + 'px';
 };
 
 const openLinkEditor = (el) => {
@@ -564,8 +566,9 @@ const openLinkEditor = (el) => {
   hideBar();
   box.classList.add('show');
   box.classList.toggle('has-link', !!current);
-  box.style.left = Math.max(8, Math.min(window.innerWidth - box.offsetWidth - 8, rect.left)) + 'px';
-  box.style.top = rect.bottom + 8 + 'px';
+  const boxZ = zoomOf(box);
+  box.style.left = Math.max(8, Math.min(window.innerWidth - box.offsetWidth * boxZ - 8, rect.left)) / boxZ + 'px';
+  box.style.top = (rect.bottom + 8) / boxZ + 'px';
   const input = document.getElementById('link-input');
   input.value = current;
   input.focus();
@@ -1439,21 +1442,37 @@ const containingBlock = (el) => {
   return { top: 0, left: 0 };
 };
 
+// How much bigger an element is drawn than its own size says: the zoom of
+// the page (View → Zoom In / Out), which is CSS `zoom` on the card. The
+// window's measures (getBoundingClientRect, innerWidth) are in points of the
+// screen; `left` and `top` inside the card are in its zoomed points.
+// (Read from the card, not from the element: a menu that opens grows with a
+// motion, and its drawn size is not its size yet.)
+const zoomOf = (el) => {
+  let z = 1;
+  for (let n = el.parentElement; n && n !== document.body; n = n.parentElement) {
+    const own = parseFloat(getComputedStyle(n).zoom);
+    if (own > 0 && own !== 1) z *= own;
+  }
+  return z;
+};
+
 const anchorMenu = (menu) => {
   const anchor = menu.parentElement;
   if (!anchor) return;
   const a = anchor.getBoundingClientRect();
   const cb = containingBlock(menu);
   menu.classList.add('anchored');
-  const w = menu.offsetWidth;
-  const h = menu.offsetHeight;
+  const z = zoomOf(menu);
+  const w = menu.offsetWidth * z;
+  const h = menu.offsetHeight * z;
   const alignRight = menu.classList.contains('sidebar-menu') || menu.classList.contains('due-menu') || menu.classList.contains('ed-menu-right');
   let left = alignRight ? a.right - w : a.left;
   let top = a.bottom + 4;
   if (top + h > innerHeight - 8) top = Math.max(8, a.top - h - 4); // no room below: open upwards
   left = Math.max(8, Math.min(left, innerWidth - w - 8));
-  menu.style.left = left - cb.left + 'px';
-  menu.style.top = top - cb.top + 'px';
+  menu.style.left = (left - cb.left) / z + 'px';
+  menu.style.top = (top - cb.top) / z + 'px';
   menu.style.right = 'auto';
 };
 
@@ -1469,13 +1488,14 @@ const placeTableMenu = (menu) => {
   const a = anchor.getBoundingClientRect();
   const cb = containingBlock(menu);
   menu.classList.add('anchored');
-  const w = menu.offsetWidth;
-  const h = menu.offsetHeight;
+  const z = zoomOf(menu);
+  const w = menu.offsetWidth * z;
+  const h = menu.offsetHeight * z;
   let left = a.left;
   left = Math.max(8, Math.min(left, innerWidth - w - 8));
   const top = Math.max(8, Math.min(a.bottom + 4, innerHeight - h - 8));
-  menu.style.left = left - cb.left + 'px';
-  menu.style.top = top - cb.top + 'px';
+  menu.style.left = (left - cb.left) / z + 'px';
+  menu.style.top = (top - cb.top) / z + 'px';
   menu.style.right = 'auto';
   menu.dataset.sub = left + w + SUB_ROOM > innerWidth - 8 ? 'left' : 'right';
 };
@@ -1484,7 +1504,7 @@ const placeTableMenu = (menu) => {
 const placeSubMenu = (sub) => {
   sub.style.top = '';
   const over = sub.getBoundingClientRect().bottom - (innerHeight - 8);
-  if (over > 0) sub.style.top = `${parseFloat(getComputedStyle(sub).top) - over}px`;
+  if (over > 0) sub.style.top = `${parseFloat(getComputedStyle(sub).top) - over / zoomOf(sub)}px`;
 };
 const RAISED_MENUS = '.table-menu .column-sub, .own-menu, .kinds-menu';
 const TABLE_MENUS = '.table-block .popover:not(.column-sub)';
@@ -1849,6 +1869,15 @@ const markRow = (row, cls) => {
 };
 const clearDrop = () => markRow(null);
 
+// A space dragged to another place in the space menu: the app's own drag
+// (the menu itself does the move).
+document.addEventListener('dragstart', (e) => {
+  const row = e.target && e.target.closest && e.target.closest('.space-menu .space-row[draggable="true"]');
+  if (!row) return;
+  e.dataTransfer.effectAllowed = 'move';
+  markOwnDrag(e.dataTransfer);
+});
+
 document.addEventListener('dragstart', (e) => {
   const handle = e.target && e.target.closest && e.target.closest('[data-drag]');
   if (!handle) return;
@@ -1995,8 +2024,9 @@ const openCtx = (el, x, y, hasSelection) => {
     : { el, start: el.selectionStart, end: el.selectionEnd };
   m.querySelectorAll('[data-ctx="cut"], [data-ctx="copy"]').forEach((i) => (i.style.display = hasSelection ? '' : 'none'));
   m.classList.add('show');
-  m.style.left = Math.max(8, Math.min(x, innerWidth - m.offsetWidth - 8)) + 'px';
-  m.style.top = Math.max(8, Math.min(y, innerHeight - m.offsetHeight - 8)) + 'px';
+  const mz = zoomOf(m);
+  m.style.left = Math.max(8, Math.min(x, innerWidth - m.offsetWidth * mz - 8)) / mz + 'px';
+  m.style.top = Math.max(8, Math.min(y, innerHeight - m.offsetHeight * mz - 8)) / mz + 'px';
 };
 // Put the caret and selection back where they were when the menu opened.
 const restoreCtx = (f) => {
@@ -2076,6 +2106,66 @@ function pictureIn(data) {
   const item = [...(data.items || [])].find((i) => i.kind === 'file' && i.type.startsWith('image/'));
   return (item && item.getAsFile()) || [...(data.files || [])].find((f) => f.type.startsWith('image/')) || null;
 }
+// A picture cell of a table: a screenshot pasted with the cell chosen
+// (⌘V), or pictures dropped on it, go into that cell, not into the page.
+const picCellOf = (el) => (el && el.closest ? el.closest('[data-pic-cell]') : null);
+function sendCellPicture(file, cell) {
+  const message = (data) => ({ t: 'cell_picture', page: cell.dataset.page, id: cell.dataset.block, r: Number(cell.dataset.r), c: Number(cell.dataset.c), data });
+  if (file.size > PICTURE_MOST) return send(message(''));
+  const reader = new FileReader();
+  reader.onload = () => send(message(String(reader.result).split(',')[1] || ''));
+  reader.readAsDataURL(file);
+}
+const cellPicturesIn = (data) => [...((data && data.files) || [])].filter((f) => f.type.startsWith('image/')).slice(0, 8);
+document.addEventListener(
+  'paste',
+  (e) => {
+    const cell = picCellOf(e.target) || picCellOf(document.activeElement);
+    if (!cell) return;
+    const picture = pictureIn(e.clipboardData);
+    if (!picture) return;
+    e.preventDefault();
+    e.stopPropagation();
+    sendCellPicture(picture, cell);
+  },
+  true,
+);
+document.addEventListener(
+  'dragover',
+  (e) => {
+    const cell = picCellOf(e.target);
+    if (!cell || !e.dataTransfer || ![...e.dataTransfer.types].includes('Files')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'copy';
+    document.querySelectorAll('[data-pic-cell].pic-drop').forEach((c) => c !== cell && c.classList.remove('pic-drop'));
+    cell.classList.add('pic-drop');
+  },
+  true,
+);
+document.addEventListener(
+  'dragleave',
+  (e) => {
+    const cell = picCellOf(e.target);
+    if (cell && !cell.contains(e.relatedTarget)) cell.classList.remove('pic-drop');
+  },
+  true,
+);
+document.addEventListener(
+  'drop',
+  (e) => {
+    const cell = picCellOf(e.target);
+    if (!cell || !e.dataTransfer) return;
+    cell.classList.remove('pic-drop');
+    const pictures = cellPicturesIn(e.dataTransfer);
+    if (!pictures.length) return;
+    e.preventDefault();
+    e.stopPropagation();
+    pictures.forEach((p) => sendCellPicture(p, cell));
+  },
+  true,
+);
+
 // Sends a picture file to the app; the answer is kept until it is sent.
 function sendPicture(file, page, id) {
   return new Promise((done) => {

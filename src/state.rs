@@ -373,6 +373,31 @@ pub enum VoiceFor {
 /// The tabs of one space, and which of them is in front.
 pub type TabSet = (Vec<Tab>, usize);
 
+/// A tab that only shows Home (one pane, on Home).
+fn is_home_tab(tab: &Tab) -> bool {
+    tab.panes.len() == 1 && *tab.panes[0].route() == Route::Home
+}
+
+/// One Home tab at most in a row of tabs: the one in front if it is one,
+/// else the first. Says whether a tab went.
+fn one_home_tab(tabs: &mut Vec<Tab>, active: &mut usize) -> bool {
+    let homes: Vec<usize> = (0..tabs.len()).filter(|&i| is_home_tab(&tabs[i])).collect();
+    if homes.len() < 2 {
+        return false;
+    }
+    let keep = if homes.contains(active) { *active } else { homes[0] };
+    let front = tabs.get(*active).map(|t| t.id.clone());
+    let kept = tabs[keep].id.clone();
+    let mut i = 0;
+    tabs.retain(|t| {
+        let stays = !homes.contains(&i) || t.id == kept;
+        i += 1;
+        stays
+    });
+    *active = front.and_then(|id| tabs.iter().position(|t| t.id == id)).or_else(|| tabs.iter().position(|t| t.id == kept)).unwrap_or(0);
+    true
+}
+
 /// The space of the page a tab shows. Home, the calendar and the graph are
 /// in no space of their own.
 fn tab_space(tab: &Tab, pages: &HashMap<Id, Page>) -> Option<Id> {
@@ -651,6 +676,9 @@ pub enum Bridge {
     DrawingSave { page: String, id: String, data: String },
     /// A picture pasted or dropped at a block (base64).
     ImageData { page: String, id: String, data: String },
+    /// A picture pasted into, or dropped on, a picture cell of a table
+    /// (block `id`, row `r`, column `c`; base64).
+    CellPicture { page: String, id: String, r: usize, c: usize, data: String },
     /// A picture was dragged to a side of its page (the right one with
     /// `right`), `x` from that side's edge of the page's column, at the
     /// width `w`, level with the line `to` (after it, with `after`).
@@ -2101,6 +2129,22 @@ impl AppState {
 
     /// Remember the window's layout, in one write.
     fn save_ui(&self) {
+        let doubled = {
+            let ui = self.ui.peek();
+            let twice = |tabs: &Vec<Tab>| tabs.iter().filter(|t| is_home_tab(t)).count() > 1;
+            twice(&ui.tabs) || ui.parked.values().any(|set| twice(&set.0))
+        };
+        if doubled {
+            let mut sig = self.ui;
+            let mut ui = sig.write();
+            let ui = &mut *ui;
+            let mut active = ui.active;
+            one_home_tab(&mut ui.tabs, &mut active);
+            ui.active = active;
+            for set in ui.parked.values_mut() {
+                one_home_tab(&mut set.0, &mut set.1);
+            }
+        }
         let ui = self.ui.peek();
         let json = |v: &dyn erased::Json| v.json();
         let mut pairs: Vec<(&str, String)> = vec![
@@ -2947,6 +2991,28 @@ impl AppState {
         self.save_spaces();
     }
 
+    /// Put space `id` just before or just after space `at`: the order of
+    /// the space menu, and of the swipe from one space to the next.
+    pub fn move_space(mut self, id: &str, at: &str, after: bool) {
+        if id == at {
+            return;
+        }
+        {
+            let mut spaces = self.spaces.write();
+            let Some(from) = spaces.iter().position(|s| s.id == id) else { return };
+            let moved = spaces.remove(from);
+            let Some(to) = spaces.iter().position(|s| s.id == at) else {
+                spaces.insert(from, moved);
+                return;
+            };
+            spaces.insert(if after { to + 1 } else { to }, moved);
+            for (i, s) in spaces.iter_mut().enumerate() {
+                s.position = (i + 1) as f64;
+            }
+        }
+        self.save_spaces();
+    }
+
     pub fn set_space_color(mut self, color: &str) {
         let id = self.ui.peek().space.clone();
         if let Some(sp) = self.spaces.write().iter_mut().find(|s| s.id == id) {
@@ -3213,6 +3279,16 @@ impl AppState {
     // ----- navigation ----------------------------------------------------
 
     pub fn navigate(mut self, route: Route) {
+        if route == Route::Home {
+            let other = {
+                let ui = self.ui.peek();
+                ui.tabs.iter().position(is_home_tab).filter(|&i| i != ui.active.min(ui.tabs.len() - 1))
+            };
+            if let Some(i) = other {
+                self.select_tab(i);
+                return self.set_modal(None);
+            }
+        }
         if let Route::Page(id) = &route {
             // A page of another space opens among the tabs of its space.
             if self.pages.peek().get(id).is_some_and(|p| !p.space_id.is_empty() && p.space_id != self.ui.peek().space) {
@@ -3556,6 +3632,9 @@ impl AppState {
 
     /// Open in a new tab at the end (always a new one).
     pub fn open_in_new_tab(mut self, route: Route) {
+        if route == Route::Home {
+            return self.new_tab();
+        }
         self.clear_slash();
         let made = self.enter_space_of(&route);
         {
@@ -3635,6 +3714,14 @@ impl AppState {
     }
 
     pub fn new_tab(mut self) {
+        // There is one Home tab at most: it comes forward. The read ends
+        // before select_tab writes (a guard in the `if let` would live on).
+        let home = self.ui.peek().tabs.iter().position(is_home_tab);
+        if let Some(i) = home {
+            self.select_tab(i);
+            self.flash_active_tab();
+            return;
+        }
         {
             let mut ui = self.ui.write();
             ui.tabs.push(Tab::new(Route::Home));
@@ -6410,6 +6497,7 @@ impl AppState {
             Bridge::TabDrop { from, to, mode } => self.drop_tab(&from, to.as_deref(), &mode),
             Bridge::DrawingSave { page, id, data } => self.save_drawing(&page, &id, data),
             Bridge::ImageData { page, id, data } => self.paste_image(&page, &id, &data),
+            Bridge::CellPicture { page, id, r, c, data } => self.paste_cell_picture(&page, &id, r, c, &data),
             Bridge::ImagePlace { page, id, x, w, right, to, after } => {
                 let place = Place { free: true, right, x: x.round() as i32, y: 0, w: w.round().max(0.0) as u32, beside: false };
                 self.edit_blocks(&page, |bs| place_picture(bs, &id, place, to.as_deref(), after));
@@ -6905,6 +6993,21 @@ impl AppState {
     // ----- pictures, tables and covers ----------------------------------------
 
     /// A picture arrived from the page (pasted or dropped) at a block.
+    /// A screenshot (or any picture) pasted into or dropped on a picture
+    /// cell: kept with the other pictures, and added to the cell.
+    fn paste_cell_picture(self, page: &str, id: &str, row: usize, column: usize, base64: &str) {
+        use base64::Engine;
+        let bytes = match base64::engine::general_purpose::STANDARD.decode(base64.trim()) {
+            Ok(bytes) if !bytes.is_empty() => bytes,
+            Ok(_) => return self.notice("That picture is too large (the most is 30 MB)."),
+            Err(_) => return self.notice("That picture could not be read."),
+        };
+        match crate::files::save(&bytes) {
+            Ok(name) => self.toggle_cell_part(page, id, row, column, &name),
+            Err(text) => self.notice(text),
+        }
+    }
+
     fn paste_image(self, page: &str, at: &str, base64: &str) {
         use base64::Engine;
         let bytes = match base64::engine::general_purpose::STANDARD.decode(base64.trim()) {
@@ -8914,6 +9017,32 @@ mod tests {
         assert_eq!(names(&pages, Some(&apollo.id)), vec!["Inside Apollo", "Other"]);
         assert_eq!(plan_page_move(&pages, "home", &notes.id, Some("gone"), "into"), None);
         assert_eq!(plan_page_move(&pages, "home", &notes.id, Some(&apollo.id), "sideways"), None);
+    }
+
+    #[test]
+    fn there_is_one_home_tab_at_most() {
+        let page = |id: &str| Tab::new(Route::Page(id.into()));
+        let mut on_home_later = page("c");
+        on_home_later.panes[0].push(Route::Home);
+        let mut tabs = vec![page("a"), Tab::new(Route::Home), page("b"), Tab::new(Route::Home), on_home_later, Tab::new(Route::Home)];
+        let ids: Vec<Id> = tabs.iter().map(|t| t.id.clone()).collect();
+        // The Home tab in front stays; the others go, and the front stays in front.
+        let mut active = 3;
+        assert!(one_home_tab(&mut tabs, &mut active));
+        assert_eq!(tabs.iter().map(|t| t.id.clone()).collect::<Vec<_>>(), vec![ids[0].clone(), ids[2].clone(), ids[3].clone()]);
+        assert_eq!(active, 2);
+        assert!(!one_home_tab(&mut tabs, &mut active), "once is enough");
+        // With a page in front: the first Home tab stays, and the page stays in front.
+        let mut tabs = vec![Tab::new(Route::Home), page("a"), Tab::new(Route::Home)];
+        let front = tabs[1].id.clone();
+        let mut active = 1;
+        assert!(one_home_tab(&mut tabs, &mut active));
+        assert_eq!((tabs.len(), tabs[active].id.clone()), (2, front));
+        assert!(is_home_tab(&tabs[0]));
+        // A tab with two panes, one of them on Home, is no Home tab.
+        let mut two = Tab::new(Route::Home);
+        two.panes.push(Pane::new(Route::Page("x".into())));
+        assert!(!is_home_tab(&two));
     }
 
     #[test]

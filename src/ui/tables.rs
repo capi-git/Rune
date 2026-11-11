@@ -832,7 +832,17 @@ pub fn CellBody(
             let names: Vec<String> = parts(&text).into_iter().filter(|name| crate::files::valid_name(name)).collect();
             let (p_add, b_add) = (page_id.clone(), id.clone());
             rsx! {
-                div { class: "cell-pics",
+                // A screenshot goes in with ⌘V while the cell is chosen, or
+                // dropped on it (see `cellPictures` in bridge.js).
+                div {
+                    class: "cell-pics",
+                    "data-pic-cell": "",
+                    "data-page": "{page_id}",
+                    "data-block": "{id}",
+                    "data-r": "{r}",
+                    "data-c": "{c}",
+                    tabindex: "0",
+                    title: "Paste or drop a picture here",
                     for name in names {
                         span { key: "{name}", class: "cell-pic",
                             img { src: "{crate::files::url(&name)}", alt: "Picture", draggable: "false" }

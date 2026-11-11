@@ -314,8 +314,18 @@ await run('Icon picker', async () => {
 
 await run('Tabs and the sliding highlight', async () => {
   await oneTab();
+  // One Home tab at most: a new tab from Home brings that tab forward.
   $('.new-tab').click();
+  await wait(300);
+  check('With a Home tab open, a new tab opens no second Home tab', $$('.tab').length === 1 && $$('.tab .tab-title').filter((t) => t.textContent === 'Home').length === 1, $$('.tab .tab-title').map((t) => t.textContent).join(' | '));
+  treeItem('Getting Started').click();
   await until(() => $$('.tab').length === 2);
+  $('.new-tab').click();
+  check('From another tab, a new tab goes to the Home tab there is', await until(() => $$('.tab').length === 2 && $('.tab.active .tab-title')?.textContent === 'Home'), $$('.tab .tab-title').map((t) => t.textContent).join(' | '));
+  $$('.tab')[1].click();
+  await until(() => $('.tab.active .tab-title')?.textContent === 'Getting Started');
+  $$('.tile').find((t) => t.title === 'Home').click();
+  check('Home in the sidebar goes to the Home tab, and the page keeps its tab', await until(() => $('.tab.active .tab-title')?.textContent === 'Home' && $$('.tab').length === 2 && $$('.tab .tab-title').some((t) => t.textContent === 'Getting Started')), $$('.tab .tab-title').map((t) => t.textContent).join(' | '));
   await wait(300);
   const g = $('.tab-glider');
   const active = $('.tab.active');
@@ -626,7 +636,7 @@ await run('AI panel opens without an API option', async () => {
 
 await run('Move a tab to a new window', async () => {
   await oneTab();
-  $('.new-tab').click();
+  treeItem('Getting Started').click();
   await until(() => $$('.tab').length === 2);
   $$('.tab')[1].dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
   const menu = await until(() => $('.tab-menu'));
@@ -654,6 +664,40 @@ await run('Spaces', async () => {
   const menu2 = await until(() => $('.space-menu'));
   menuItem(menu2, 'My Space').click();
   check('Switching back shows the first space', await until(() => treeItem('Getting Started') && !treeItem('Only in space two')));
+
+  // The order of the spaces: a space dragged in the menu takes its new place.
+  {
+    $('.ws-name').click();
+    await until(() => $('.space-menu .space-row'));
+    // The name only: a row also holds the space's letter badge.
+    const nameOf = (r) => (r.querySelector('.grow')?.textContent || '').trim();
+    const names = () => $$('.space-menu .space-row').map(nameOf);
+    const drag = async (from, to, after) => {
+      const row = (name) => $$('.space-menu .space-row').find((r) => nameOf(r) === name);
+      const a = row(from);
+      const b = row(to);
+      const box = b.getBoundingClientRect();
+      const at = { bubbles: true, cancelable: true, clientX: box.left + 60, clientY: after ? box.bottom - 5 : box.top + 5 };
+      const dt = new DataTransfer();
+      a.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: dt }));
+      await wait(60);
+      b.dispatchEvent(new DragEvent('dragover', { ...at, dataTransfer: dt }));
+      await wait(80);
+      const shown = b.classList.contains(after ? 'drop-after' : 'drop-before');
+      b.dispatchEvent(new DragEvent('drop', { ...at, dataTransfer: dt }));
+      a.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: dt }));
+      return shown;
+    };
+    check('Each space in the menu can be dragged, with a grip', $$('.space-menu .space-row[draggable="true"]').length === 2 && $('.space-menu .space-grip'));
+    const marked = await drag('Second space', 'My Space', false);
+    check('Dragged over the upper half of a space, a line shows above it', marked);
+    check('Let go there, the space takes that place in the menu', await until(() => names().join('|') === 'Second space|My Space'), names().join('|'));
+    check('…and in the dots at the foot of the sidebar', await until(() => $$('.side-foot .space-dot')[0]?.title === 'Second space'), $$('.side-foot .space-dot').map((d) => d.title).join('|'));
+    await drag('Second space', 'My Space', true);
+    check('Dragged to the lower half of the last space, it goes to the end', await until(() => names().join('|') === 'My Space|Second space'), names().join('|'));
+    key(document.activeElement || document.body, 'Escape');
+    await until(() => !$('.space-menu'), 1500);
+  }
 
   // Each space has its own tabs.
   const tabTitles = () => $$('.tab .tab-title').map((t) => t.textContent);
@@ -2166,6 +2210,22 @@ await run('Tables as databases', async () => {
   snap('table-row-menu');
   await closeMenu();
   check('The row stays picked when its menu closes', $$('tr.picked', box()).length === 1);
+  // A zoomed page (View → Zoom): the menu still opens at its row, all of it in sight.
+  for (const [how, times] of [['zoom_out', 2], ['zoom_in', 2]]) {
+    T().command('zoom_reset');
+    for (let i = 0; i < times; i++) T().command(how);
+    await wait(250);
+    $('[data-row-op="row-menu"]', await rowHandle(box(), 1)).click();
+    const zoomed = await until(() => $('.row-menu.anchored', box()));
+    await wait(250);
+    const cell = $('tr[data-r="1"] .first-cell', box())?.getBoundingClientRect();
+    const m = zoomed?.getBoundingClientRect();
+    const seen = m && document.elementFromPoint(m.left + 6, m.top + 14);
+    check(`In a page made ${how === 'zoom_out' ? 'smaller' : 'bigger'}, a row menu opens at its row, and all of it is seen`, m && cell && Math.abs(m.left - cell.left) < 3 && zoomed.contains(seen), m && cell ? `menu at ${Math.round(m.left)}, row at ${Math.round(cell.left)}, zoom ${getComputedStyle($('.card-zoom')).zoom}` : 'no menu');
+    await closeMenu();
+  }
+  T().command('zoom_reset');
+  await wait(250);
   $('[data-row-op="row-menu"]', await rowHandle(box(), 3)).dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, shiftKey: true }));
   check('Shift and a click pick the rows up to that row', await until(() => $$('tr.picked', box()).length === 3 && $('.row-menu [data-item="delete"]', box())?.textContent.includes('Delete 3 rows')), `${$$('tr.picked', box()).length} ${$('.row-menu [data-item="delete"]', box())?.textContent}`);
   await closeMenu();
@@ -2924,6 +2984,57 @@ await run('Diagrams', async () => {
   check('"Done" goes back to the diagram', await until(() => !wraps()[0].classList.contains('coding'), 3000));
   await wait(300);
   snap('diagram');
+});
+
+await run('Screenshots in a picture cell', async () => {
+  await oneTab();
+  const title = await newPage('Shots home');
+  key(title, 'Enter');
+  const first = await until(() => document.activeElement?.classList.contains('blk') && document.activeElement);
+  typeIn(first, 'Home.');
+  await wait(200);
+  askAi();
+  const box = await until(() => $('.ai-dock #ai-input'));
+  const md = ['| Trade | Chart |', '| --- | --- |', '| AAPL |  |', '<!-- columns: text | file -->'].join('\n');
+  box.value = `make a table [[tool: create_page ${JSON.stringify({ title: 'Trade shots', markdown: md })}]] [[reply: I made the page Trade shots.]]`;
+  box.dispatchEvent(new Event('input', { bubbles: true }));
+  await until(() => $('#ai-send'));
+  key(box, 'Enter');
+  await until(() => treeItem('Trade shots'), 8000);
+  ($('#ai-ok') || $('#ai-done-run'))?.click();
+  treeItem('Trade shots')?.click();
+  const pane = await until(() => shownPane('Trade shots'), 3000);
+  const cell = await until(() => pane && $('[data-pic-cell]', pane), 3000);
+  check('A picture cell can be chosen to take a picture', cell && cell.tabIndex === 0);
+  if (!cell) return;
+  // A screenshot: a small picture made here, as the Mac puts one on the clipboard.
+  const shot = async (color) => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 24;
+    canvas.height = 16;
+    const g = canvas.getContext('2d');
+    g.fillStyle = color;
+    g.fillRect(0, 0, 24, 16);
+    const blob = await new Promise((done) => canvas.toBlob(done, 'image/png'));
+    return new File([blob], 'Screenshot.png', { type: 'image/png' });
+  };
+  const pics = () => $$('[data-pic-cell] .cell-pic img', pane).length;
+  cell.focus();
+  const clip = new DataTransfer();
+  clip.items.add(await shot('#2e9d5b'));
+  cell.dispatchEvent(new ClipboardEvent('paste', { clipboardData: clip, bubbles: true, cancelable: true }));
+  check('⌘V with the cell chosen puts the screenshot in the cell', await until(() => pics() === 1, 4000), pics());
+  check('…and not in the page as a picture of its own', !$('.image-block img, .blk-image img', pane) && $$('.block-row.kind-image', pane).length === 0);
+  const drop = new DataTransfer();
+  drop.items.add(await shot('#d94848'));
+  const target = $('[data-pic-cell]', pane);
+  target.dispatchEvent(new DragEvent('dragover', { dataTransfer: drop, bubbles: true, cancelable: true }));
+  check('A picture dragged over the cell marks it', target.classList.contains('pic-drop'));
+  target.dispatchEvent(new DragEvent('drop', { dataTransfer: drop, bubbles: true, cancelable: true }));
+  check('A picture dropped on the cell goes in beside the first', await until(() => pics() === 2, 4000), pics());
+  check('The mark goes when the picture is in', !$('[data-pic-cell].pic-drop', pane));
+  await wait(200);
+  snap('cell-screenshots');
 });
 
 await run('The AI does things in Rune with its tools', async () => {
