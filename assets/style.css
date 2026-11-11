@@ -1206,7 +1206,8 @@ body[data-resizing="rows"] * {
   -webkit-user-select: none;
 }
 .block-row:hover > .block-inner > .gutter,
-.block-row.menu-open > .block-inner > .gutter {
+.block-row.menu-open > .block-inner > .gutter,
+.block-row.at-strip > .block-inner > .gutter {
   opacity: 1;
 }
 .kind-heading1 > .block-inner > .gutter {
@@ -1287,15 +1288,16 @@ body[data-resizing="rows"] * {
   text-decoration-color: currentColor;
 }
 /* A link to the web is blue, so that it reads as one. */
-.blk a:not([href^="notion2://page/"]) {
+.blk a:not([href^="notion2://page/"]):not([href^="rune://page/"]) {
   color: var(--accent);
   text-decoration-color: color-mix(in srgb, var(--accent) 45%, transparent);
 }
-.blk a:not([href^="notion2://page/"]):hover {
+.blk a:not([href^="notion2://page/"]):not([href^="rune://page/"]):hover {
   text-decoration-color: var(--accent);
 }
 /* A link to a page of the workspace: a quiet tag, not an underlined address. */
-.blk a[href^="notion2://page/"] {
+.blk a[href^="notion2://page/"],
+.blk a[href^="rune://page/"] {
   text-decoration: none;
   background: var(--fill-4);
   border-radius: 4px;
@@ -1303,7 +1305,8 @@ body[data-resizing="rows"] * {
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
 }
-.blk a[href^="notion2://page/"]:hover {
+.blk a[href^="notion2://page/"]:hover,
+.blk a[href^="rune://page/"]:hover {
   background: var(--fill-2);
 }
 /* The list of pages after "@" or "[[". */

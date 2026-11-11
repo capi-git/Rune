@@ -5,7 +5,7 @@
 
 use super::icons::{Icon, PageIcon};
 use super::table_choices::{tag_class, ChoicePicker, Tag};
-use super::table_menus::{CellMenu, ChipMenu, ColumnMenu, IconMenu, KindsMenu, PaintMenu, RowMenu, TableMenu};
+use super::table_menus::{CellMenu, ChipMenu, ColumnMenu, ColumnsMenu, IconMenu, KindsMenu, PaintMenu, RowMenu, TableMenu};
 use super::table_views::{Board, Calendar, Gallery, List};
 use crate::state::{AppState, Open, Popover};
 use crate::table::{checked, format_day, parts, Column, Kind, Layout, Show, Table};
@@ -35,16 +35,32 @@ pub fn hold(id: &str, table: Option<&Table>) {
     }
 }
 
-/// The rows of a table that are picked (by a click on their handle). They
-/// stay picked when their menu closes, so that more rows can be added with
-/// ⇧ and a click; a click anywhere else lets them go (see the page script).
+/// The rows of a table that are picked (by a click on their handle), or its
+/// columns (by ⌘ or ⇧ and a click on their headings): one or the other.
+/// They stay picked when a menu closes, so that more can be added; a click
+/// anywhere else lets them go (see the page script).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Picked {
     pub block: String,
+    /// In the order they were picked: the last one is where a range starts.
     pub rows: Vec<usize>,
+    pub columns: Vec<usize>,
+    /// How many rows and columns the table had: with more or fewer (the AI
+    /// wrote the page again, another window changed the table), the numbers
+    /// may be those of other rows and columns now, and nothing is picked.
+    pub shape: (usize, usize),
 }
 
 pub static PICKED: GlobalSignal<Option<Picked>> = Signal::global(|| None);
+
+/// How a click picks: that one alone; with ⇧, also all from the one picked
+/// last to it; with ⌘, that one more, or no longer if it was picked.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Pick {
+    Alone,
+    Range,
+    Toggle,
+}
 
 /// The rows of a table in the order the screen shows them now (the order
 /// that is kept while the caret is in the table, if one is).
@@ -52,24 +68,72 @@ pub fn shown_order(id: &str, table: &Table) -> Vec<usize> {
     HELD.peek().as_ref().filter(|h| h.block == id && h.rows == table.rows.len()).map(|h| h.order.clone()).unwrap_or_else(|| table.order())
 }
 
-/// Pick a row of a table: that row alone, or with `extend` also the rows
-/// from the row picked last to it, as `order` (what the screen shows) has
-/// them: a row that does not show between the two is not picked. Returns
-/// the rows picked now.
-pub fn pick(id: &str, row: usize, extend: bool, order: &[usize]) -> Vec<usize> {
-    let mut rows = PICKED.peek().as_ref().filter(|p| p.block == id && extend).map(|p| p.rows.clone()).unwrap_or_default();
-    let place = |r: usize| order.iter().position(|&o| o == r);
-    let between = rows.last().and_then(|&last| Some((place(last)?, place(row)?)));
-    match between {
-        Some((a, b)) => rows.extend(order[a.min(b)..=a.max(b)].iter().filter(|r| !rows.contains(r)).copied().collect::<Vec<_>>()),
-        None if !rows.contains(&row) => rows.push(row),
-        None => {}
+/// What a click does to what is picked. `order` is what the screen shows:
+/// a range takes what shows between its two ends, and no more.
+fn pick_in(mut picked: Vec<usize>, item: usize, how: Pick, order: &[usize]) -> Vec<usize> {
+    let place = |i: usize| order.iter().position(|&o| o == i);
+    match how {
+        Pick::Alone => picked = vec![item],
+        Pick::Toggle => match picked.iter().position(|&p| p == item) {
+            Some(at) => {
+                picked.remove(at);
+            }
+            None => picked.push(item),
+        },
+        Pick::Range => {
+            let between = picked.last().and_then(|&last| Some((place(last)?, place(item)?)));
+            if let Some((a, b)) = between {
+                let more: Vec<usize> = order[a.min(b)..=a.max(b)].iter().filter(|i| !picked.contains(i)).copied().collect();
+                picked.extend(more);
+            }
+            // (The one clicked is the last: the next range starts from it.)
+            picked.retain(|&p| p != item);
+            picked.push(item);
+        }
     }
-    *PICKED.write() = Some(Picked { block: id.to_string(), rows: rows.clone() });
+    picked
+}
+
+fn shape_of(table: &Table) -> (usize, usize) {
+    (table.rows.len(), table.columns())
+}
+
+fn set_picked(id: &str, table: &Table, rows: Vec<usize>, columns: Vec<usize>) {
+    let now = (!rows.is_empty() || !columns.is_empty()).then(|| Picked { block: id.to_string(), rows, columns, shape: shape_of(table) });
+    if *PICKED.peek() != now {
+        *PICKED.write() = now;
+    }
+}
+
+/// What of a table is picked, if the table is still as it was when it was
+/// picked: its rows, and its columns.
+fn picked_of(picked: &Option<Picked>, id: &str, table: &Table) -> (Vec<usize>, Vec<usize>) {
+    picked.as_ref().filter(|p| p.block == id && p.shape == shape_of(table)).map(|p| (p.rows.clone(), p.columns.clone())).unwrap_or_default()
+}
+
+/// The rows of a table that are picked now, and its picked columns (one or
+/// the other; `table` is the table as it is now).
+pub fn picked(id: &str, table: &Table) -> (Vec<usize>, Vec<usize>) {
+    picked_of(&PICKED.peek(), id, table)
+}
+
+/// Pick a row of a table (see [`Pick`]), as the screen shows its rows.
+/// Picked columns are let go. Returns the rows picked now.
+pub fn pick_row(id: &str, table: &Table, row: usize, how: Pick) -> Vec<usize> {
+    let rows = pick_in(picked(id, table).0, row, how, &shown_order(id, table));
+    set_picked(id, table, rows.clone(), Vec::new());
     rows
 }
 
-/// Let the picked rows of a table go.
+/// Pick a column of a table (see [`Pick`]), of those that show. Picked
+/// rows are let go. Returns the columns picked now.
+pub fn pick_column(id: &str, table: &Table, column: usize, how: Pick) -> Vec<usize> {
+    let columns = pick_in(picked(id, table).1, column, how, &table.shown_columns());
+    set_picked(id, table, Vec::new(), columns.clone());
+    columns
+}
+
+/// Let the picked rows or columns of a table go.
 pub fn unpick(id: &str) {
     if PICKED.peek().as_ref().is_some_and(|p| p.block == id) {
         *PICKED.write() = None;
@@ -78,8 +142,8 @@ pub fn unpick(id: &str) {
 
 /// The table changed by something other than typing in a cell. If a row
 /// came or went, the numbers of the rows are other numbers now: an order
-/// that is kept is worked out again. Picked rows are let go: a row that
-/// came, went or moved gives their numbers to other rows.
+/// that is kept is worked out again. Picked rows and columns are let go: one
+/// that came, went or moved gives their numbers to others.
 pub fn changed(id: &str, table: &Table) {
     if HELD.peek().as_ref().is_some_and(|h| h.block == id && h.rows != table.rows.len()) {
         hold(id, Some(table));
@@ -111,7 +175,7 @@ pub fn TableView(page_id: String, id: String, data: String) -> Element {
     let state = use_context::<AppState>();
     let table = Table::parse(&data);
     let open = state.ui.read().popover.clone().filter(|p| table_of(p) == Some(id.as_str()));
-    let picked: Vec<usize> = PICKED.read().as_ref().filter(|p| p.block == id).map(|p| p.rows.clone()).unwrap_or_default();
+    let (picked, picked_cols) = picked_of(&PICKED.read(), &id, &table);
     let order = HELD.read().as_ref().filter(|h| h.block == id && h.rows == table.rows.len()).map(|h| h.order.clone()).unwrap_or_else(|| table.order());
     {
         let id = id.clone();
@@ -131,7 +195,7 @@ pub fn TableView(page_id: String, id: String, data: String) -> Element {
             // at here, where every change of the panes is seen).
             let mut open_rows: Vec<String> = if table.has_ids() { state.row_pages(&id).into_iter().filter(|(_, page)| state.shows_page(page)).map(|(row, _)| row).collect() } else { Vec::new() };
             open_rows.sort();
-            rsx! { Grid { page_id: page_id.clone(), id: id.clone(), table: table.clone(), order, picked: picked.clone(), open_rows, open: open.clone(), named } }
+            rsx! { Grid { page_id: page_id.clone(), id: id.clone(), table: table.clone(), order, picked: picked.clone(), picked_cols, open_rows, open: open.clone(), named } }
         }
         Layout::Board => rsx! { Board { page_id: page_id.clone(), id: id.clone(), table: table.clone(), order } },
         Layout::List => rsx! { List { page_id: page_id.clone(), id: id.clone(), table: table.clone(), order } },
@@ -141,7 +205,7 @@ pub fn TableView(page_id: String, id: String, data: String) -> Element {
     rsx! {
         div { class: "table-wrap layout-{layout.name()}", "data-table-wrap": "{id}", "data-page": "{page_id}",
             if named || layout != Layout::Table {
-                TableHead { page_id: page_id.clone(), id: id.clone(), table: table.clone(), picked: picked.len(), open: open.clone() }
+                TableHead { page_id: page_id.clone(), id: id.clone(), table: table.clone(), open: open.clone() }
             }
             Chips { page_id: page_id.clone(), id: id.clone(), table: table.clone(), open: open.clone() }
             {body}
@@ -179,7 +243,7 @@ pub fn TableView(page_id: String, id: String, data: String) -> Element {
 
 /// The line above a table: its icon, its name, and the button of its menu.
 #[component]
-fn TableHead(page_id: String, id: String, table: Table, picked: usize, open: Option<Popover>) -> Element {
+fn TableHead(page_id: String, id: String, table: Table, open: Option<Popover>) -> Element {
     let state = use_context::<AppState>();
     let locked = table.view.locked;
     let icon_open = matches!(open, Some(Popover::TableIcon { .. }));
@@ -214,9 +278,6 @@ fn TableHead(page_id: String, id: String, table: Table, picked: usize, open: Opt
                 span { class: "table-by", "by {table.heading(c)}" }
             }
             span { class: "table-head-gap" }
-            if picked > 0 {
-                span { class: "table-picked", if picked == 1 { "1 row selected" } else { "{picked} rows selected" } }
-            }
             MenuButton { id: id.clone(), open: matches!(open, Some(Popover::TableMenu { .. })) }
         }
     }
@@ -383,9 +444,13 @@ fn column_width(table: &Table, c: usize) -> usize {
 
 /// The plain layout: a header, the rows, the totals; at its right the
 /// buttons for a new column and (with no line above the table) for its menu;
-/// at its left the handle of the row under the pointer.
+/// at its left the handle of the row under the pointer. The menus of its
+/// cells, rows and columns are drawn beside the box that scrolls the table
+/// sideways, not in it: a frozen cell is a layer of its own in that box, and
+/// WebKit cuts what is in such a layer at the edges of the box, a menu fixed
+/// to the window too. The page script hangs each menu from its cell.
 #[component]
-fn Grid(page_id: String, id: String, table: Table, order: Vec<usize>, picked: Vec<usize>, open_rows: Vec<String>, open: Option<Popover>, named: bool) -> Element {
+fn Grid(page_id: String, id: String, table: Table, order: Vec<usize>, picked: Vec<usize>, picked_cols: Vec<usize>, open_rows: Vec<String>, open: Option<Popover>, named: bool) -> Element {
     let state = use_context::<AppState>();
     let cols = table.shown_columns();
     let typed = table.is_typed();
@@ -396,7 +461,7 @@ fn Grid(page_id: String, id: String, table: Table, order: Vec<usize>, picked: Ve
         _ => None,
     };
     let cell_menu = match &open {
-        Some(Popover::TableCell { row, column, .. }) => Some((*row, *column)),
+        Some(Popover::TableCell { row, column, on_page: false, .. }) => Some((*row, *column)),
         _ => None,
     };
     // The menu of the picked rows hangs under the row picked last.
@@ -405,6 +470,9 @@ fn Grid(page_id: String, id: String, table: Table, order: Vec<usize>, picked: Ve
         _ => Vec::new(),
     };
     let row_menu = menu_rows.last().copied();
+    // The cell with an open list, and which list it is.
+    let cell_list = cell_menu.filter(|&(r, c)| r < table.rows.len() && c < table.columns()).map(|(r, c)| (r, c, table.column(c), table.cell(r, c).to_string()));
+    let cols_picked = |c: usize| picked_cols.contains(&c);
     let kinds_open = matches!(open, Some(Popover::TableKinds { .. }));
     let menu_open = matches!(open, Some(Popover::TableMenu { .. }));
     let any_menu = menu_col.is_some() || cell_menu.is_some() || row_menu.is_some();
@@ -447,13 +515,9 @@ fn Grid(page_id: String, id: String, table: Table, order: Vec<usize>, picked: Ve
                             for (n, c) in cols.iter().copied().enumerate() {
                                 td {
                                     key: "{c}",
-                                    class: match (menu_col == Some(c), n < frozen) {
-                                        (true, true) => "head menu-open frozen",
-                                        (true, false) => "head menu-open",
-                                        (false, true) => "head frozen",
-                                        (false, false) => "head",
-                                    },
+                                    class: format!("head{}{}{}", if menu_col == Some(c) { " menu-open" } else { "" }, if n < frozen { " frozen" } else { "" }, if cols_picked(c) { " col-picked" } else { "" }),
                                     style: "{wide(n)}{sticky(n)}",
+                                    "data-col": "{c}",
                                     HeadCell {
                                         page_id: page_id.clone(),
                                         id: id.clone(),
@@ -464,9 +528,6 @@ fn Grid(page_id: String, id: String, table: Table, order: Vec<usize>, picked: Ve
                                         typed,
                                         locked,
                                         menu_open: menu_col == Some(c),
-                                    }
-                                    if menu_col == Some(c) {
-                                        ColumnMenu { page_id: page_id.clone(), id: id.clone(), c, table: table.clone() }
                                     }
                                 }
                             }
@@ -496,8 +557,9 @@ fn Grid(page_id: String, id: String, table: Table, order: Vec<usize>, picked: Ve
                                             for (n, c) in cols.iter().copied().enumerate() {
                                                 td {
                                                     key: "{c}",
-                                                    class: cell_class(table.kind(c), n == 0, n < frozen),
+                                                    class: cell_class(table.kind(c), n == 0, n < frozen, cols_picked(c)),
                                                     style: "{sticky(n)}",
+                                                    "data-col": "{c}",
                                                     if n == 0 {
                                                         div { class: "first-cell", style: "padding-left: {indent * 18}px;",
                                                             if kids {
@@ -524,6 +586,7 @@ fn Grid(page_id: String, id: String, table: Table, order: Vec<usize>, picked: Ve
                                                                 hint: String::new(),
                                                                 share: None,
                                                                 menu_open: cell_menu == Some((r, c)),
+                                                                own_menu: false,
                                                             }
                                                             button {
                                                                 class: "row-open",
@@ -539,9 +602,6 @@ fn Grid(page_id: String, id: String, table: Table, order: Vec<usize>, picked: Ve
                                                                 Icon { name: "side", size: 13 }
                                                                 span { "Open" }
                                                             }
-                                                            if row_menu == Some(r) {
-                                                                RowMenu { page_id: page_id.clone(), id: id.clone(), table: table.clone(), rows: menu_rows.clone() }
-                                                            }
                                                         }
                                                     } else {
                                                         CellBody {
@@ -556,6 +616,7 @@ fn Grid(page_id: String, id: String, table: Table, order: Vec<usize>, picked: Ve
                                                             hint: table.rolled_up(r, c).unwrap_or_default(),
                                                             share: share_of(&table, r, c, fulls[c]),
                                                             menu_open: cell_menu == Some((r, c)),
+                                                            own_menu: false,
                                                         }
                                                     }
                                                 }
@@ -572,12 +633,7 @@ fn Grid(page_id: String, id: String, table: Table, order: Vec<usize>, picked: Ve
                                 for (n, (c, amount, total)) in totals.into_iter().enumerate() {
                                     td {
                                         key: "{c}",
-                                        class: match (amount, n < frozen) {
-                                            (true, true) => "num frozen",
-                                            (true, false) => "num",
-                                            (false, true) => "frozen",
-                                            (false, false) => "",
-                                        },
+                                        class: format!("{}{}{}", if amount { "num" } else { "" }, if n < frozen { " frozen" } else { "" }, if cols_picked(c) { " col-picked" } else { "" }),
                                         style: "{sticky(n)}",
                                         if let Some((word, value)) = total {
                                             if !word.is_empty() {
@@ -592,10 +648,38 @@ fn Grid(page_id: String, id: String, table: Table, order: Vec<usize>, picked: Ve
                     }
                 }
             }
+            // The menus that hang from a cell, a row or a heading (each a
+            // new element when it hangs from another one: the page script
+            // places what comes into the page).
+            div { class: "table-hung",
+                for c in menu_col {
+                    div { key: "column-{c}", class: "hung", "data-hang": "column", "data-c": "{c}",
+                        if picked_cols.len() > 1 && cols_picked(c) {
+                            ColumnsMenu { page_id: page_id.clone(), id: id.clone(), table: table.clone(), columns: picked_cols.clone() }
+                        } else {
+                            ColumnMenu { page_id: page_id.clone(), id: id.clone(), c, table: table.clone() }
+                        }
+                    }
+                }
+                for r in row_menu {
+                    div { key: "row-{r}", class: "hung", "data-hang": "row", "data-r": "{r}",
+                        RowMenu { page_id: page_id.clone(), id: id.clone(), table: table.clone(), rows: menu_rows.clone() }
+                    }
+                }
+                for (r, c, column, text) in cell_list {
+                    div { key: "cell-{r}-{c}", class: "hung", "data-hang": "cell", "data-r": "{r}", "data-c": "{c}",
+                        CellList { page_id: page_id.clone(), id: id.clone(), r, c, column, text }
+                    }
+                }
+            }
+            // What is picked, and what to do with it.
+            if !picked.is_empty() || !picked_cols.is_empty() {
+                PickedBar { page_id: page_id.clone(), id: id.clone(), rows: picked.clone(), columns: picked_cols.clone(), locked, last_column: picked_cols.len() >= table.columns() }
+            }
             // The handle of the row under the pointer (the page script puts it there).
             div { class: "row-handle", "data-row-handle": "{id}", "aria-hidden": "true",
                 button { class: "g-btn", "data-row-op": "add-below", title: "Add a row below", tabindex: "-1", Icon { name: "plus", size: 15 } }
-                button { class: "g-btn handle", "data-row-op": "row-menu", draggable: "true", title: "Drag to move · Click for options · ⇧ click for more rows", tabindex: "-1", Icon { name: "grip", size: 15 } }
+                button { class: "g-btn handle", "data-row-op": "row-menu", draggable: "true", title: "Drag to move · Click for options · ⌘ or ⇧ click to pick more rows", tabindex: "-1", Icon { name: "grip", size: 15 } }
             }
             div { class: if kinds_open || (menu_open && !named) { "table-side open" } else { "table-side" },
                 if !locked {
@@ -633,13 +717,73 @@ pub fn group_label(kind: Kind, heading: &str, value: &str) -> String {
     }
 }
 
-fn cell_class(kind: Kind, first: bool, frozen: bool) -> String {
+fn cell_class(kind: Kind, first: bool, frozen: bool, picked: bool) -> String {
     let by_kind = match kind {
         Kind::Checkbox => "check-cell",
         kind if kind.is_amount() => "num",
         _ => "",
     };
-    format!("{by_kind}{}{}", if first { " first" } else { "" }, if frozen { " frozen" } else { "" })
+    format!("{by_kind}{}{}{}", if first { " first" } else { "" }, if frozen { " frozen" } else { "" }, if picked { " col-picked" } else { "" })
+}
+
+/// The list that opens from a cell: the options of a choice cell, or the
+/// rows a relation cell can name. No other kind of cell has one.
+#[component]
+fn CellList(page_id: String, id: String, r: usize, c: usize, column: Column, text: String) -> Element {
+    match column.kind {
+        k if k.has_options() => rsx! { ChoicePicker { page_id, id, r, c, column, text } },
+        Kind::Relation => rsx! { CellMenu { page_id, id, r, c, from: column.from.clone(), text } },
+        _ => rsx! {},
+    }
+}
+
+/// What is picked in a table, and the way to take it out: a small bar over
+/// the top left corner of the table, while rows or columns are picked. (It
+/// is in a rail as high as the table, and stays at the top of the page while
+/// a long table is scrolled under it.)
+#[component]
+fn PickedBar(page_id: String, id: String, rows: Vec<usize>, columns: Vec<usize>, locked: bool, last_column: bool) -> Element {
+    let state = use_context::<AppState>();
+    let words = match (rows.len(), columns.len()) {
+        (1, _) => "1 row selected".to_string(),
+        (0, 1) => "1 column selected".to_string(),
+        (0, n) => format!("{n} columns selected"),
+        (n, _) => format!("{n} rows selected"),
+    };
+    // (A locked table keeps its columns, and a table keeps one column.)
+    let can_delete = !rows.is_empty() || (!locked && !last_column);
+    let b_clear = id.clone();
+    rsx! {
+        div { class: "picked-rail",
+            div { class: "picked-bar", role: "toolbar", "aria-label": "Selection",
+                span { class: "table-picked", "{words}" }
+                if can_delete {
+                    button {
+                        class: "picked-do",
+                        title: "Delete (the Delete key does the same)",
+                        "data-picked": "delete",
+                        onclick: move |e| {
+                            e.stop_propagation();
+                            state.delete_picked_in_table(&page_id, &id);
+                        },
+                        Icon { name: "trash", size: 13 }
+                        span { "Delete" }
+                    }
+                }
+                button {
+                    class: "picked-x",
+                    title: "Clear the selection",
+                    "aria-label": "Clear the selection",
+                    "data-picked": "clear",
+                    onclick: move |e| {
+                        e.stop_propagation();
+                        unpick(&b_clear);
+                    },
+                    Icon { name: "close", size: 12 }
+                }
+            }
+        }
+    }
 }
 
 /// How full the bar or ring of a cell is (none for a column that shows
@@ -706,6 +850,9 @@ pub fn CellBody(
     hint: String,
     #[props(!optional)] share: Option<f64>,
     menu_open: bool,
+    /// Its list is drawn here, in the cell (at the top of a row's page). A
+    /// table draws the lists of its cells itself: see [`Grid`].
+    own_menu: bool,
 ) -> Element {
     let state = use_context::<AppState>();
     let kind = column.kind;
@@ -799,13 +946,13 @@ pub fn CellBody(
                     "aria-haspopup": "listbox",
                     onclick: move |e| {
                         e.stop_propagation();
-                        state.set_popover((!menu_open).then(|| Popover::TableCell { block_id: block.clone(), row: r, column: c }));
+                        state.set_popover((!menu_open).then(|| Popover::TableCell { block_id: block.clone(), row: r, column: c, on_page: own_menu }));
                     },
                     for name in names {
                         Tag { key: "{name}", name: name.clone(), color: column.color_of(&name), dot: k == Kind::Status }
                     }
                 }
-                if menu_open {
+                if menu_open && own_menu {
                     ChoicePicker { page_id: page_id.clone(), id: id.clone(), r, c, column: column.clone(), text: text.clone() }
                 }
             }
@@ -892,12 +1039,12 @@ pub fn CellBody(
                             "aria-haspopup": "menu",
                             onclick: move |e| {
                                 e.stop_propagation();
-                                state.set_popover((!menu_open).then(|| Popover::TableCell { block_id: menu_block.clone(), row: r, column: c }));
+                                state.set_popover((!menu_open).then(|| Popover::TableCell { block_id: menu_block.clone(), row: r, column: c, on_page: own_menu }));
                             },
                             Icon { name: "plus", size: 12 }
                         }
                     }
-                    if menu_open {
+                    if menu_open && own_menu {
                         CellMenu { page_id: page_id.clone(), id: id.clone(), r, c, from: from.clone(), text: text.clone() }
                     }
                 }
@@ -918,7 +1065,7 @@ pub fn RowValues(page_id: String) -> Element {
     let _ = (state.blocks.read().len(), state.pages.read().len());
     let Some(row) = state.row_ref(&page_id) else { return rsx! {} };
     let cell_menu = match state.ui.read().popover.clone() {
-        Some(Popover::TableCell { block_id, row: at, column }) if block_id == row.block => Some((at, column)),
+        Some(Popover::TableCell { block_id, row: at, column, on_page: true }) if block_id == row.block => Some((at, column)),
         _ => None,
     };
     let table = row.table.clone();
@@ -959,6 +1106,7 @@ pub fn RowValues(page_id: String) -> Element {
                                     hint: table.rolled_up(r, c).unwrap_or_else(|| "Empty".to_string()),
                                     share: share_of(&table, r, c, fulls[c]),
                                     menu_open: cell_menu == Some((r, c)),
+                                    own_menu: true,
                                 }
                             }
                         }
@@ -999,5 +1147,31 @@ pub fn RowValues(page_id: String) -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_click_picks_one_and_shift_or_command_pick_more() {
+        // The rows as the screen shows them (a sort): 4 is first, 1 is last.
+        let order = [4, 2, 3, 5, 1];
+        let alone = pick_in(vec![2, 3], 5, Pick::Alone, &order);
+        assert_eq!(alone, [5]);
+        // ⌘: one more, and the same again lets it go.
+        let more = pick_in(alone, 2, Pick::Toggle, &order);
+        assert_eq!(more, [5, 2]);
+        assert_eq!(pick_in(more.clone(), 5, Pick::Toggle, &order), [2]);
+        // ⇧: all that show from the one picked last to the one clicked.
+        let range = pick_in(more, 1, Pick::Range, &order);
+        assert_eq!(range, [5, 2, 3, 1]);
+        // The next range starts from the one clicked last, upwards too.
+        assert_eq!(pick_in(vec![3], 4, Pick::Range, &order), [3, 2, 4]);
+        // With nothing picked, ⇧ picks the one clicked.
+        assert_eq!(pick_in(Vec::new(), 3, Pick::Range, &order), [3]);
+        // One that does not show (a filter) is no end of a range: it is picked alone.
+        assert_eq!(pick_in(vec![2], 9, Pick::Range, &order), [2, 9]);
     }
 }

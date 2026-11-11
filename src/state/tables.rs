@@ -8,6 +8,7 @@ use crate::chart::Chart;
 use crate::layout::Edge;
 use crate::model::{index_of, new_id, Block, BlockKind, Id, Page};
 use crate::table::{Color, Kind, Rule, Show, Table, Total, View};
+use crate::ui::tables::Pick;
 use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 use std::collections::HashMap;
@@ -463,10 +464,16 @@ impl AppState {
             // The caret came into the table, or left it (see `ui::tables::HELD`).
             "hold" => return crate::ui::tables::hold(id, self.table_at(page, id).as_ref()),
             "release" => return crate::ui::tables::hold(id, None),
-            // A click away from the picked rows.
+            // A click away from the picked rows or columns.
             "unpick" => return crate::ui::tables::unpick(id),
+            // ⇧ (`column` is 1) or ⌘ (2) and a click on the handle of a row.
+            "pick-row" => return self.pick_row(page, id, row, if column == 1 { Pick::Range } else { Pick::Toggle }),
+            // The same on the heading of a column (`row` says which key).
+            "pick-column" => return self.pick_column(page, id, column, if row == 1 { Pick::Range } else { Pick::Toggle }),
+            // The Delete key, with rows or columns picked.
+            "delete-picked" => return self.delete_picked_in_table(page, id),
             "open-row" => return self.open_row(page, id, row, if column == 1 { Open::Tab } else { Open::Auto }),
-            "row-menu" => return self.row_menu(page, id, row, column == 1),
+            "row-menu" => return self.row_menu(page, id, row),
             "fold-row" => return self.edit_table(page, id, |t| t.toggle_closed(row)),
             // To before the row `column`, or to after it and the rows nested in it.
             "move-row" | "move-after" => {
@@ -509,13 +516,74 @@ impl AppState {
         }
     }
 
-    /// Pick a row and open the menu of the picked rows. With `extend`, the
-    /// rows from the one picked last to this one are picked too (those that
-    /// show between them: a row that a filter hides is not picked).
-    pub fn row_menu(self, page: &str, id: &str, row: usize, extend: bool) {
+    /// Open the menu of a row. A row that is one of several picked rows
+    /// opens the menu of them all; any other row is picked alone first.
+    pub fn row_menu(self, page: &str, id: &str, row: usize) {
         let Some(table) = self.table_at(page, id).filter(|t| row >= 1 && row < t.rows.len()) else { return };
-        let rows = crate::ui::tables::pick(id, row, extend, &crate::ui::tables::shown_order(id, &table));
+        let mut rows = crate::ui::tables::picked(id, &table).0;
+        if rows.len() > 1 && rows.contains(&row) {
+            // (The menu hangs under the last of its rows: the one clicked.)
+            rows.retain(|&r| r != row);
+            rows.push(row);
+        } else {
+            rows = crate::ui::tables::pick_row(id, &table, row, Pick::Alone);
+        }
         self.set_popover(Some(Popover::TableRow { block_id: id.to_string(), rows }));
+    }
+
+    /// Pick one more row, or the rows up to it (those that show between
+    /// them: a row that a filter hides is not picked), with no menu.
+    pub fn pick_row(self, page: &str, id: &str, row: usize, how: Pick) {
+        let Some(table) = self.table_at(page, id).filter(|t| row >= 1 && row < t.rows.len()) else { return };
+        self.set_popover(None);
+        crate::ui::tables::pick_row(id, &table, row, how);
+    }
+
+    /// Pick one more column, or the columns up to it (those that show).
+    /// A locked table keeps its columns: there is nothing to pick them for.
+    pub fn pick_column(self, page: &str, id: &str, column: usize, how: Pick) {
+        let Some(table) = self.table_at(page, id).filter(|t| column < t.columns() && !t.view.locked) else { return };
+        self.set_popover(None);
+        crate::ui::tables::pick_column(id, &table, column, how);
+    }
+
+    /// Take out what is picked in a table: its rows, or its columns. One
+    /// step for Undo, however many they are.
+    pub fn delete_picked_in_table(self, page: &str, id: &str) {
+        let Some(table) = self.table_at(page, id) else { return };
+        let (rows, columns) = crate::ui::tables::picked(id, &table);
+        if !rows.is_empty() {
+            self.rows_op(page, id, &rows, "delete");
+        } else if !columns.is_empty() {
+            self.columns_op(page, id, &columns, "delete");
+        }
+        // (Said in words: the Delete key can take out what is out of sight.)
+        let Some(now) = self.table_at(page, id) else { return };
+        match (table.rows.len().saturating_sub(now.rows.len()), table.columns().saturating_sub(now.columns())) {
+            (0, 0) => {}
+            (1, 0) => self.toast("1 row deleted"),
+            (n, 0) => self.toast(format!("{n} rows deleted")),
+            (_, 1) => self.toast("1 column deleted"),
+            (_, n) => self.toast(format!("{n} columns deleted")),
+        }
+    }
+
+    /// One of the commands for several picked columns: "delete", "hide".
+    /// The table keeps one column, and its first column always shows.
+    pub fn columns_op(self, page: &str, id: &str, columns: &[usize], op: &str) {
+        match op {
+            "hide" => self.change_table_view(page, id, |v| {
+                for &c in columns.iter().filter(|&&c| c > 0) {
+                    if !v.hidden.contains(&c) {
+                        v.toggle_hidden(c);
+                    }
+                }
+            }),
+            "delete" => self.edit_columns(page, id, |t| t.remove_columns(&columns)),
+            _ => {}
+        }
+        crate::ui::tables::unpick(id);
+        self.set_popover(None);
     }
 
     /// One of the commands of the menu of rows, for all the picked rows:
@@ -527,12 +595,8 @@ impl AppState {
         self.edit_table(page, id, |t| {
             rows.retain(|&r| r >= 1 && r < t.rows.len());
             match op {
+                "delete" => t.remove_rows(&rows),
                 // (From the last row up, so that the numbers of the rows still to do stay true.)
-                "delete" => {
-                    for &r in rows.iter().rev() {
-                        t.remove_row(r);
-                    }
-                }
                 "duplicate" => {
                     for &r in rows.iter().rev() {
                         t.duplicate_row(r);
@@ -739,7 +803,7 @@ impl AppState {
     pub fn row_page_do(self, page: &str, id: &str, row: usize, what: &str) {
         let Some(pid) = self.row_page(page, id, Some(row)) else { return };
         match what {
-            "copy-link" => self.copy_to_clipboard(format!("notion2://page/{pid}"), "Link copied"),
+            "copy-link" => self.copy_to_clipboard(crate::inline::page_url(&pid), "Link copied"),
             "favorite" => self.toggle_favorite(&pid),
             _ => {}
         }

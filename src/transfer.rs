@@ -16,7 +16,7 @@ use crate::state::{children_of, roots_in, written_row_pages};
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
-const PAGE_URL: &str = "notion2://page/";
+use crate::inline::{OLD_PAGE_URL, PAGE_URL};
 
 // ---------------------------------------------------------------------------
 // Export
@@ -119,17 +119,20 @@ fn encode(href: &str) -> String {
     out
 }
 
-/// Replace every `notion2://page/<id>` in `text` whose page `href` knows.
+/// Replace every `rune://page/<id>` (or the older `notion2://page/<id>`) in
+/// `text` whose page `href` knows.
 fn rewrite_page_urls(text: &str, href: impl Fn(&str) -> Option<String>) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some(i) = rest.find(PAGE_URL) {
+    // The next link of either form.
+    let next = |s: &str| [PAGE_URL, OLD_PAGE_URL].iter().filter_map(|p| s.find(p).map(|i| (i, p.len()))).min();
+    while let Some((i, len)) = next(rest) {
         out.push_str(&rest[..i]);
-        let after = &rest[i + PAGE_URL.len()..];
+        let after = &rest[i + len..];
         let end = after.find(|c: char| !(c.is_ascii_alphanumeric() || c == '-')).unwrap_or(after.len());
         match href(&after[..end]) {
             Some(h) => out.push_str(&encode(&h)),
-            None => out.push_str(&rest[i..i + PAGE_URL.len() + end]),
+            None => out.push_str(&rest[i..i + len + end]),
         }
         rest = &after[end..];
     }

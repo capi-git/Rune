@@ -350,19 +350,6 @@ pub fn PageBar(route: Route, pane: String, multi: bool) -> Element {
                                 span { "Copy link" }
                                 span { class: "menu-shortcut", "⌘L" }
                             }
-                            // With Aven on this Mac: give the page to a chat there.
-                            if let Some(aven) = crate::aven::app() {
-                                div {
-                                    class: "menu-item compact",
-                                    id: "send-to-aven",
-                                    onclick: move |_| {
-                                        state.set_popover(None);
-                                        state.command("send_to_aven");
-                                    },
-                                    span { class: "menu-icon", Icon { name: "chat", size: 16 } }
-                                    span { "{crate::aven::label(&aven)}" }
-                                }
-                            }
                             // While a page is being read aloud, the way to stop it.
                             if reading {
                                 div {

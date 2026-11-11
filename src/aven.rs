@@ -55,7 +55,7 @@ pub fn label(app: &Path) -> &'static str {
 pub fn note_for_chat(title: &str, page_id: &str, markdown: &str) -> String {
     let title = if title.trim().is_empty() { "Untitled" } else { title.trim() };
     format!(
-        "From my Rune note “{title}” (page id {page_id}; the notion2 tools can read and change the live page):\n\n{}\n",
+        "From my Rune note “{title}” (page id {page_id}; the rune tools can read and change the live page):\n\n{}\n",
         markdown.trim_end()
     )
 }
@@ -114,7 +114,7 @@ mod tests {
     #[test]
     fn the_note_names_the_live_page_and_then_holds_the_page() {
         let text = note_for_chat("Acme", "abc123", "# Acme\n\n- [ ] Call Sam\n\n");
-        assert_eq!(text, "From my Rune note “Acme” (page id abc123; the notion2 tools can read and change the live page):\n\n# Acme\n\n- [ ] Call Sam\n");
+        assert_eq!(text, "From my Rune note “Acme” (page id abc123; the rune tools can read and change the live page):\n\n# Acme\n\n- [ ] Call Sam\n");
         assert!(note_for_chat("  ", "x", "").starts_with("From my Rune note “Untitled”"));
     }
 

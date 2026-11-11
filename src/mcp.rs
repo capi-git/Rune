@@ -18,17 +18,17 @@ use std::path::{Path, PathBuf};
 
 /// Protocol versions this server speaks, newest first.
 const SUPPORTED_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
-const LINK_PREFIX: &str = "notion2://page/";
+const LINK_PREFIX: &str = crate::inline::PAGE_URL;
 
 const INSTRUCTIONS: &str = "Rune is the user's local notes workspace: pages and a calendar. \
 Pages nest inside other pages and each has an id. Find ids with search_pages or list_pages before reading or editing. \
 Page content is Markdown: # / ## / ### headings, paragraphs, - bullets, 1. numbered items, - [ ] / - [x] to-dos, > quotes, \
 ``` code fences and --- dividers; indent list items by two spaces to nest them. \
-A line that is exactly [Title](notion2://page/<id>) is a link to another page; sub-pages appear in their parent this way. \
+A line that is exactly [Title](rune://page/<id>) is a link to another page; sub-pages appear in their parent this way. \
 A to-do can end with the day it is due, as 📅 2026-11-12 (the sign, then the date): it then shows in that day of the calendar. Keep that ending when you rewrite a to-do; leave it out to take the day away. \
 After the day it can have a reminder, as 📅 2026-11-12 ⏰ 09:00 (a time of that day, 24 hours): Rune sends a notification then. \
 When the person asks to be reminded of something, make it a to-do with its day and that time (or set them with set_todo). \
-A picture or a drawing shows in read_page as a line [Image](notion2://block/<id>) or [Drawing](notion2://block/<id>): keep that line as it is to keep the picture or drawing in its place when you replace a page (one that you leave out is kept at the end of the page, never lost). \
+A picture or a drawing shows in read_page as a line [Image](rune://block/<id>) or [Drawing](rune://block/<id>): keep that line as it is to keep the picture or drawing in its place when you replace a page (one that you leave out is kept at the end of the page, never lost). \
 Tables are Markdown pipe tables. A table's columns can have kinds, given on a comment line right under it, one part for each column: \
 <!-- columns: text count | date | choice | number km sum | number USD sum | time sum | pace average | checkbox checked | formula USD sum = Price * Qty --> \
 (kinds: text, number, date, time, pace, checkbox, choice (one tag from a list), multi (several tags, with commas between them), status (one of Not started, In progress, Done, or its own list; a choice, multi or status column can list its options and their colours in braces, as choice {Long:green; Short:red}, colours: gray, brown, orange, yellow, green, blue, purple, pink, red), link, email, phone, file (pictures), formula, relation (rows of another table, by their names); \
@@ -895,7 +895,7 @@ impl Server {
             "all_day": e.all_day,
             "color": e.color,
             "notes": e.notes,
-            "notes_page": e.page_id.as_ref().map(|p| format!("notion2://page/{p}")),
+            "notes_page": e.page_id.as_ref().map(|p| crate::inline::page_url(p)),
             "reminder_minutes": e.remind,
             "repeats": e.repeat.as_ref().map(|r| crate::repeat::describe(r, first)),
         })
@@ -1162,7 +1162,7 @@ fn error_response(id: Value, code: i64, message: &str) -> Value {
 }
 
 fn tool_definitions() -> Value {
-    let page_id = json!({ "type": "string", "description": "Page id (or a notion2://page/<id> link)." });
+    let page_id = json!({ "type": "string", "description": "Page id (or a rune://page/<id> link)." });
     let read_only = json!({ "readOnlyHint": true, "openWorldHint": false });
     let write = |idempotent: bool| {
         json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": idempotent, "openWorldHint": false })
@@ -1198,7 +1198,7 @@ fn tool_definitions() -> Value {
         {
             "name": "read_page",
             "title": "Read a page",
-            "description": "Read a page as Markdown, after a short header with its id, title, icon, parent and path. Links to other pages appear as [Title](notion2://page/<id>) on their own line.",
+            "description": "Read a page as Markdown, after a short header with its id, title, icon, parent and path. Links to other pages appear as [Title](rune://page/<id>) on their own line.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "page_id": page_id },
@@ -1288,7 +1288,7 @@ fn tool_definitions() -> Value {
         {
             "name": "replace_page_content",
             "title": "Replace a page's content",
-            "description": "Replace everything in a page's body with new Markdown (optionally renaming it). Read the page first and keep its [Title](notion2://page/<id>) link lines to keep links to sub-pages; sub-pages themselves are never removed.",
+            "description": "Replace everything in a page's body with new Markdown (optionally renaming it). Read the page first and keep its [Title](rune://page/<id>) link lines to keep links to sub-pages; sub-pages themselves are never removed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1519,10 +1519,10 @@ fn arg_u64(args: &Value, key: &str) -> Result<Option<u64>, String> {
     }
 }
 
-/// Accept a bare id or a notion2://page/<id> link.
+/// Accept a bare id or a link to the page (rune://page/<id>, or the older rune://page/<id>).
 fn normalize_id(raw: &str) -> String {
     let s = raw.trim();
-    s.strip_prefix(LINK_PREFIX).unwrap_or(s).trim_end_matches('/').to_string()
+    crate::inline::page_id_of(s).unwrap_or(s).trim_end_matches('/').to_string()
 }
 
 fn required_page_id(args: &Value, key: &str) -> Result<String, String> {
@@ -1595,19 +1595,19 @@ pub(crate) fn strip_title_heading(markdown: &str, title: &str) -> String {
 /// Markdown → blocks. A line that is only a link to an existing page becomes a
 /// page link block, so read → edit → write round-trips keep sub-page links.
 /// The address a picture or drawing has in a page's Markdown.
-const BLOCK_PREFIX: &str = "notion2://block/";
+const BLOCK_PREFIX: &str = crate::inline::BLOCK_URL;
 
-/// `[Image](notion2://block/<id>)` → `<id>`.
+/// `[Image](rune://block/<id>)` → `<id>`.
 fn media_token(text: &str) -> Option<&str> {
     let rest = text.trim().strip_prefix('[')?;
     let (_, rest) = rest.split_once("](")?;
-    let id = rest.strip_prefix(BLOCK_PREFIX)?.strip_suffix(')')?;
+    let id = rest.strip_prefix(BLOCK_PREFIX).or_else(|| rest.strip_prefix(crate::inline::OLD_BLOCK_URL))?.strip_suffix(')')?;
     (!id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')).then_some(id)
 }
 
 /// A page's pictures and drawings cannot be written as Markdown. When new
 /// Markdown takes the place of a page, each line that names one of them
-/// (`[Image](notion2://block/<id>)`) becomes that picture or drawing again,
+/// (`[Image](rune://block/<id>)`) becomes that picture or drawing again,
 /// and those the Markdown does not name are kept at the end of the page:
 /// replacing a page never loses a picture or a drawing.
 pub(crate) fn keep_media(old: &[Block], new: Vec<Block>) -> Vec<Block> {
@@ -1644,19 +1644,19 @@ pub(crate) fn parse_body(pages: &HashMap<Id, Page>, markdown: &str) -> Vec<Block
         .collect()
 }
 
-/// `[Title](notion2://page/<id>)` → `<id>`.
+/// `[Title](rune://page/<id>)` → `<id>`.
 fn page_link_target(text: &str) -> Option<Id> {
     let t = text.trim();
     if !t.starts_with('[') || !t.ends_with(')') {
         return None;
     }
-    let at = t.rfind(&format!("]({LINK_PREFIX}"))?;
-    let id = &t[at + 2 + LINK_PREFIX.len()..t.len() - 1];
+    let (at, len) = [LINK_PREFIX, crate::inline::OLD_PAGE_URL].iter().filter_map(|p| t.rfind(&format!("]({p}")).map(|at| (at, p.len()))).max()?;
+    let id = &t[at + 2 + len..t.len() - 1];
     (!id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')).then(|| id.to_string())
 }
 
 /// Blocks → Markdown, with # / ## / ### headings (the title is reported
-/// separately) and page links as `[Title](notion2://page/<id>)`.
+/// separately) and page links as `[Title](rune://page/<id>)`.
 pub(crate) fn render_body(pages: &HashMap<Id, Page>, blocks: &[Block]) -> String {
     let as_text = |b: &Block, text: String| {
         let mut t = Block::text(text);
@@ -2144,7 +2144,7 @@ mod tests {
         assert!(!page.contains("# Trip plan\n"), "title heading should be stripped: {page}");
         assert!(page.contains("## Checklist") && page.contains("- [ ] Passport") && page.contains("- [x] Tickets"), "{page}");
         assert!(page.contains("```rust\nfn main() {}\n```"), "{page}");
-        let link = format!("[Packing](notion2://page/{child})");
+        let link = format!("[Packing](rune://page/{child})");
         assert!(page.contains(&link), "{page}");
 
         // Writing back what was read keeps the sub-page link as a link block.

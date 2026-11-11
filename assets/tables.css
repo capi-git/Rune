@@ -101,10 +101,70 @@
 .table-name::placeholder {
   color: var(--placeholder);
 }
+/* What is picked in a table (rows by their handles, columns by ⌘ or ⇧ and
+   a click on their headings) and the way to take it out: a small bar over
+   the top left corner of the table. It is in a rail as high as the table,
+   and stays at the top of the page while a long table scrolls under it. */
+.picked-rail {
+  position: absolute;
+  left: 0;
+  top: -36px;
+  bottom: 0;
+  width: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+.picked-bar {
+  position: sticky;
+  top: 8px;
+  width: max-content;
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 30px;
+  box-sizing: border-box;
+  padding: 0 3px 0 10px;
+  border: 1px solid var(--float-edge);
+  border-radius: 8px;
+  background: var(--popover);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.14);
+  user-select: none;
+  -webkit-user-select: none;
+}
 .table-picked {
+  margin-right: 6px;
   font-size: 12.5px;
   color: var(--text-2);
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.picked-do,
+.picked-x {
+  height: 22px;
+  padding: 0 7px 0 5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: default;
+}
+.picked-x {
+  width: 22px;
+  padding: 0;
+  justify-content: center;
+  color: var(--text-3);
+}
+.picked-do:hover,
+.picked-x:hover {
+  background: var(--hover);
+  color: var(--text);
 }
 .table-more {
   flex-shrink: 0;
@@ -223,22 +283,29 @@ button.table-chip:hover,
   z-index: 50;
 }
 /* (It reaches to the edge of the table, so that the pointer goes from a
-   row onto it without a gap in which it would hide.) */
+   row onto it without a gap in which it would hide. The page script puts
+   it on the first line of the row under the pointer.) */
 .row-handle {
   position: absolute;
-  left: -48px;
+  left: -46px;
   top: 0;
-  padding-right: 4px;
+  padding-right: 2px;
   display: flex;
   opacity: 0;
   pointer-events: none;
   user-select: none;
   -webkit-user-select: none;
 }
-.table-frame:hover > .row-handle.on,
+/* (It shows while the pointer is at a row: over its cells, or beside it in
+   the strip at the left of the table, where the handle is.) */
+.row-handle.on.near,
 .table-frame:has(tr.picked) > .row-handle.on {
   opacity: 1;
   pointer-events: auto;
+}
+/* The row of the headings: the plus alone (a new first row); no row to move. */
+.row-handle.for-head .handle {
+  visibility: hidden;
 }
 .table-block td.head {
   position: relative;
@@ -345,10 +412,18 @@ button.table-chip:hover,
 .table-block tr.picked td.first.frozen {
   box-shadow: inset 2px 0 0 color-mix(in srgb, var(--text) 75%, transparent), inset 0 0 0 100vmax var(--active);
 }
-/* (And a menu that opens in one is above the frozen cells of the rows
-   under it, and above the shield that takes the clicks outside a menu.) */
-.table-block td.frozen:has(.popover) {
-  z-index: 50;
+/* Columns that are picked: the colour of a picked row, down the column
+   (over the colour of a row that has one). */
+.table-block tbody tr td.col-picked {
+  background: linear-gradient(var(--active), var(--active)), var(--row-tint, transparent);
+}
+.table-block tbody tr td.col-picked.frozen {
+  background: var(--bg);
+  box-shadow: inset 0 0 0 100vmax var(--active), inset 0 0 0 100vmax var(--row-tint, transparent);
+}
+.table-block tbody tr td.head.col-picked {
+  background: color-mix(in srgb, var(--text) 16%, var(--bg));
+  box-shadow: inset 0 2px 0 color-mix(in srgb, var(--text) 75%, transparent);
 }
 .table-block tr.open td.first,
 .table-block tr.picked td.first {
@@ -933,6 +1008,27 @@ td:hover .cell-add,
 }
 
 /* ---------- the menus of a table ---------- */
+/* The menus of the cells, rows and headings of a table are not in the box
+   that scrolls it sideways: a frozen cell is a layer of its own in that
+   box, and what is in such a layer is cut at the edges of the box, a menu
+   fixed to the window too. They are beside the box, fixed to the window,
+   and the page script puts each under what it hangs from. */
+.table-hung,
+.table-hung > .hung {
+  display: contents;
+}
+.table-hung > .hung > .popover {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: auto;
+}
+.menu-hint {
+  padding: 2px 10px 4px;
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--text-3);
+}
 /* Rune's own menus: plain rows, the chosen one grey. With a blur of their
    own, so that no letters of the table show through. */
 .table-menu {

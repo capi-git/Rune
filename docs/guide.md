@@ -184,7 +184,12 @@ NOTION2_DB=/tmp/notion2-test.db NOTION2_SELFTEST=/tmp/notion2-report.json cargo 
   table. Each row is a page: **Open** on a row shows it at the side, with
   the values of the row at the top and room to write below. The handle at
   the left of a row adds a row, moves it, nests it under the row above, or
-  takes it out. New rows can start from a template; in a table with a date
+  takes it out; it shows when the pointer is on the row or beside it at the
+  left of the table. To take several out at once, pick them: ⌘ click the handle
+  of each row (⇧ click picks all the rows up to it), or ⌘ click and ⇧ click
+  the headings of columns. A small bar over the table says how many are
+  picked; **Delete** there, or the Delete key, takes them out, and one Undo
+  brings them all back. New rows can start from a template; in a table with a date
   column, **New row for today** starts a row. A chart block (type `/chart`)
   draws bars, a line, a ring or days from the table above it or from a table
   of another page. With an AI connected, "I ran 6 km in 34 minutes today"
@@ -273,7 +278,7 @@ stdio, with no window. Agents can search, list, read, create, append to,
 replace, rename/move, trash and restore pages, and list, add, change and
 delete calendar events (times are local, like `2026-11-10T14:00`). Content goes
 in and out as Markdown, and sub-page links look like
-`[Title](notion2://page/<id>)`. Pages are never deleted permanently. Build the app first (`scripts/bundle.sh`).
+`[Title](rune://page/<id>)`. Pages are never deleted permanently. Build the app first (`scripts/bundle.sh`).
 
 - **Aven:** Settings → MCP → Add server. Name `notion2`, Type *Command on this
   Mac*, Command

@@ -323,6 +323,31 @@ pub fn ColumnMenu(page_id: String, id: String, c: usize, table: Table) -> Elemen
     }
 }
 
+/// The menu of several picked columns: what can be done with all of them.
+#[component]
+pub fn ColumnsMenu(page_id: String, id: String, table: Table, columns: Vec<usize>) -> Element {
+    let state = use_context::<AppState>();
+    let n = columns.len();
+    let locked = table.view.locked;
+    // (The first column, the names of the rows, always shows.)
+    let to_hide = columns.iter().filter(|&&c| c > 0).count();
+    let many = |op: &'static str| {
+        let (p, b, columns) = (page_id.clone(), id.clone(), columns.clone());
+        move |_| state.columns_op(&p, &b, &columns, op)
+    };
+    rsx! {
+        div { class: "popover column-menu table-menu", role: "menu", onclick: move |e| e.stop_propagation(),
+            div { class: "ai-menu-label", "{n} columns selected" }
+            if to_hide > 0 {
+                MenuRow { icon: "eye-off", label: if to_hide == 1 { "Hide 1 column".to_string() } else { format!("Hide {to_hide} columns") }, name: "hide", onpick: many("hide") }
+            }
+            if !locked && table.columns() > n {
+                MenuRow { icon: "trash", label: "Delete {n} columns", name: "delete", onpick: many("delete") }
+            }
+        }
+    }
+}
+
 /// The kinds a new column can be, in two columns.
 #[component]
 pub fn KindsMenu(page_id: String, id: String) -> Element {
@@ -875,6 +900,8 @@ pub fn RowMenu(page_id: String, id: String, table: Table, rows: Vec<usize>) -> E
                 name: "delete",
                 onpick: many("delete"),
             }
+            div { class: "ai-menu-sep" }
+            div { class: "menu-hint", "⌘ or ⇧ click picks more rows" }
         }
     }
 }

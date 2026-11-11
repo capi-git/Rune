@@ -332,8 +332,11 @@ pub enum Popover {
     TableChip { block_id: Id, sort: bool, index: usize },
     /// The colour rules of a table.
     TablePaint { block_id: Id },
-    /// The rows of another table that a relation cell can name.
-    TableCell { block_id: Id, row: usize, column: usize },
+    /// The list of a cell: the options of a choice cell, or the rows of
+    /// another table that a relation cell can name. `on_page`: it was opened
+    /// from the values at the top of the row's page, not from the table (both
+    /// can show at once, the row's page at the side of its table).
+    TableCell { block_id: Id, row: usize, column: usize, on_page: bool },
     /// What a chart draws.
     Chart { block_id: Id },
 }
@@ -740,6 +743,12 @@ pub enum Bridge {
     /// A stretch of empty time was dragged over in the calendar: a new event
     /// from one minute of that day to another.
     EventDraw { day: String, from: i64, to: i64 },
+    /// ⌘C on an event of the calendar.
+    EventCopy { id: String },
+    /// ⌘V in the calendar: the copied event on `day`, from `minute` of that
+    /// day (or at its own time, with a negative minute: a day of the month
+    /// or the row of all-day events).
+    EventPaste { day: String, minute: i64 },
     /// A to-do was dragged onto a time of a day in the calendar.
     TodoPlan { page: String, block: String, day: String, minutes: i64 },
     /// A drawing's frame opened and this window has no scene for it yet.
@@ -1367,7 +1376,6 @@ pub fn pages_to_link(pages: &HashMap<Id, Page>, space: &str, here: &str, query: 
 /// that is a link to it. The page it is inside is left out when that page
 /// only lists it as one of its pages (its place is shown in the bar already).
 pub fn linked_from(pages: &HashMap<Id, Page>, blocks: &HashMap<Id, Vec<Block>>, id: &str) -> Vec<Page> {
-    let url = format!("notion2://page/{id}");
     let parent = pages.get(id).and_then(|p| p.parent_id.clone());
     let mut out: Vec<Page> = pages
         .values()
@@ -1377,7 +1385,7 @@ pub fn linked_from(pages: &HashMap<Id, Page>, blocks: &HashMap<Id, Vec<Block>>, 
                 bs.iter().any(|b| match b.kind {
                     BlockKind::PageLink => b.target.as_deref() == Some(id) && parent.as_deref() != Some(p.id.as_str()),
                     BlockKind::Code => false,
-                    _ => inline::links_to(&b.text, &url),
+                    _ => inline::links_to_page(&b.text, id),
                 })
             })
         })
@@ -1836,6 +1844,8 @@ struct KeptMeeting {
 }
 
 thread_local! {
+    /// The event copied with ⌘C in the calendar (see `paste_event`).
+    static COPIED_EVENT: std::cell::RefCell<Option<Event>> = const { std::cell::RefCell::new(None) };
     static MEETING: std::cell::RefCell<Option<MeetingNotes>> = const { std::cell::RefCell::new(None) };
     /// (For the self-test: a meeting that starts takes no event of the
     /// calendar, whatever is on it at the hour of the run.)
@@ -2166,6 +2176,30 @@ impl AppState {
     }
 
     fn save_blocks(&self, page_id: &str) {
+        // Each line has an id of its own in the whole notes file: a line of
+        // this page whose id is also a line's of this page or of another
+        // page (a copy that kept its id) gets a new one, or the save fails.
+        let clashes = {
+            let blocks = self.blocks.peek();
+            let mine = blocks.get(page_id).map(|bs| bs.as_slice()).unwrap_or_default();
+            let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            let elsewhere: std::collections::HashSet<&str> =
+                blocks.iter().filter(|(p, _)| p.as_str() != page_id).flat_map(|(_, bs)| bs.iter().map(|b| b.id.as_str())).collect();
+            mine.iter().enumerate().filter(|(_, b)| !seen.insert(b.id.as_str()) || elsewhere.contains(b.id.as_str())).map(|(i, _)| i).collect::<Vec<usize>>()
+        };
+        if !clashes.is_empty() {
+            let mut sig = self.blocks;
+            let mut all = sig.write();
+            if let Some(bs) = all.get_mut(page_id) {
+                for i in clashes {
+                    if let Some(b) = bs.get_mut(i) {
+                        eprintln!("[notion2] line {} of page {page_id} had the id of another line: a new id", b.id);
+                        b.id = new_id();
+                    }
+                }
+            }
+            drop(all);
+        }
         let Some(bs) = self.blocks.peek().get(page_id).cloned() else { return };
         self.note_edit(page_id);
         let now = now_ms();
@@ -2880,6 +2914,51 @@ impl AppState {
             self.update_event(&id, |ev| ev.page_id = Some(home));
         }
         self.set_due(page, block, Some(day));
+    }
+
+    /// ⌘C on an event: it is kept to paste (⌘V) at another time.
+    pub fn copy_event(self, id: &str) {
+        let Some(e) = self.any_event(id) else { return };
+        let title = e.display_title().to_string();
+        COPIED_EVENT.with(|c| *c.borrow_mut() = Some(e));
+        self.toast(format!("Copied “{title}”. Point at a time and press ⌘V"));
+    }
+
+    /// ⌘V in the calendar: a new event like the copied one (its name, length,
+    /// colour, notes, address and reminder; not its repeats or notes page),
+    /// on `day` from `minute`, or at its own time with a negative minute.
+    pub fn paste_event(self, day: &str, minute: i64) {
+        let Some(copied) = COPIED_EVENT.with(|c| c.borrow().clone()) else {
+            return self.toast("Copy an event first: ⌘C with the pointer on it");
+        };
+        let Some(day) = when::parse_date(day) else {
+            return self.toast("Point at a time in the calendar, then press ⌘V");
+        };
+        let length = (copied.end - copied.start).max(15 * when::MINUTE);
+        let (start, end) = if copied.all_day {
+            let start = when::midnight(day);
+            (start, start + length)
+        } else if minute >= 0 {
+            let start = when::midnight(day) + minute.clamp(0, 24 * 60 - 15) * when::MINUTE;
+            (start, start + length)
+        } else {
+            let at = when::local(copied.start);
+            let time = chrono::NaiveTime::from_hms_opt(chrono::Timelike::hour(&at), chrono::Timelike::minute(&at), 0).unwrap_or_default();
+            let start = when::at(day, time);
+            (start, start + length)
+        };
+        let Some(id) = self.make_event(copied.display_title(), start, end, copied.all_day) else { return };
+        if !id.starts_with(crate::maccal::PREFIX) {
+            let c = copied.clone();
+            self.update_event(&id, move |ev| {
+                ev.color = c.color;
+                ev.notes = c.notes;
+                ev.join = c.join;
+                ev.remind = c.remind;
+            });
+        }
+        self.select_event(Some(id));
+        self.toast(format!("Pasted “{}” · {} {}", copied.display_title(), day.format("%a %-d %b"), if copied.all_day { "all day".to_string() } else { when::time_label(start) }));
     }
 
     /// Empty time was dragged over: a slot of that length to type the
@@ -4018,20 +4097,22 @@ impl AppState {
         // Links to the page that carry its old name take the new one.
         let new = self.page_title(id);
         if old != new {
-            let url = format!("notion2://page/{id}");
+            let urls = [inline::page_url(id), format!("{}{id}", inline::OLD_PAGE_URL)];
             let renamed: Vec<(Id, Vec<Block>)> = self
                 .blocks
                 .peek()
                 .iter()
                 // Only the pages that hold such a link are looked at closely.
-                .filter(|(_, bs)| bs.iter().any(|b| b.text.contains(&url)))
+                .filter(|(_, bs)| bs.iter().any(|b| urls.iter().any(|u| b.text.contains(u.as_str()))))
                 .filter_map(|(page, bs)| {
                     let mut out = bs.clone();
                     let mut changed = false;
                     for b in out.iter_mut().filter(|b| b.kind != BlockKind::Code) {
-                        if let Some(text) = inline::retitle_links(&b.text, &url, &old, &new) {
-                            b.text = text;
-                            changed = true;
+                        for url in &urls {
+                            if let Some(text) = inline::retitle_links(&b.text, url, &old, &new) {
+                                b.text = text;
+                                changed = true;
+                            }
                         }
                     }
                     changed.then(|| (page.clone(), out))
@@ -6575,6 +6656,8 @@ impl AppState {
             Bridge::AiImage { data } => self.ai_add_picture(&data),
             Bridge::EventMove { id, days, minutes, grow } => self.move_event(&id, days, minutes, grow),
             Bridge::EventDraw { day, from, to } => self.draw_event(&day, from, to),
+            Bridge::EventCopy { id } => self.copy_event(&id),
+            Bridge::EventPaste { day, minute } => self.paste_event(&day, minute),
             Bridge::TodoPlan { page, block, day, minutes } => self.plan_todo(&page, &block, &day, minutes),
             Bridge::DrawingReady { id } => self.send_drawing(&id),
             Bridge::SegDrop { tab, pane, to, mode } => self.detach_pane(&tab, &pane, to.as_deref(), &mode),
@@ -7419,6 +7502,34 @@ impl AppState {
 
     /// Several lines were pasted into a block: they become blocks.
     fn paste(mut self, page: &str, id: &str, pos: usize, value: String, text: &str) {
+        // The link of a page by itself (Copy link): on an empty line, the
+        // page's own line (its icon and name, as a page inside shows); in
+        // words, a link with the page's name.
+        if let Some(target) = inline::page_id_of(text.trim()).map(str::to_string).filter(|t| self.pages.peek().get(t).is_some_and(|p| !p.trashed)) {
+            self.history.write().seal();
+            let link = inline::link(&self.page_title(&target), &inline::page_url(&target));
+            let caret = self.edit_blocks(page, |bs| {
+                let i = index_of(bs, id)?;
+                let kind = bs[i].kind;
+                if value.trim().is_empty() && kind == BlockKind::Text {
+                    let indent = bs[i].indent;
+                    bs[i] = Block::page_link(target.clone()).with_indent(indent);
+                    let next = Block::text("").with_indent(indent);
+                    let caret = Caret::start(&next.id);
+                    bs.insert(i + 1, next);
+                    return Some(caret);
+                }
+                let (before, after) = inline::split_for(kind, &value, pos);
+                let with = inline::concat(&before, &link);
+                let at = inline::len_for(kind, &with);
+                bs[i].text = inline::concat(&with, &after);
+                Some(Caret { id: bs[i].id.clone(), pos: at })
+            });
+            if let Some(c) = caret {
+                self.focus(c);
+            }
+            return;
+        }
         let mut items = markdown::to_blocks(text);
         if items.is_empty() {
             return;
@@ -7502,8 +7613,7 @@ impl AppState {
     /// A link in a block was clicked.
     pub fn open_url(self, url: &str) {
         let url = url.trim();
-        if let Some(id) = url.strip_prefix("notion2://page/") {
-            let id = id.trim_end_matches('/');
+        if let Some(id) = inline::page_id_of(url) {
             if self.pages.peek().get(id).is_some_and(|p| !p.trashed) {
                 self.open_page(id);
             } else {
@@ -7675,7 +7785,7 @@ impl AppState {
             }
             _ => return,
         };
-        let link = inline::link(&self.page_title(&target), &format!("notion2://page/{target}"));
+        let link = inline::link(&self.page_title(&target), &inline::page_url(&target));
         let (page, id) = (slash.page_id.clone(), slash.block_id.clone());
         let done = self.edit_blocks(&page, |bs| {
             let i = index_of(bs, &id)?;
@@ -8146,7 +8256,7 @@ impl AppState {
         let mut body = ai::link_pages(&body, &made);
         // A sub-page that the page does not link to gets its link at the end.
         for (name, id) in &made {
-            let link = format!("notion2://page/{id}");
+            let link = inline::page_url(id);
             if !body.contains(&link) {
                 body.push_str(&format!("\n\n[{name}]({link})\n"));
             }
@@ -8285,7 +8395,7 @@ impl AppState {
                 None => self.toast("Open a page to send it"),
             },
             "copy_link" => match self.current_page() {
-                Some(id) => self.copy_to_clipboard(format!("notion2://page/{id}"), "Copied link to page"),
+                Some(id) => self.copy_to_clipboard(inline::page_url(&id), "Copied link to page"),
                 None => self.toast("Open a page to copy its link"),
             },
             "copy_name" => match self.current_page() {

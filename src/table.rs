@@ -661,6 +661,17 @@ impl Table {
         }
     }
 
+    /// Take several rows out (the header and the last row stay).
+    pub fn remove_rows(&mut self, rows: &[usize]) {
+        let mut rows: Vec<usize> = rows.iter().copied().filter(|&r| r >= 1 && r < self.rows.len()).collect();
+        rows.sort_unstable();
+        rows.dedup();
+        // (From the last row up, so that the numbers of the rows still to do stay true.)
+        for &r in rows.iter().rev() {
+            self.remove_row(r);
+        }
+    }
+
     /// Move a row, with the rows nested in it, to before row `to` (the
     /// number of rows puts it last). It is nested as deep as the row it
     /// lands before (at the end: not nested), so a row put between two
@@ -791,6 +802,21 @@ impl Table {
                 std::cmp::Ordering::Greater => Some(c - 1),
             });
             self.square();
+        }
+    }
+
+    /// Take several columns out. A table keeps one column: asked for all
+    /// of them, it stays as it is.
+    pub fn remove_columns(&mut self, columns: &[usize]) {
+        let mut columns: Vec<usize> = columns.iter().copied().filter(|&c| c < self.columns()).collect();
+        columns.sort_unstable();
+        columns.dedup();
+        if columns.len() >= self.columns() {
+            return;
+        }
+        // (From the last column down, so that the numbers of the columns still to do stay true.)
+        for &c in columns.iter().rev() {
+            self.remove_column(c);
         }
     }
 
@@ -1954,6 +1980,36 @@ mod tests {
         assert_eq!(t, table(&[&["2000"]]));
         t.set(9, 9, "nowhere");
         assert_eq!(t.plain_text(), "2000");
+    }
+
+    #[test]
+    fn several_rows_or_columns_go_at_once() {
+        let mut t = table(&[&["Name", "A", "B", "C"], &["one", "1", "2", "3"], &["two", "4", "5", "6"], &["three", "7", "8", "9"], &["four", "10", "11", "12"]]);
+        // In any order, each once; the header and a row that is not there are left alone.
+        t.remove_rows(&[3, 1, 3, 0, 9]);
+        assert_eq!(t, table(&[&["Name", "A", "B", "C"], &["two", "4", "5", "6"], &["four", "10", "11", "12"]]));
+        t.remove_columns(&[3, 1, 1, 7]);
+        assert_eq!(t, table(&[&["Name", "B"], &["two", "5"], &["four", "11"]]));
+        // A table keeps one column: asked for all of them, it keeps them all.
+        t.remove_columns(&[0, 1]);
+        assert_eq!(t.columns(), 2);
+        t.remove_columns(&[0]);
+        assert_eq!(t, table(&[&["B"], &["5"], &["11"]]));
+    }
+
+    #[test]
+    fn picked_columns_take_their_kinds_and_the_view_with_them() {
+        let mut t = log();
+        let kinds: Vec<Kind> = (0..t.columns()).map(|c| t.kind(c)).collect();
+        let last = t.columns() - 1;
+        t.change_view(|v| v.sort_by(last, false));
+        t.remove_columns(&[1, 2]);
+        assert_eq!(t.columns(), kinds.len() - 2);
+        assert_eq!(t.kind(0), kinds[0]);
+        assert_eq!(t.kind(1), kinds[3]);
+        // (The sort is still by the column it was by, which has another number now.)
+        assert_eq!(t.view.sort[0].column, last - 2);
+        assert_eq!(Table::parse(&t.to_data()), t);
     }
 
     #[test]

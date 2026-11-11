@@ -672,10 +672,14 @@ window.__n2 = {
       const el = document.getElementById(id);
       if (!el) continue; // created in this update; rendered from data-html
       const focused = document.activeElement === el ? selIn(el) : null;
+      // (A caret at the end of the line stays at its end: what came in was
+      // put where it was, as a link in place of "@name".)
+      const atEnd = focused && focused.start === focused.end && focused.end >= textLen(el);
       renderInto(el, html);
       if (focused) {
         const len = textLen(el);
-        setSel(el, Math.min(focused.start, len), Math.min(focused.end, len));
+        if (atEnd) setSel(el, len);
+        else setSel(el, Math.min(focused.start, len), Math.min(focused.end, len));
       }
     }
   },
@@ -817,8 +821,10 @@ document.addEventListener(
         return;
       }
       // The list of a choice cell closes, and the caret goes back to its cell.
+      // (In a table the list is beside the box of the table, and says its cell.)
       const list = t.closest && t.closest('.choice-picker');
-      const back = list && list.parentElement.querySelector('.cell.pick');
+      const hung = list && list.parentElement.closest('.hung');
+      const back = hung ? hung.closest('.table-frame').querySelector(`.table-block .cell.pick[data-r="${hung.dataset.r}"][data-c="${hung.dataset.c}"]`) : list && list.parentElement.querySelector('.cell.pick');
       if (back) setTimeout(() => back.isConnected && back.focus(), 80);
       if (peeking()) setPeek(false);
       if (ctxFor) closeCtx();
@@ -1087,8 +1093,14 @@ document.addEventListener(
     if (!text) return;
     const s = selIn(t);
     const trimmed = text.trim();
-    if (!isCode(t) && s && s.start !== s.end && /^(https?:\/\/|mailto:|notion2:\/\/)\S+$/i.test(trimmed)) {
+    if (!isCode(t) && s && s.start !== s.end && /^(https?:\/\/|mailto:|notion2:\/\/|rune:\/\/)\S+$/i.test(trimmed)) {
       setLink(t, s.start, s.end, trimmed);
+      return;
+    }
+    // The link of a page (Copy link) pasted by itself: the app makes it the
+    // page's line (on an empty line) or a link with the page's name.
+    if (!isCode(t) && s && /^(rune|notion2):\/\/page\/[A-Za-z0-9-]+\/?$/i.test(trimmed)) {
+      send({ t: 'paste', page: t.dataset.page, id: t.dataset.id, pos: s.start, value: mdOf(t), text: trimmed });
       return;
     }
     // A web address pasted by itself goes in as a link.
@@ -1494,24 +1506,55 @@ const anchorMenu = (menu) => {
   menu.style.right = 'auto';
 };
 
-// A menu that hangs from a cell of a table. The table scrolls sideways in a
-// box that would cut the menu at its edges, so the menu is fixed to the
-// window: under what it hangs from, moved up as far as it must to end above
-// the foot of the window, and inside the window at both sides. With no room
-// at its right, its second list opens at its left.
+// A menu that hangs from a cell, a row or a heading of a table, or from a
+// value at the top of a row's page. It is fixed to the window: under what
+// it hangs from, moved up as far as it must to end above the foot of the
+// window, and inside the window at both sides. With no room at its right,
+// its second list opens at its left.
+//
+// A menu of a table is not drawn in the box that scrolls the table sideways
+// (see `Grid` in ui/tables.rs): a frozen cell is a layer of its own there,
+// and WebKit cuts what is in such a layer at the edges of the box, a fixed
+// menu too. It is drawn beside the box, and its element says what it hangs
+// from: the row `data-r`, the heading `data-c`, or the cell of both.
 const SUB_ROOM = 244;
+const hangsFrom = (menu) => {
+  const hung = menu.parentElement;
+  if (!hung) return null;
+  const all = { left: 8, top: 8, right: innerWidth - 8, bottom: innerHeight - 8 };
+  const frame = hung.classList.contains('hung') && hung.closest('.table-frame');
+  const box = frame && frame.querySelector(':scope > .table-block');
+  if (!box) {
+    const a = hung.getBoundingClientRect();
+    // (The values of a row are a layer of their own while a menu is open in
+    // them, in the pane that scrolls: the menu stays inside that pane.)
+    const pane = hung.closest('.row-values') && hung.closest('.scroller');
+    const p = pane && pane.getBoundingClientRect();
+    const edge = p ? { left: Math.max(all.left, p.left + 4), top: Math.max(all.top, p.top + 4), right: Math.min(all.right, p.right - 4), bottom: Math.min(all.bottom, p.bottom - 4) } : all;
+    return { left: a.left, bottom: a.bottom, edge };
+  }
+  const { hang, r, c } = hung.dataset;
+  const b = box.getBoundingClientRect();
+  const tr = box.querySelector(`tr[data-r="${hang === 'column' ? 0 : r}"]`);
+  const el = hang === 'row' ? tr : tr && tr.querySelector(`:scope > td[data-col="${c}"]`);
+  if (!el) return { left: b.left, bottom: b.top, edge: all };
+  const a = el.getBoundingClientRect();
+  // The menu of a row is at the left edge of the table; that of a cell or
+  // a heading under it, at the part of it that shows in the box.
+  const left = hang === 'row' ? b.left : Math.max(b.left, Math.min(a.left, b.right - 40));
+  return { left, bottom: a.bottom, edge: all };
+};
 const placeTableMenu = (menu) => {
-  const anchor = menu.parentElement;
-  if (!anchor) return;
-  const a = anchor.getBoundingClientRect();
+  const from = hangsFrom(menu);
+  if (!from) return;
   const cb = containingBlock(menu);
   menu.classList.add('anchored');
   const z = zoomOf(menu);
   const w = menu.offsetWidth * z;
   const h = menu.offsetHeight * z;
-  let left = a.left;
-  left = Math.max(8, Math.min(left, innerWidth - w - 8));
-  const top = Math.max(8, Math.min(a.bottom + 4, innerHeight - h - 8));
+  const { edge } = from;
+  const left = Math.max(edge.left, Math.min(from.left, edge.right - w));
+  const top = Math.max(edge.top, Math.min(from.bottom + 4, edge.bottom - h));
   menu.style.left = (left - cb.left) / z + 'px';
   menu.style.top = (top - cb.top) / z + 'px';
   menu.style.right = 'auto';
@@ -1521,10 +1564,65 @@ const placeTableMenu = (menu) => {
 // end above the foot of the window too.
 const placeSubMenu = (sub) => {
   sub.style.top = '';
-  const over = sub.getBoundingClientRect().bottom - (innerHeight - 8);
+  // (A menu that opens grows with a motion, and is not as tall as it will
+  // be yet: it is measured without the motion, which then starts again.)
+  const motion = sub.style.animation;
+  sub.style.animation = 'none';
+  const r = sub.getBoundingClientRect();
+  const over = Math.min(r.bottom - (innerHeight - 8), r.top - 8);
   if (over > 0) sub.style.top = `${parseFloat(getComputedStyle(sub).top) - over / zoomOf(sub)}px`;
+  sub.style.animation = motion;
 };
 const RAISED_MENUS = '.table-menu .column-sub, .own-menu, .kinds-menu';
+// The "/" menu and the "@" list of a line: under the line when they fit there,
+// else over it (at the foot of a page that cannot scroll further), always
+// whole in the window. Placed again when their items change and when the
+// page scrolls.
+const placeSlashMenu = (menu) => {
+  const row = menu.closest('.block-row') || menu.parentElement;
+  if (!row || !menu.isConnected) return;
+  const a = row.getBoundingClientRect();
+  const cb = containingBlock(menu);
+  menu.classList.add('anchored');
+  const z = zoomOf(menu);
+  menu.style.maxHeight = '';
+  const most = parseFloat(getComputedStyle(menu).maxHeight) * z || 380 * z;
+  const h = Math.min(menu.scrollHeight * z, most);
+  const w = menu.offsetWidth * z;
+  // The line the caret is on: the first line of the row.
+  const line = Math.min(a.height, 30 * z);
+  const below = innerHeight - (a.top + line) - 10;
+  const above = a.top - 10;
+  const left = Math.max(8, Math.min(a.left + 26 * z, innerWidth - w - 8));
+  menu.style.left = (left - cb.left) / z + 'px';
+  menu.style.right = 'auto';
+  if (h <= below || below >= above) {
+    menu.style.top = (a.top + line + 2 - cb.top) / z + 'px';
+    menu.style.bottom = 'auto';
+    menu.style.maxHeight = Math.min(most, below) / z + 'px';
+  } else {
+    // Over the line, its foot at the line: it shrinks upward as items go.
+    menu.style.top = 'auto';
+    menu.style.bottom = (innerHeight - a.top + 2 - (cb.bottom !== undefined ? innerHeight - cb.bottom : 0)) / z + 'px';
+    menu.style.maxHeight = Math.min(most, above) / z + 'px';
+  }
+};
+const slashWatch = new MutationObserver((list) => {
+  const seen = new Set();
+  for (const m of list) {
+    const menu = m.target.closest && m.target.closest('.slash-menu');
+    if (menu && !seen.has(menu)) {
+      seen.add(menu);
+      placeSlashMenu(menu);
+    }
+  }
+});
+document.addEventListener(
+  'scroll',
+  () => document.querySelectorAll('.slash-menu.anchored').forEach(placeSlashMenu),
+  { capture: true, passive: true },
+);
+
 // The menu of a line (its handle, or a right click): under the line, at the
 // handle, and over the line when there is no room under it, so all of it is
 // in the window with no scroll.
@@ -1549,7 +1647,7 @@ const placeBlockMenu = (menu) => {
   menu.style.top = (top - cb.top) / z + 'px';
   menu.style.right = 'auto';
 };
-const TABLE_MENUS = '.table-block .popover:not(.column-sub)';
+const TABLE_MENUS = '.table-hung .popover:not(.column-sub), .row-values .popover:not(.column-sub)';
 
 // ----- the event panel's menus: the chosen row takes the keyboard -------------
 // (the day picker moves its own focus: it knows the days). Arrows, Home and
@@ -2407,56 +2505,183 @@ document.addEventListener('focusout', (e) => {
   if (pressedTable && pressedTable.contains(box)) owedRelease = box;
   else letGo();
 });
-// The handle goes to the row under the pointer.
+// The handle goes to the row at the pointer: right at the left edge of the
+// table, on the first line of the row (the middle of a row of one line),
+// whatever the height of the row. The pointer is "at" a row when it is over
+// one of its cells, or beside it in the strip at the left of the table,
+// where the handle shows: the handle is there before the pointer is on it,
+// and stays while the pointer goes from the row to it. The row of the
+// headings has a handle too, with the plus alone: a new first row. (In a
+// table with no line of its name above it, the handle of the table as a
+// line of the page is at that height: there it shows, not a second one.)
+const ROW_LINE = 33;
+const ROW_STRIP = 76;
+let nearHandle = null;
+let nearLine = null;
+const leaveHandle = () => {
+  if (nearHandle) nearHandle.classList.remove('near');
+  if (nearLine) nearLine.classList.remove('at-strip');
+  nearHandle = null;
+  nearLine = null;
+};
+const placeRowHandle = (tr) => {
+  const frame = tr.closest('.table-frame');
+  const handle = frame && frame.querySelector(':scope > .row-handle');
+  if (!handle || !frame.offsetHeight) return;
+  const f = frame.getBoundingClientRect();
+  const t = tr.getBoundingClientRect();
+  // The window measures in points of the screen; `top` is in the points of
+  // the page, which a zoom of the page draws bigger or smaller.
+  const z = f.height / frame.offsetHeight || 1;
+  const line = Math.min(t.height / z, ROW_LINE);
+  const head = tr.dataset.r === '0';
+  if (head) {
+    const inner = frame.closest('.block-inner');
+    const own = inner && inner.querySelector(':scope > .gutter');
+    const g = own && own.getBoundingClientRect();
+    if (g && g.height && g.bottom > t.top + 2 && g.top < t.top + line * z - 2) {
+      const row = inner.closest('.block-row');
+      if (nearLine === row && !nearHandle) return;
+      leaveHandle();
+      nearLine = row;
+      row.classList.add('at-strip');
+      return;
+    }
+  }
+  if (nearHandle !== handle || nearLine) leaveHandle();
+  nearHandle = handle;
+  const top = `${Math.round(((t.top - f.top) / z + (line - (handle.offsetHeight || 24)) / 2) * 2) / 2}px`;
+  if (handle.dataset.r === tr.dataset.r && handle.style.top === top && handle.classList.contains('near')) return;
+  handle.dataset.r = tr.dataset.r;
+  handle.style.top = top;
+  handle.classList.toggle('for-head', head);
+  handle.classList.add('on', 'near');
+};
+// The row at a place in the window: the row under it, or the row beside it
+// when it is in the strip at the left of a table.
+const rowAt = (x, y, el) => {
+  if (!el || !el.closest) return null;
+  const own = el.closest('.table-block, .popover, .backdrop, .picked-bar, .table-side');
+  if (own) return own.classList.contains('table-block') ? el.closest('tr[data-r]') : null;
+  const pane = el.closest('.pane') || document;
+  for (const frame of pane.querySelectorAll('.table-frame')) {
+    const box = frame.querySelector(':scope > .table-block');
+    if (!box || !frame.offsetHeight) continue;
+    const f = frame.getBoundingClientRect();
+    const z = f.height / frame.offsetHeight || 1;
+    if (x >= f.left || x < f.left - ROW_STRIP * z || y < f.top || y >= f.bottom) continue;
+    for (const tr of box.querySelectorAll('tr[data-r]')) {
+      const t = tr.getBoundingClientRect();
+      if (y >= t.top && y < t.bottom) return tr;
+    }
+  }
+  return null;
+};
+let tablePointer = null;
+const handleToPointer = (x, y, el) => {
+  // (On the handle itself, or on that of the table as a line: it stays as it is.)
+  if (el && el.closest && (el.closest('.row-handle') || (nearLine && el.closest('.gutter') && nearLine.contains(el)))) return;
+  const tr = rowAt(x, y, el);
+  if (tr) placeRowHandle(tr);
+  else leaveHandle();
+};
 document.addEventListener(
   'mousemove',
   (e) => {
-    const tr = e.target.closest && e.target.closest('.table-block tr[data-r]');
-    if (!tr || tr.dataset.r === '0') return;
-    const frame = tr.closest('.table-frame');
-    const handle = frame && frame.querySelector(':scope > .row-handle');
-    if (!handle) return;
-    const top = `${Math.round(tr.getBoundingClientRect().top - frame.getBoundingClientRect().top + (tr.offsetHeight - 24) / 2)}px`;
-    if (handle.dataset.r === tr.dataset.r && handle.style.top === top) return;
-    handle.dataset.r = tr.dataset.r;
-    handle.style.top = top;
-    handle.classList.add('on');
+    tablePointer = { x: e.clientX, y: e.clientY };
+    handleToPointer(e.clientX, e.clientY, e.target);
   },
   { passive: true },
 );
+document.documentElement.addEventListener('mouseleave', leaveHandle);
+// The page or the table scrolled under a pointer that did not move: the
+// handle goes to the row that is at the pointer now.
+let handleQueued = false;
+document.addEventListener(
+  'scroll',
+  () => {
+    if (handleQueued || !tablePointer) return;
+    handleQueued = true;
+    requestAnimationFrame(() => {
+      handleQueued = false;
+      if (tablePointer) handleToPointer(tablePointer.x, tablePointer.y, document.elementFromPoint(tablePointer.x, tablePointer.y));
+    });
+  },
+  { capture: true, passive: true },
+);
 const tableOfHandle = (handle) => handle.parentElement.querySelector(':scope > .table-block');
-// The table with picked rows: a press anywhere but on a handle or in a menu
-// lets them go (the menu of the rows can close and the rows stay picked, so
-// that more rows are added with Shift and a click).
+// The table with picked rows or columns. Rows are picked by their handle:
+// a click picks one row and opens its menu, ⌘ and a click picks one more
+// (or lets it go), ⇧ and a click picks all up to it. Columns are picked by
+// ⌘ or ⇧ and a click on their headings. They stay picked when a menu
+// closes; a press anywhere else lets them go, and so does Escape. The
+// Delete key takes them out.
 let pickedTable = null;
 const unpick = () => {
   if (pickedTable) tableOp(pickedTable, 'unpick', 0, 0);
   pickedTable = null;
 };
+// The caret leaves the page when rows or columns are picked: the Delete
+// key is theirs then, not a cell's.
+const caretOut = () => {
+  const a = document.activeElement;
+  if (a && a !== document.body && a.blur && !a.closest('.popover')) a.blur();
+};
+// The heading of a column, when the press picks the column: ⌘ or ⇧ is
+// down. (⇧ in the heading that has the caret selects its words.) A locked
+// table keeps its columns.
+const pickedHead = (e) => {
+  if (e.button !== 0 || e.ctrlKey || e.altKey || !(e.metaKey || e.shiftKey) || !e.target.closest) return null;
+  const td = e.target.closest('.table-block:not(.locked) tr.head-row > td[data-col]');
+  if (!td || (!e.metaKey && e.target === document.activeElement)) return null;
+  return td;
+};
 document.addEventListener(
   'mousedown',
   (e) => {
-    if (pickedTable && !(e.target.closest && e.target.closest('.row-handle, .popover, .backdrop'))) unpick();
+    // (No caret in the heading, and no words selected by the ⇧.)
+    if (pickedHead(e)) return e.preventDefault();
+    // (Nor does ⇧ on a handle select the words of the page up to it.)
+    if ((e.shiftKey || e.metaKey) && e.target.closest && e.target.closest('.row-handle [data-row-op="row-menu"]')) e.preventDefault();
+    if (pickedTable && !(e.target.closest && e.target.closest('.row-handle, .popover, .backdrop, .picked-bar, td.col-picked .th-menu'))) unpick();
   },
   true,
 );
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !document.querySelector('.popover')) unpick();
+  if ((e.key !== 'Backspace' && e.key !== 'Delete') || !pickedTable || e.metaKey || e.ctrlKey || e.altKey || e.isComposing) return;
+  // (A key typed in a box is for the box.)
+  if (e.target.closest && e.target.closest('input, textarea, select, [contenteditable]')) return;
+  if (!pickedTable.isConnected || !pickedTable.querySelector('tr.picked, td.col-picked')) return;
+  e.preventDefault();
+  tableOp(pickedTable, 'delete-picked', 0, 0);
 });
 document.addEventListener(
   'click',
   (e) => {
+    const head = pickedHead(e);
+    if (head) {
+      e.preventDefault();
+      e.stopPropagation();
+      caretOut();
+      pickedTable = head.closest('.table-block');
+      return tableOp(pickedTable, 'pick-column', e.shiftKey ? 1 : 2, Number(head.dataset.col) || 0);
+    }
     const b = e.target.closest && e.target.closest('.row-handle [data-row-op]');
     if (!b) return;
-    // (Before the app sees the click: its own click closes an open menu,
-    // and the menu of the rows must stay to take more rows.)
+    // (Before the app sees the click: its own click closes an open menu.)
     e.stopPropagation();
     const handle = b.closest('.row-handle');
     const row = Number(handle.dataset.r) || 0;
-    if (!row) return;
     const box = tableOfHandle(handle);
-    if (b.dataset.rowOp === 'row-menu') pickedTable = box;
-    tableOp(box, b.dataset.rowOp, row, b.dataset.rowOp === 'row-menu' && e.shiftKey ? 1 : 0);
+    const op = b.dataset.rowOp;
+    // (The row of the headings has the plus alone: a new first row.)
+    if (op !== 'row-menu') return tableOp(box, op, row, 0);
+    if (!row) return;
+    caretOut();
+    pickedTable = box;
+    if (e.shiftKey || e.metaKey) tableOp(box, 'pick-row', row, e.shiftKey ? 1 : 2);
+    else tableOp(box, 'row-menu', row, 0);
   },
   true,
 );
@@ -3346,6 +3571,10 @@ new MutationObserver((mutations) => {
       if (n.tagName === 'TEXTAREA' || (n.querySelector && n.querySelector('textarea.title-input, textarea.ed-title'))) queueSizeAll();
       const menus = n.matches && n.matches('.sidebar-menu, .tab-menu, .due-menu, .ed-menu') ? [n] : n.querySelectorAll ? n.querySelectorAll('.sidebar-menu, .tab-menu, .due-menu, .ed-menu') : [];
       (n.matches && n.matches('.block-menu') ? [n] : n.querySelectorAll ? [...n.querySelectorAll('.block-menu')] : []).forEach(placeBlockMenu);
+      (n.matches && n.matches('.slash-menu') ? [n] : n.querySelectorAll ? [...n.querySelectorAll('.slash-menu')] : []).forEach((menu) => {
+        placeSlashMenu(menu);
+        slashWatch.observe(menu, { childList: true, subtree: true });
+      });
       menus.forEach(anchorMenu);
       menus.forEach(focusEdMenu);
       // The menus that hang from the cells of a table; one whose rows changed keeps its place in the window.
@@ -3696,7 +3925,7 @@ const startGraph = (el) => {
     });
     return best;
   };
-  const open = (n) => send({ t: 'open_url', url: 'notion2://page/' + n.id });
+  const open = (n) => send({ t: 'open_url', url: 'rune://page/' + n.id });
 
   canvas.addEventListener('mousemove', (e) => {
     if (g.drag) return;
@@ -3911,6 +4140,43 @@ window.addEventListener('mouseup', () => {
   }, 400);
   send({ t: 'event_move', id: d.id, days: d.grow ? 0 : d.days, minutes: d.grow ? 0 : d.mins, grow: d.grow ? d.mins : 0 });
 });
+
+// ----- the calendar: ⌘C on an event, ⌘V at a time -----------------------------------------
+// ⌘C copies the event under the pointer (else the one picked); ⌘V puts a
+// copy at the time under the pointer, or on the day under it at its own
+// time (the month, the row of all-day events). Not while typing.
+let calPointer = { x: -1, y: -1 };
+window.addEventListener('mousemove', (e) => {
+  calPointer = { x: e.clientX, y: e.clientY };
+}, { passive: true, capture: true });
+window.addEventListener(
+  'keydown',
+  (e) => {
+    if (!e.metaKey || e.ctrlKey || e.altKey || e.shiftKey || e.isComposing) return;
+    const key = e.key.toLowerCase();
+    if (key !== 'c' && key !== 'v') return;
+    const t = e.target;
+    if (isBlock(t) || (t && t.matches && t.matches('input, textarea, select, [contenteditable="true"]'))) return;
+    const cal = document.querySelector('.pane.focused .calendar') || document.querySelector('.calendar');
+    if (!cal) return;
+    const under = calPointer.x >= 0 ? document.elementFromPoint(calPointer.x, calPointer.y) : null;
+    if (key === 'c') {
+      const ev = (under && under.closest && under.closest('.cal-event[data-event]:not(.draft), .cal-chip[data-event]')) || cal.querySelector('.cal-event.on[data-event], .cal-chip.on[data-event]');
+      if (!ev || getSelection().toString()) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      send({ t: 'event_copy', id: ev.dataset.event });
+      return;
+    }
+    const col = under && under.closest && under.closest('.cal-col[data-day]');
+    const cell = !col && under && under.closest && under.closest('.cal-day[data-day], .cal-allday-cell[data-day]');
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (col) send({ t: 'event_paste', day: col.dataset.day, minute: minuteAt(col, calPointer.y) });
+    else send({ t: 'event_paste', day: cell ? cell.dataset.day : '', minute: -1 });
+  },
+  true,
+);
 
 // ----- the calendar: draw a new event, and take a chip to another day ---------------------
 // A drag over empty time in a day makes a slot of that length for a new
@@ -4595,6 +4861,38 @@ new MutationObserver((mutations) => {
 }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-diagram', 'class'] });
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', drawDiagrams);
 drawDiagrams();
+
+// ----- the wheel over an open menu's shade ---------------------------------------------
+// While a menu is open, a see-through shade over the window takes the clicks
+// outside it (one closes the menu). The wheel goes through it: the menu closes
+// and what is under the pointer scrolls, as with no menu.
+const scrollerAt = (x, y, shade) => {
+  shade.style.pointerEvents = 'none';
+  let el = document.elementFromPoint(x, y);
+  shade.style.pointerEvents = '';
+  for (; el && el !== document.documentElement; el = el.parentElement) {
+    const cs = getComputedStyle(el);
+    const can = (o, room) => (o === 'auto' || o === 'scroll') && room > 1;
+    if (can(cs.overflowY, el.scrollHeight - el.clientHeight) || can(cs.overflowX, el.scrollWidth - el.clientWidth)) return el;
+  }
+  return null;
+};
+document.addEventListener(
+  'wheel',
+  (e) => {
+    const shade = e.target && e.target.classList && e.target.classList.contains('backdrop') ? e.target : null;
+    if (!shade) return;
+    const box = scrollerAt(e.clientX, e.clientY, shade);
+    const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? innerHeight : 1;
+    if (box) box.scrollBy({ left: e.deltaX * unit, top: e.deltaY * unit });
+    // (Once: the first turn of the wheel closes the menu.)
+    if (!shade.dataset.closing) {
+      shade.dataset.closing = '1';
+      send({ t: 'shortcut', name: 'escape' });
+    }
+  },
+  { capture: true, passive: true },
+);
 
 window.__n2_test = { selIn, setSel, command: (name) => send({ t: 'shortcut', name }) };
 

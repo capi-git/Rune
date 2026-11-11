@@ -740,7 +740,7 @@ pub fn link_pages(text: &str, made: &[(String, String)]) -> String {
         let name = rest[start + 2..start + 2 + len].trim();
         out.push_str(&rest[..start]);
         match made.iter().find(|(n, _)| n.trim().eq_ignore_ascii_case(name)) {
-            Some((n, id)) => out.push_str(&format!("[{n}](notion2://page/{id})")),
+            Some((n, id)) => out.push_str(&format!("[{n}]({})", crate::inline::page_url(id))),
             None => out.push_str(&rest[start..start + len + 4]),
         }
         rest = &rest[start + len + 4..];
@@ -781,7 +781,7 @@ pub fn build_messages(action: &AiAction, page_md: &str, block_text: &str, prompt
              shorten, extend, reorder, correct, update, or take out a part of it), reply with a first \
              line that is exactly `{REVISE_MARK}`, and after it the whole page as it must be after the \
              change, in the same Markdown: keep every part that does not change word for word, and \
-             keep lines such as `[Image](notion2://block/...)` and links to other pages as they are. \
+             keep lines such as `[Image](rune://block/...)` and links to other pages as they are. \
              You can also make sub-pages of this page, when the request asks for pages of their own \
              (sub-pages, a page for each part): after the whole page, write a line that is exactly \
              `{PAGE_MARK}` followed by the name of the sub-page, and under it that sub-page in Markdown; \
@@ -936,7 +936,7 @@ mod tests {
         // The names become links to the pages that were made (in any letter case); a name with no page stays.
         let made = vec![("Workout A".to_string(), "p1".to_string()), ("Workout B".to_string(), "p2".to_string())];
         let linked = link_pages("1. [[Workout A]]\n2. [[workout b]] and [[Other]] and [[open", &made);
-        assert_eq!(linked, "1. [Workout A](notion2://page/p1)\n2. [Workout B](notion2://page/p2) and [[Other]] and [[open");
+        assert_eq!(linked, "1. [Workout A](rune://page/p1)\n2. [Workout B](rune://page/p2) and [[Other]] and [[open");
         // A reply with no sub-pages is the page alone.
         assert_eq!(split_pages("One\nTwo"), ("One\nTwo\n".to_string(), Vec::new()));
         // Never more than a few.

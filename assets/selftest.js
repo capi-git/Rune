@@ -172,7 +172,7 @@ const newPage = async (title) => {
 // handle of a row comes to the row under the pointer).
 const columnDo = async (table, c, item) => {
   $$('.th-menu', table)[c].click();
-  const row = await until(() => $(`.column-menu [data-item="${item}"]`, table));
+  const row = await until(() => $(`.column-menu [data-item="${item}"]`, table.parentElement));
   if (!row) throw new Error(`the menu of column ${c} has no "${item}"`);
   row.click();
 };
@@ -184,7 +184,7 @@ const rowHandle = async (table, r) => {
 };
 const rowDo = async (table, r, item) => {
   $('[data-row-op="row-menu"]', await rowHandle(table, r)).click();
-  const row = await until(() => $(`.row-menu [data-item="${item}"]`, table));
+  const row = await until(() => $(`.row-menu [data-item="${item}"]`, table.parentElement));
   if (!row) throw new Error(`the menu of row ${r} has no "${item}"`);
   row.click();
 };
@@ -286,6 +286,46 @@ await run('Slash menu', async () => {
   check('Typing / opens the menu', await until(() => $('.slash-menu')));
   key(fresh, 'Escape');
   check('Escape closes it', await until(() => !$('.slash-menu')));
+  // At the foot of the window, with no page below to scroll to: the menu
+  // opens over the line, all of it in the window.
+  {
+    // A new empty line for the menu.
+    fresh.focus();
+    T().setSel(fresh, fresh.textContent.length);
+    key(fresh, 'Enter');
+    const line = await until(() => {
+      const a = document.activeElement;
+      return a?.classList.contains('blk') && a !== fresh && a;
+    });
+    const row = line.closest('.block-row');
+    const scroller = row.closest('.scroller');
+    const page = scroller && scroller.querySelector('.page');
+    const pad = page ? page.style.paddingBottom : '';
+    // (The line is put low in the window: room under the page is taken away for the check.)
+    if (page) page.style.paddingBottom = '0px';
+    scroller.scrollTop = scroller.scrollHeight;
+    const r0 = row.getBoundingClientRect();
+    const lift = Math.max(0, innerHeight - 70 - r0.bottom);
+    if (page) page.style.marginTop = `${lift}px`;
+    await wait(100);
+    line.focus();
+    typeIn(line, '/');
+    const m = await until(() => $('.slash-menu.anchored'), 2000);
+    await wait(150);
+    const r = m && m.getBoundingClientRect();
+    const at = row.getBoundingClientRect();
+    check('At the foot of the window, the / menu opens over its line, all of it in the window', r && r.top >= 0 && r.bottom <= innerHeight && r.bottom <= at.top + 4 && r.height > 120, r ? `${Math.round(r.top)}..${Math.round(r.bottom)} of ${innerHeight}, line at ${Math.round(at.top)}` : 'no menu');
+    typeIn(line, 'head');
+    await wait(150);
+    const r2 = $('.slash-menu')?.getBoundingClientRect();
+    check('…and as it narrows to fewer items it stays at its line', r2 && Math.abs(r2.bottom - r.bottom) < 3 && r2.height < r.height, r2 ? `${Math.round(r2.top)}..${Math.round(r2.bottom)}` : 'no menu');
+    key(line, 'Escape');
+    await until(() => !$('.slash-menu'));
+    if (page) {
+      page.style.marginTop = '';
+      page.style.paddingBottom = pad;
+    }
+  }
 });
 
 await run('Block menu', async () => {
@@ -294,6 +334,17 @@ await run('Block menu', async () => {
   const menu = await until(() => $('.block-menu'));
   const item = menu && menuItem(menu, 'Duplicate');
   check('Block menu item is clickable (not covered)', item && onTop(item));
+  // The wheel while the menu is open: the menu closes and the page scrolls.
+  {
+    const shade = $('.backdrop');
+    const scroller = row.closest('.scroller');
+    const before = scroller ? scroller.scrollTop : 0;
+    const room = scroller ? scroller.scrollHeight - scroller.clientHeight : 0;
+    const r = scroller.getBoundingClientRect();
+    shade?.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 120, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }));
+    check('The wheel over an open menu closes it, and the page scrolls', shade && (await until(() => !$('.block-menu'), 2000)) && (room < 2 || scroller.scrollTop > before), `${before} to ${scroller?.scrollTop} of ${room}`);
+    if (scroller) scroller.scrollTop = 0;
+  }
   key(document.body, 'Escape');
   await until(() => !$('.block-menu'));
   // The menu of a line at the foot of the window opens where all of it is seen.
@@ -1978,7 +2029,7 @@ await run('Typed tables and charts', async () => {
   // The menu of a column: Rune's own rows, the chosen one grey.
   const kmMenu = $$('.th-menu', box)[2];
   kmMenu.click();
-  const menu = await until(() => $('.column-menu', box));
+  const menu = await until(() => $('.column-menu', box.parentElement));
   check('A column has a menu of kinds and totals', menu && $('[data-item="type"]', menu)?.textContent.includes('Number') && $('[data-item="total"]', menu)?.textContent.includes('Sum'));
   check('The menu is not cut by the table', menu && onTop(menu), menu ? JSON.stringify(menu.getBoundingClientRect()) : '');
   await wait(200);
@@ -2097,24 +2148,24 @@ await run('Tables as databases', async () => {
   check('A money sign typed in a cell makes its column money', await until(() => amounts() === '$2,000.00 $150.00 $65.00', 3000), amounts());
   const totals = () => $$('.table-totals td', box()).map((t) => t.textContent.trim()).join(' | ');
   await columnDo(box(), 1, 'total');
-  const sum = await until(() => $('.column-sub [data-item="sum"]', box()));
-  check('The menu of a column and its second list are on top of the page', sum && onTop(sum) && onTop($('.column-menu [data-item="type"]', box())));
+  const sum = await until(() => $('.column-sub [data-item="sum"]', box().parentElement));
+  check('The menu of a column and its second list are on top of the page', sum && onTop(sum) && onTop($('.column-menu [data-item="type"]', box().parentElement)));
   const menuPlace = () =>
-    [$('.column-menu', box()), $('.column-sub', box())]
+    [$('.column-menu', box().parentElement), $('.column-sub', box().parentElement)]
       .map((m) => {
         const r = m.getBoundingClientRect();
         return [r.left, r.top, r.right, r.bottom].map(Math.round).join(',');
       })
       .join(' / ') + ' in ' + innerWidth + 'x' + innerHeight;
-  check('…both are whole in the window, and the table stays in its box', inWindow($('.column-menu', box())) && inWindow($('.column-sub', box())) && getComputedStyle(box()).overflowX !== 'visible', menuPlace());
+  check('…both are whole in the window, and the table stays in its box', inWindow($('.column-menu', box().parentElement)) && inWindow($('.column-sub', box().parentElement)) && getComputedStyle(box()).overflowX !== 'visible', menuPlace());
   sum.click();
   check('The sum is written as money too', await until(() => totals().includes('Sum $2,215.00')), totals());
-  $('.column-menu [data-item="format"]', box()).click();
-  (await until(() => $('.column-sub [data-item="EUR"]', box()))).click();
+  $('.column-menu [data-item="format"]', box().parentElement).click();
+  (await until(() => $('.column-sub [data-item="EUR"]', box().parentElement))).click();
   check('Another kind of money writes every number again', await until(() => cell(1, 1).value === '€2,000.00' && totals().includes('Sum €2,215.00')), amounts() + ' ' + totals());
   await wait(150);
   snap('table-column-menu');
-  $('.column-sub [data-item="USD"]', box()).click();
+  $('.column-sub [data-item="USD"]', box().parentElement).click();
   await until(() => cell(1, 1).value === '$2,000.00');
   await closeMenu();
 
@@ -2176,6 +2227,10 @@ await run('Tables as databases', async () => {
   await closeMenu();
   $('[data-new-row]', wrap()).click();
   check('A new row takes the value the filter asks, so it stays in view', await until(() => $$('tr[data-r]', box()).length === 4 && cell(4, 2)?.value === 'Food'), `${$$('tr[data-r]', box()).length} ${cell(4, 2)?.value}`);
+  // (The caret comes to the new row a moment after the row: with the row
+  // deleted before that, the caret would come to the first heading, and the
+  // table would keep the order it has at that moment.)
+  await until(() => document.activeElement?.closest?.('tr')?.dataset.r === '4', 2000);
   document.activeElement.blur();
   await rowDo(box(), 4, 'delete');
   await until(() => !cell(4, 0));
@@ -2219,7 +2274,7 @@ await run('Tables as databases', async () => {
 
   // Rows are picked by their handle, and stay picked when their menu closes.
   $('[data-row-op="row-menu"]', await rowHandle(box(), 1)).click();
-  const rowMenu = await until(() => $('.row-menu', box()));
+  const rowMenu = await until(() => $('.row-menu', box().parentElement));
   check('The handle of a row opens its menu, on top of the page', rowMenu && onTop($('[data-item="side"]', rowMenu)) && $('.table-picked', wrap())?.textContent === '1 row selected', $('.table-picked', wrap())?.textContent);
   await wait(150);
   snap('table-row-menu');
@@ -2231,7 +2286,7 @@ await run('Tables as databases', async () => {
     for (let i = 0; i < times; i++) T().command(how);
     await wait(250);
     $('[data-row-op="row-menu"]', await rowHandle(box(), 1)).click();
-    const zoomed = await until(() => $('.row-menu.anchored', box()));
+    const zoomed = await until(() => $('.row-menu.anchored', box().parentElement));
     await wait(250);
     const cell = $('tr[data-r="1"] .first-cell', box())?.getBoundingClientRect();
     const m = zoomed?.getBoundingClientRect();
@@ -2242,7 +2297,9 @@ await run('Tables as databases', async () => {
   T().command('zoom_reset');
   await wait(250);
   $('[data-row-op="row-menu"]', await rowHandle(box(), 3)).dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, shiftKey: true }));
-  check('Shift and a click pick the rows up to that row', await until(() => $$('tr.picked', box()).length === 3 && $('.row-menu [data-item="delete"]', box())?.textContent.includes('Delete 3 rows')), `${$$('tr.picked', box()).length} ${$('.row-menu [data-item="delete"]', box())?.textContent}`);
+  check('Shift and a click pick the rows up to that row', await until(() => $$('tr.picked', box()).length === 3 && $('.table-picked', wrap())?.textContent === '3 rows selected'), `${$$('tr.picked', box()).length} ${$('.table-picked', wrap())?.textContent}`);
+  $('[data-row-op="row-menu"]', await rowHandle(box(), 2)).click();
+  check('…and the menu of one of them is the menu of them all', await until(() => $$('tr.picked', box()).length === 3 && $('.row-menu [data-item="delete"]', box().parentElement)?.textContent.includes('Delete 3 rows')), `${$$('tr.picked', box()).length} ${$('.row-menu [data-item="delete"]', box().parentElement)?.textContent}`);
   await closeMenu();
   $('h1, .title-input', pane()).dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
   check('A press elsewhere lets the rows go', await until(() => $$('tr.picked', box()).length === 0));
@@ -2269,20 +2326,20 @@ await run('Tables as databases', async () => {
   heading.value = 'Double';
   heading.dispatchEvent(new Event('input', { bubbles: true }));
   $$('.th-menu', box())[5].click();
-  const formula = await until(() => $('.column-menu [data-item="formula"]', box()));
+  const formula = await until(() => $('.column-menu [data-item="formula"]', box().parentElement));
   const typeFormula = (text) => {
-    const field = $('.column-menu [data-item="formula"]', box());
+    const field = $('.column-menu [data-item="formula"]', box().parentElement);
     field.value = text;
     field.dispatchEvent(new Event('input', { bubbles: true }));
   };
   typeFormula('Amount *');
-  check('A formula that cannot be read says why', formula && (await until(() => $('.column-error', box())?.textContent.length > 5)), $('.column-error', box())?.textContent);
+  check('A formula that cannot be read says why', formula && (await until(() => $('.column-error', box().parentElement)?.textContent.length > 5)), $('.column-error', box().parentElement)?.textContent);
   typeFormula('Amount * 2');
   const worked = () => $$('.cell.computed', box()).map((c) => c.value).join(',');
-  check('A formula is worked out for each row', await until(() => worked() === '4200,300,130' && !$('.column-error', box())), worked());
-  $('.column-menu [data-item="format"]', box()).click();
-  (await until(() => $('.column-sub [data-item="show-as"]', box()))).click();
-  (await until(() => $('.column-sub [data-show="Bar"]', box()))).click();
+  check('A formula is worked out for each row', await until(() => worked() === '4200,300,130' && !$('.column-error', box().parentElement)), worked());
+  $('.column-menu [data-item="format"]', box().parentElement).click();
+  (await until(() => $('.column-sub [data-item="show-as"]', box().parentElement))).click();
+  (await until(() => $('.column-sub [data-show="Bar"]', box().parentElement))).click();
   check('Bars show how large each number is', await until(() => $$('.meter-bar', box()).length === 3 && $('.meter-bar span', box()).style.width === '100%'), String($$('.meter-bar', box()).length));
   await closeMenu();
 
@@ -2413,6 +2470,546 @@ await run('A table with many columns', async () => {
   box(0).scrollLeft = box(0).scrollWidth;
   await wait(200);
   snap('table-wide-end');
+});
+
+await run('Table menus, handles and picking', async () => {
+  // What a person met in a wide table with frozen columns and coloured rows,
+  // in a page that scrolls: the menu of a row cut at the foot of the table's
+  // box, the handle of a row not at its row, and no way to take several rows
+  // or columns out at once.
+  await oneTab();
+  while ($$('.pane').filter((p) => p.offsetParent).length > 1) {
+    T().command('close_split');
+    await wait(150);
+  }
+  const title = await newPage('Picking check');
+  key(title, 'Enter');
+  const first = await until(() => document.activeElement?.classList.contains('blk') && document.activeElement);
+  const pane = () => shownPane('Picking check');
+  const md = [
+    ...Array.from({ length: 2 }, (_, i) => `Before ${i + 1}\n`),
+    '| Name | Side | Notes | Qty | Setup | P1 | P2 | P3 | P4 | P5 |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+    '| Alpha | Long | short | 1 | Breakout | 11 | 12 | 13 | 14 | 15 |',
+    '| Beta | Short | A long note that goes on and on, so that it wraps over several lines of its column and its row is a tall one | 2 | Reversal | 21 | 22 | 23 | 24 | 25 |',
+    '| Gamma | Long |  | 3 | Pullback | 31 | 32 | 33 | 34 | 35 |',
+    '| Delta | Short |  | 4 | Breakout | 41 | 42 | 43 | 44 | 45 |',
+    '| Epsilon | Long |  | 5 | Reversal | 51 | 52 | 53 | 54 | 55 |',
+    '| Zeta | Short |  | 6 | Pullback | 61 | 62 | 63 | 64 | 65 |',
+    '| Eta | Long |  | 7 | Breakout | 71 | 72 | 73 | 74 | 75 |',
+    '<!-- columns: text | choice | text | number | choice | number | number | number | number | number -->',
+    '<!-- table: Picks | frozen 2 | color Side is Long green -->',
+    '',
+    ...Array.from({ length: 30 }, (_, i) => `After ${i + 1}\n`),
+    '| Thing | Count |',
+    '| --- | --- |',
+    '| Pens | 4 |',
+    '',
+    'End',
+  ].join('\n');
+  const clip = new DataTransfer();
+  clip.setData('text/plain', md);
+  first.dispatchEvent(new ClipboardEvent('paste', { clipboardData: clip, bubbles: true, cancelable: true }));
+  const wrap = () => $('.table-wrap', pane());
+  const box = () => $('.table-block', wrap());
+  const frame = () => box().parentElement;
+  const scroller = () => $('.scroller', pane());
+  await until(() => wrap() && $$('tr[data-r]', box()).length === 8, 4000);
+  await until(() => $$('td.frozen', box()).length >= 16 && box().style.getPropertyValue('--f1'), 3000);
+  await wait(250);
+  const cell = (r, c) => $(`.cell[data-r="${r}"][data-c="${c}"]`, box());
+  const tr = (r) => $(`tr[data-r="${r}"]`, box());
+  const rect = (el) => el.getBoundingClientRect();
+  const names = () => $$('tr[data-r]', box()).slice(1).map((t) => $('.cell[data-c="0"]', t).value).join(',');
+  const heads = () => $$('tr.head-row .cell', box()).map((h) => h.value).join(',');
+  const ALL_NAMES = 'Alpha,Beta,Gamma,Delta,Epsilon,Zeta,Eta';
+  const ALL_HEADS = 'Name,Side,Notes,Qty,Setup,P1,P2,P3,P4,P5';
+  const closeMenu = async () => {
+    $('.backdrop')?.click();
+    await until(() => !$('.table-menu'));
+  };
+  const zoomTo = async (how, times) => {
+    T().command('zoom_reset');
+    for (let i = 0; i < times; i++) T().command(how);
+    await wait(300);
+  };
+  const scale = () => rect(frame()).height / frame().offsetHeight;
+  check('The table is as the person had it: wide, two columns frozen, rows coloured, one row tall, in a page that scrolls', box().scrollWidth > box().clientWidth + 100 && $$('tr.painted', box()).length === 4 && rect(tr(2)).height > 60 && scroller().scrollHeight > scroller().clientHeight + 200, `${box().scrollWidth} in ${box().clientWidth}, ${$$('tr.painted', box()).length} coloured, row 2 is ${Math.round(rect(tr(2)).height)} high, page ${scroller().scrollHeight} in ${scroller().clientHeight}`);
+
+  // ----- no menu of the table is cut --------------------------------------
+  // WebKit draws what has a place of its own in the stack (a frozen cell,
+  // anything with a z-index, a transform, a blur) as a layer, and cuts all
+  // that is in such a layer at the edges of the box that scrolls it, a menu
+  // fixed to the window too. (What is under the pointer does not show the
+  // cut: a point in the cut part still answers with the menu.) So nothing
+  // between a menu and the card of the page may be such a layer.
+  const layerOver = (menu) => {
+    for (let n = menu.parentElement; n && !n.classList.contains('work-card'); n = n.parentElement) {
+      const cs = getComputedStyle(n);
+      const blur = cs.webkitBackdropFilter || cs.backdropFilter || 'none';
+      if ((cs.position !== 'static' && cs.zIndex !== 'auto') || cs.position === 'sticky' || cs.position === 'fixed' || cs.transform !== 'none' || cs.filter !== 'none' || Number(cs.opacity) < 1 || cs.isolation === 'isolate' || cs.mixBlendMode !== 'normal' || blur !== 'none' || /transform|opacity/.test(cs.willChange)) return n;
+    }
+    return null;
+  };
+  // All of a menu is in the window, on top of the page, and in no layer that a box cuts.
+  const whole = (menu) => {
+    if (!menu) return { ok: false, detail: 'no menu' };
+    const m = rect(menu);
+    const items = $$('[data-item], .pick-row, .pick-input', menu);
+    const hit = (el) => {
+      const b = rect(el);
+      const at = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+      return !!at && menu.contains(at);
+    };
+    const layer = layerOver(menu);
+    const inside = m.top >= 0 && m.left >= 0 && m.bottom <= innerHeight + 0.5 && m.right <= innerWidth + 0.5 && m.height > 40;
+    const onTopOfAll = items.length > 0 && hit(items[0]) && hit(items[items.length - 1]);
+    return {
+      ok: inside && onTopOfAll && !layer && !menu.closest('.table-block') && getComputedStyle(menu).position === 'fixed',
+      detail: `${[m.left, m.top, m.right, m.bottom].map(Math.round).join(',')} in ${innerWidth}x${innerHeight}; first and last item on top: ${onTopOfAll}; layer over it: ${layer ? layer.tagName + '.' + layer.className : 'none'}; in the box: ${!!menu.closest('.table-block')}`,
+    };
+  };
+  // A menu hangs under `from` (a row, a cell), at `left`; moved up when the foot of the window is near.
+  const under = (menu, from, left) => {
+    const m = rect(menu);
+    const a = rect(from);
+    const z = scale();
+    const raised = m.bottom >= innerHeight - 10;
+    return { ok: Math.abs(m.left - left) < 3 && (raised ? m.top < a.bottom + 4 : Math.abs(m.top - (a.bottom + 4)) < 3), detail: `menu at ${Math.round(m.left)},${Math.round(m.top)}; hangs from ${Math.round(left)},${Math.round(a.bottom)}; zoom ${z.toFixed(2)}${raised ? '; raised at the foot of the window' : ''}` };
+  };
+  const both = (...parts) => ({ ok: parts.every((p) => p.ok), detail: parts.map((p) => p.detail).join(' | ') });
+  const openRowMenu = async (r) => {
+    $('[data-row-op="row-menu"]', await rowHandle(box(), r)).click();
+    const menu = await until(() => $('.row-menu.anchored', frame()));
+    await wait(220);
+    return menu;
+  };
+  let menu = null;
+  const rowMenuCheck = async (name, r) => {
+    const menu = await openRowMenu(r);
+    const got = menu ? both(whole(menu), under(menu, tr(r), rect(box()).left)) : { ok: false, detail: 'no menu' };
+    check(name, got.ok && $('[data-item="duplicate"]', menu) && $('[data-item="delete"]', menu), got.detail);
+    return menu;
+  };
+  // The last row, with room under it in the window: all of its menu is
+  // under the foot of the box that scrolls the table, where it was cut.
+  scroller().scrollTop += rect(tr(7)).bottom - (innerHeight - 380);
+  await wait(200);
+  menu = await rowMenuCheck('In a table with frozen columns, the menu of a row is whole: beside the box that scrolls the table, in no layer that the box cuts', 7);
+  check('…right under its row, all of it past the foot of the box that scrolls the table', menu && Math.abs(rect(menu).top - (rect(tr(7)).bottom + 4)) < 3 && rect(menu).bottom > rect(box()).bottom + 150, menu && `menu ${Math.round(rect(menu).top)}-${Math.round(rect(menu).bottom)}, row ends at ${Math.round(rect(tr(7)).bottom)}, box at ${Math.round(rect(box()).bottom)}`);
+  await wait(150);
+  snap('pick-frozen-row-menu');
+  await closeMenu();
+  box().scrollLeft = 320;
+  await wait(150);
+  await rowMenuCheck('…and with the table scrolled sideways, still at the left edge of the table', 3);
+  await closeMenu();
+  // The last row, right above the foot of the window: the menu is moved up, all of it in the window.
+  scroller().scrollTop += rect(tr(7)).bottom - (innerHeight - 40);
+  await wait(200);
+  check('The page scrolled so that there is no room for its menu under the last row', rect(tr(7)).bottom > innerHeight - 250, `${Math.round(rect(tr(7)).bottom)} of ${innerHeight}`);
+  await rowMenuCheck('…and at the foot of the window the menu of the last row is moved up, whole', 7);
+  await wait(150);
+  snap('pick-row-menu-at-foot');
+  await closeMenu();
+  box().scrollLeft = 0;
+  for (const [how, label] of [['zoom_in', 'bigger'], ['zoom_out', 'smaller']]) {
+    await zoomTo(how, 2);
+    await rowMenuCheck(`…and in a page made ${label}`, 5);
+    if (how === 'zoom_in') snap('pick-row-menu-zoomed');
+    await closeMenu();
+  }
+  T().command('zoom_reset');
+  await wait(300);
+  scroller().scrollTop = 0;
+  await wait(150);
+
+  // The menu of a frozen heading, and of a heading at the far end.
+  $$('.th-menu', box())[0].click();
+  menu = await until(() => $('.column-menu.anchored', frame()));
+  await wait(220);
+  let got = menu ? both(whole(menu), under(menu, $('tr.head-row > td', box()), rect($('tr.head-row > td', box())).left)) : { ok: false, detail: 'no menu' };
+  check('The menu of a frozen heading is whole too, under its heading', got.ok, got.detail);
+  $('[data-item="type"]', menu).click();
+  const sub = await until(() => $('.column-sub [data-item="number"]', frame()));
+  await wait(200);
+  const subRect = sub && rect(sub.closest('.column-sub'));
+  const subHit = sub && document.elementFromPoint(rect(sub).left + 20, rect(sub).top + 10);
+  check('…and so is its second list', sub && subRect.right <= innerWidth && subRect.bottom <= innerHeight && subRect.left >= 0 && sub.contains(subHit), subRect && [subRect.left, subRect.top, subRect.right, subRect.bottom].map(Math.round).join(','));
+  snap('pick-frozen-column-menu');
+  await closeMenu();
+  box().scrollLeft = box().scrollWidth;
+  await wait(150);
+  $$('.th-menu', box())[9].click();
+  menu = await until(() => $('.column-menu.anchored', frame()));
+  await wait(220);
+  got = whole(menu);
+  check('The menu of the last heading, with the table scrolled to its end, is whole in the window', got.ok && rect(menu).left >= rect(box()).left - 1, got.detail);
+  await closeMenu();
+  box().scrollLeft = 0;
+  await wait(100);
+
+  // The list of a choice cell: in a frozen column, and in one that scrolls.
+  cell(7, 1).click();
+  let list = await until(() => $('.choice-picker.anchored', frame()));
+  await wait(220);
+  got = list ? both(whole(list), under(list, cell(7, 1).closest('td'), rect(cell(7, 1).closest('td')).left)) : { ok: false, detail: 'no list' };
+  check('The list of a choice cell in a frozen column is whole, under its cell', got.ok, got.detail);
+  snap('pick-frozen-choice');
+  $$('.pick-row', list).find((o) => o.dataset.option === 'Short').click();
+  check('…and it works from there: the option picked goes into the cell', await until(() => !$('.choice-picker') && cell(7, 1).textContent.trim() === 'Short'), cell(7, 1)?.textContent);
+  cell(7, 1).click();
+  (await until(() => $$('.pick-row', $('.choice-picker', frame()) || document.body).find((o) => o.dataset.option === 'Long'))).click();
+  await until(() => !$('.choice-picker') && cell(7, 1).textContent.trim() === 'Long');
+  box().scrollLeft = 300;
+  await wait(150);
+  cell(6, 4).click();
+  list = await until(() => $('.choice-picker.anchored', frame()));
+  await wait(220);
+  got = whole(list);
+  check('…and so is the list of a cell in a column that scrolls, with the table scrolled sideways', got.ok && list && rect(list).left >= rect(box()).left - 1 && rect(list).left <= rect(box()).right, got.detail);
+  await closeMenu();
+  box().scrollLeft = 0;
+  await wait(100);
+
+  // ----- the handle of a row is at its row -------------------------------------
+  // On the first line of the row (the middle of a row of one line), its
+  // grip a few points from the left edge of the table.
+  const hover = (r) => {
+    const b = rect(tr(r));
+    const at = [b.left + 40, b.top + Math.min(b.height / 2, 14)];
+    tr(r).dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: at[0], clientY: at[1] }));
+    return at;
+  };
+  const handlePlace = (r) => {
+    const handle = $(`.row-handle.on[data-r="${r}"]`, frame());
+    if (!handle) return { ok: false, detail: `no handle at row ${r} (it is at row ${$('.row-handle', frame())?.dataset.r})` };
+    const z = scale();
+    const grip = rect($('[data-row-op="row-menu"]', handle));
+    const row = rect(tr(r));
+    const line = Math.min(row.height, 33 * z);
+    const off = grip.top + grip.height / 2 - (row.top + line / 2);
+    const gap = rect(box()).left - grip.right;
+    return { ok: Math.abs(off) <= 1.5 && gap >= -0.5 && gap <= 5 * z && grip.top >= row.top - 1 && grip.bottom <= row.bottom + 1, detail: `row ${r} (${Math.round(row.height)} high): ${off.toFixed(1)} from the middle of its first line, ${gap.toFixed(1)} from the table, zoom ${z.toFixed(2)}` };
+  };
+  const handles = async (rows) => {
+    const parts = [];
+    for (const r of rows) {
+      hover(r);
+      await until(() => $(`.row-handle.on[data-r="${r}"]`, frame()), 1000);
+      parts.push(handlePlace(r));
+    }
+    return both(...parts);
+  };
+  got = await handles([1, 2, 3, 7]);
+  check('The handle of a row is right at its row, for a row of one line and for a tall one', got.ok, got.detail);
+  hover(2);
+  await wait(100);
+  snap('pick-handle-tall-row');
+  for (const [how, label] of [['zoom_in', 'bigger'], ['zoom_out', 'smaller']]) {
+    await zoomTo(how, 2);
+    got = await handles([1, 2, 7]);
+    check(`…and in a page made ${label}`, got.ok, got.detail);
+  }
+  T().command('zoom_reset');
+  await wait(300);
+  // The page scrolls under a pointer that does not move: the handle goes to the row that is under it now.
+  scroller().scrollTop = 0;
+  await wait(150);
+  const [px, py] = hover(1);
+  await until(() => $('.row-handle.on[data-r="1"]', frame()));
+  scroller().scrollTop += Math.round(rect(tr(1)).height + rect(tr(2)).height + 6);
+  const now = await until(() => {
+    const t = document.elementFromPoint(px, py)?.closest('tr[data-r]');
+    return t && t.dataset.r !== '1' && t.dataset.r !== '0' && $(`.row-handle.on[data-r="${t.dataset.r}"]`, frame()) && t;
+  }, 2000);
+  got = now ? handlePlace(Number(now.dataset.r)) : { ok: false, detail: `the handle stayed at row ${$('.row-handle', frame())?.dataset.r}; under the pointer: ${document.elementFromPoint(px, py)?.closest('tr[data-r]')?.dataset.r}` };
+  check('When the page scrolls under the pointer, the handle goes to the row that is under it now', got.ok, got.detail);
+  box().scrollLeft = 300;
+  await wait(150);
+  got = await handles([3]);
+  check('…and it stays at the left edge when the table is scrolled sideways', got.ok, got.detail);
+  // The button of a heading is on its own column, frozen or not.
+  const onColumn = () => {
+    const bad = $$('tr.head-row > td', box()).filter((td) => {
+      const b = rect($('.th-menu', td));
+      const t = rect(td);
+      return !(b.width > 0 && b.left >= t.left - 0.5 && b.right <= t.right + 0.5 && b.top >= t.top - 0.5 && b.bottom <= t.bottom + 0.5);
+    });
+    return bad.map((td) => td.dataset.col).join(',');
+  };
+  check('The button of a heading is on its own column, scrolled or not', onColumn() === '', onColumn());
+  box().scrollLeft = 0;
+  scroller().scrollTop = 0;
+  await wait(150);
+
+  // ----- the strip at the left of the table ------------------------------------
+  // The pointer beside a row, in the empty strip where the handle shows (not
+  // over the cells of the row): the handle of that row is there, and its
+  // buttons take a click.
+  const beside = (r, dx = 30, fromTop = null, table = box()) => {
+    const b = rect($(`tr[data-r="${r}"]`, table));
+    const x = rect(table).left - dx * scale();
+    const y = b.top + (fromTop === null ? Math.min(b.height / 2, 14 * scale()) : fromTop);
+    const el = document.elementFromPoint(x, y) || document.body;
+    el.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: x, clientY: y }));
+    return el;
+  };
+  const found = (b) => {
+    const q = rect(b);
+    const at = document.elementFromPoint(q.left + q.width / 2, q.top + q.height / 2);
+    return !!at && b.contains(at);
+  };
+  const shows = (r) => {
+    const handle = $(`.row-handle.on.near[data-r="${r}"]`, frame());
+    if (!handle) return { ok: false, detail: `row ${r}: no handle (it is at row ${$('.row-handle', frame())?.dataset.r}: ${$('.row-handle', frame())?.className})` };
+    const cs = getComputedStyle(handle);
+    const buttons = $$('[data-row-op]', handle).filter((b) => getComputedStyle(b).visibility !== 'hidden');
+    const place = handlePlace(r);
+    return { ok: cs.opacity === '1' && cs.pointerEvents === 'auto' && buttons.length === (r === 0 ? 1 : 2) && buttons.every(found) && place.ok, detail: `${place.detail}; ${buttons.length} buttons, under the pointer: ${buttons.every(found)}; seen: ${cs.opacity}` };
+  };
+  const besideAll = async (places) => {
+    const parts = [];
+    for (const [r, dx, fromTop] of places) {
+      const over = beside(r, dx, fromTop);
+      await wait(60);
+      const got = shows(r);
+      parts.push({ ok: got.ok && !over.closest('.table-frame'), detail: got.detail });
+    }
+    return both(...parts);
+  };
+  const tableUp = async () => {
+    scroller().scrollTop += rect(box()).top - rect(scroller()).top - 60;
+    await wait(200);
+  };
+  await tableUp();
+  got = await besideAll([[1, 30], [2, 30], [2, 12, rect(tr(2)).height - 8], [7, 68], [3, 4]]);
+  check('The pointer in the strip at the left of the table, beside a row, shows the handle of that row, and its buttons take a click', got.ok, got.detail);
+  beside(5);
+  await wait(60);
+  const gripOf5 = $('.row-handle.near[data-r="5"] [data-row-op="row-menu"]', frame());
+  gripOf5?.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: rect(gripOf5).left + 5, clientY: rect(gripOf5).top + 5 }));
+  await wait(60);
+  got = shows(5);
+  check('…and it stays while the pointer goes from the row to it', got.ok, got.detail);
+  beside(2, 40, rect(tr(2)).height - 20);
+  await wait(60);
+  snap('pick-strip');
+  beside(0);
+  await wait(60);
+  got = shows(0);
+  check('Beside the row of the headings, the handle has the plus alone', got.ok && $('.row-handle', frame()).classList.contains('for-head'), got.detail);
+  $('.row-handle.near [data-row-op="add-below"]', frame()).click();
+  check('…which adds a new first row', await until(() => names() === ',' + ALL_NAMES, 3000), names());
+  document.activeElement?.blur();
+  T().command('undo');
+  await until(() => names() === ALL_NAMES, 3000);
+  beside(3);
+  await wait(60);
+  $('.row-handle.near[data-r="3"] [data-row-op="add-below"]', frame())?.click();
+  check('The plus of a handle found from the strip adds a row under its row', await until(() => names() === 'Alpha,Beta,Gamma,,Delta,Epsilon,Zeta,Eta', 3000), names());
+  document.activeElement?.blur();
+  T().command('undo');
+  await until(() => names() === ALL_NAMES, 3000);
+  beside(4, 110);
+  await wait(60);
+  const away = $('.row-handle', frame());
+  check('Farther from the table than the strip, and away from the table, no handle shows', !away.classList.contains('near') && getComputedStyle(away).opacity === '0' && getComputedStyle(away).pointerEvents === 'none', away.className);
+  box().scrollLeft = 300;
+  await wait(150);
+  got = await besideAll([[4, 30], [6, 30]]);
+  check('The strip works the same with the table scrolled sideways under its frozen columns', got.ok, got.detail);
+  box().scrollLeft = 0;
+  for (const [how, label] of [['zoom_in', 'bigger'], ['zoom_out', 'smaller']]) {
+    await zoomTo(how, 2);
+    await tableUp();
+    got = await besideAll([[1, 30], [2, 30], [0, 30]]);
+    check(`…and in a page made ${label}`, got.ok, got.detail);
+  }
+  T().command('zoom_reset');
+  await wait(300);
+  // A table with no line of its name above it: beside its headings is the
+  // handle of the table as a line of the page, and that is what shows there.
+  const plain = () => $$('.table-block', pane())[1];
+  plain().scrollIntoView({ block: 'center' });
+  await wait(250);
+  const line = plain().closest('.block-row');
+  beside(0, 30, null, plain());
+  const own = $(':scope > .block-inner > .gutter', line);
+  await until(() => own && getComputedStyle(own).opacity === '1', 2500);
+  const ownButtons = own ? $$('button', own) : [];
+  check('In a table with no name, the strip beside its headings shows the handle of the table itself, not a second one over it', line.classList.contains('at-strip') && own && getComputedStyle(own).opacity === '1' && ownButtons.length > 0 && ownButtons.every(found) && !$('.row-handle', plain().parentElement).classList.contains('near'), `${line.className} | ${own && getComputedStyle(own).opacity} | ${ownButtons.length} buttons | ${$('.row-handle', plain().parentElement).className}`);
+  beside(1, 30, null, plain());
+  await wait(100);
+  const plainHandle = $('.row-handle.on.near[data-r="1"]', plain().parentElement);
+  check('…and beside its row, the handle of the row', plainHandle && $$('[data-row-op]', plainHandle).every(found) && !line.classList.contains('at-strip'), `${$('.row-handle', plain().parentElement).className} | ${line.className}`);
+  $('.title-input', pane()).dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: 5, clientY: 5 }));
+  scroller().scrollTop = 0;
+  await wait(150);
+
+  // ----- several rows --------------------------------------------------------
+  const clickHandle = async (r, keys = {}) => {
+    const grip = $('[data-row-op="row-menu"]', await rowHandle(box(), r));
+    for (const type of ['mousedown', 'click']) grip.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, ...keys }));
+  };
+  const picked = () => $$('tr.picked', box()).map((t) => t.dataset.r).join(',');
+  const bar = () => $('.picked-bar .table-picked', wrap())?.textContent;
+  const press = (k, on = document.body) => on.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
+  const elsewhere = () => $('.title-input', pane()).dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+  const state = () => `${picked()} | ${bar()} | menu: ${!!$('.row-menu', frame())}`;
+  await clickHandle(2, { metaKey: true });
+  check('⌘ and a click on a handle picks the row, with no menu', await until(() => picked() === '2' && bar() === '1 row selected' && !$('.row-menu', frame()) && !$('.backdrop')), state());
+  await clickHandle(4, { shiftKey: true });
+  check('⇧ and a click picks the rows up to that one', await until(() => picked() === '2,3,4' && bar() === '3 rows selected' && !$('.row-menu', frame())), state());
+  await clickHandle(6, { metaKey: true });
+  check('⌘ and a click adds one more row', await until(() => picked() === '2,3,4,6' && bar() === '4 rows selected'), state());
+  await clickHandle(3, { metaKey: true });
+  check('…and lets a picked row go', await until(() => picked() === '2,4,6' && bar() === '3 rows selected'), state());
+  await wait(150);
+  const barBox = $('.picked-bar', wrap());
+  const del = $('[data-picked="delete"]', barBox);
+  const delHit = del && document.elementFromPoint(rect(del).left + rect(del).width / 2, rect(del).top + rect(del).height / 2);
+  check('A small bar over the corner of the table says how many, with Delete', del && barBox.contains(delHit) && rect(barBox).bottom <= rect(box()).top + 1 && Math.abs(rect(barBox).left - rect(box()).left) < 3 && rect(barBox).top >= rect(scroller()).top, barBox && `${Math.round(rect(barBox).left)},${Math.round(rect(barBox).top)}-${Math.round(rect(barBox).bottom)}; table at ${Math.round(rect(box()).left)},${Math.round(rect(box()).top)}; under the pointer: ${delHit?.className}`);
+  snap('pick-rows');
+  // A long table scrolled up, its top out of sight: the bar stays in sight.
+  const scrolledBy = rect(tr(4)).top - rect(scroller()).top - 10;
+  scroller().scrollTop += scrolledBy;
+  await wait(250);
+  const stuck = rect(barBox);
+  const stuckHit = document.elementFromPoint(rect(del).left + rect(del).width / 2, rect(del).top + rect(del).height / 2);
+  check('…and it stays in sight when the top of the table is scrolled out of sight', rect(box()).top < rect(scroller()).top - 50 && stuck.top >= rect(scroller()).top && stuck.top < rect(scroller()).top + 20 && barBox.contains(stuckHit), `bar at ${Math.round(stuck.top)}, page from ${Math.round(rect(scroller()).top)}, table from ${Math.round(rect(box()).top)}; under the pointer: ${stuckHit?.className}`);
+  scroller().scrollTop = 0;
+  await wait(150);
+  // A key typed in a box is for the box.
+  cell(1, 0).focus();
+  press('Backspace', cell(1, 0));
+  await wait(200);
+  check('With the caret in a cell, the Delete key is for the cell', names() === ALL_NAMES && picked() === '2,4,6', names());
+  cell(1, 0).blur();
+  await wait(100);
+  press('Backspace');
+  check('The Delete key takes the picked rows out', await until(() => names() === 'Alpha,Gamma,Epsilon,Eta' && picked() === '' && !$('.picked-bar', wrap())), `${names()} | ${state()}`);
+  check('…and a message says how many went', await until(() => $('.toast')?.textContent === '3 rows deleted'), $('.toast')?.textContent);
+  T().command('undo');
+  check('…and one Undo brings them all back, each in its place', await until(() => names() === ALL_NAMES, 3000), names());
+  await clickHandle(1, { metaKey: true });
+  await clickHandle(2, { metaKey: true });
+  await until(() => picked() === '1,2');
+  $('[data-picked="delete"]', wrap()).click();
+  check('Delete in the bar does the same', await until(() => names() === 'Gamma,Delta,Epsilon,Zeta,Eta' && !$('.picked-bar', wrap())), names());
+  T().command('undo');
+  await until(() => names() === ALL_NAMES, 3000);
+  await clickHandle(5, { metaKey: true });
+  await clickHandle(7, { metaKey: true });
+  await until(() => picked() === '5,7');
+  await clickHandle(5);
+  menu = await until(() => $('.row-menu.anchored', frame()));
+  await wait(220);
+  got = menu ? both(whole(menu), under(menu, tr(5), rect(box()).left)) : { ok: false, detail: 'no menu' };
+  check('A click on the handle of a picked row opens the menu of them all, under that row', got.ok && $('[data-item="delete"]', menu)?.textContent.includes('Delete 2 rows') && picked() === '5,7', `${got.detail} | ${menu && $('[data-item="delete"]', menu)?.textContent} | ${picked()}`);
+  $('[data-item="delete"]', menu).click();
+  check('…and Delete there takes them all out', await until(() => names() === 'Alpha,Beta,Gamma,Delta,Zeta' && picked() === ''), names());
+  T().command('undo');
+  await until(() => names() === ALL_NAMES, 3000);
+  await clickHandle(3);
+  await until(() => $('.row-menu', frame()));
+  check('A plain click on a handle still picks that row alone and opens its menu', picked() === '3' && bar() === '1 row selected' && $('.row-menu [data-item="side"]', frame()), state());
+  await closeMenu();
+  $('[data-picked="clear"]', wrap()).click();
+  check('The cross in the bar lets the rows go', await until(() => picked() === '' && !$('.picked-bar', wrap())), state());
+  await clickHandle(2, { metaKey: true });
+  await until(() => picked() === '2');
+  press('Escape');
+  check('…and so does Escape', await until(() => picked() === ''), state());
+
+  // ----- several columns -----------------------------------------------------
+  const headOf = (c) => $(`tr.head-row > td[data-col="${c}"]`, box());
+  const headClick = (c, keys = {}, on = 'textarea.cell') => {
+    const el = $(on, headOf(c));
+    const down = new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, ...keys });
+    el.dispatchEvent(down);
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0, ...keys }));
+    return down.defaultPrevented;
+  };
+  const cols = () => $$('tr.head-row > td.col-picked', box()).map((td) => td.dataset.col).join(',');
+  const colState = () => `${cols()} | ${bar()} | menu: ${!!$('.column-menu', frame())}`;
+  const kept = headClick(3, { metaKey: true });
+  check('⌘ and a click on a heading picks its column: marked down all its cells, and no caret in the heading', (await until(() => cols() === '3' && bar() === '1 column selected')) && $$('tbody td.col-picked', box()).length === 8 && kept && document.activeElement !== $('textarea.cell', headOf(3)) && !$('.column-menu', frame()), `${colState()} | cells ${$$('tbody td.col-picked', box()).length} | press kept from the box: ${kept}`);
+  headClick(5, { metaKey: true });
+  await until(() => cols() === '3,5');
+  headClick(7, { shiftKey: true });
+  check('⇧ and a click picks the columns up to that one', await until(() => cols() === '3,5,6,7' && bar() === '4 columns selected'), colState());
+  headClick(6, { metaKey: true }, '.th-menu');
+  check('⌘ and a click lets one go (on the button of the heading too)', await until(() => cols() === '3,5,7' && bar() === '3 columns selected'), colState());
+  await wait(150);
+  snap('pick-columns');
+  headClick(5, {}, '.th-menu');
+  menu = await until(() => $('.column-menu.anchored', frame()));
+  await wait(220);
+  got = whole(menu);
+  check('The button of a picked heading opens the menu of them all, with "Delete 3 columns"', got.ok && $('[data-item="delete"]', menu)?.textContent.includes('Delete 3 columns') && !$('[data-item="type"]', menu) && cols() === '3,5,7', `${got.detail} | ${menu?.textContent}`);
+  snap('pick-columns-menu');
+  $('[data-item="delete"]', menu).click();
+  check('…which takes them all out', await until(() => heads() === 'Name,Side,Notes,Setup,P2,P4,P5' && cols() === '' && !$('.picked-bar', wrap())), `${heads()} | ${colState()}`);
+  T().command('undo');
+  check('…and one Undo brings them all back, with what was in them', await until(() => heads() === ALL_HEADS && cell(1, 3)?.value === '1' && cell(2, 5)?.value === '21' && cell(7, 7)?.value === '73', 3000), `${heads()} | ${cell(1, 3)?.value},${cell(2, 5)?.value},${cell(7, 7)?.value}`);
+  headClick(8, { metaKey: true });
+  headClick(9, { shiftKey: true });
+  await until(() => cols() === '8,9');
+  press('Delete');
+  check('The Delete key takes the picked columns out', await until(() => heads() === 'Name,Side,Notes,Qty,Setup,P1,P2,P3' && cols() === '' && $('.toast')?.textContent === '2 columns deleted'), `${heads()} | ${colState()} | ${$('.toast')?.textContent}`);
+  T().command('undo');
+  check('…and one Undo brings them back', await until(() => heads() === ALL_HEADS && cell(3, 9)?.value === '35', 3000), heads());
+  headClick(4, { metaKey: true });
+  headClick(8, { metaKey: true });
+  await until(() => cols() === '4,8');
+  headClick(8, {}, '.th-menu');
+  menu = await until(() => $('.column-menu [data-item="hide"]', frame()));
+  menu?.click();
+  check('The menu of picked columns hides them all too', await until(() => heads() === 'Name,Side,Notes,Qty,P1,P2,P3,P5' && cols() === ''), heads());
+  T().command('undo');
+  check('…and Undo shows them again', await until(() => heads() === ALL_HEADS, 3000), heads());
+  headClick(4, { metaKey: true });
+  await until(() => cols() === '4');
+  headClick(6, {}, '.th-menu');
+  menu = await until(() => $('.column-menu.anchored', frame()));
+  check('The button of another heading lets the picked columns go and opens its own menu', menu && $('[data-item="type"]', menu) && $('[data-item="delete"]', menu)?.textContent.trim() === 'Delete' && (await until(() => cols() === '')), `${colState()} | ${menu && $('[data-item="delete"]', menu)?.textContent}`);
+  await closeMenu();
+  headClick(4, { metaKey: true });
+  await until(() => cols() === '4');
+  elsewhere();
+  check('A press elsewhere lets the columns go', await until(() => cols() === '' && !$('.picked-bar', wrap())), colState());
+  const name = $('textarea.cell', headOf(2));
+  name.focus();
+  const typing = headClick(2, { shiftKey: true });
+  await wait(200);
+  check('⇧ and a click in the heading that has the caret is for its words, not for columns', cols() === '' && !typing, colState());
+  name.blur();
+  headClick(3, { metaKey: true });
+  await until(() => cols() === '3');
+  await clickHandle(2, { metaKey: true });
+  check('Rows or columns are picked, not both', await until(() => picked() === '2' && cols() === '' && bar() === '1 row selected'), `${picked()} / ${colState()}`);
+  elsewhere();
+  await until(() => picked() === '');
+
+  // ----- the list of a value at the top of a row's page -------------------------
+  $('tr[data-r="1"] .row-open', box()).click();
+  const side = await until(() => shownPane('Alpha'), 4000);
+  await wait(400);
+  const value = side && $('.row-values .cell.pick[data-c="4"]', side);
+  value?.click();
+  list = await until(() => $('.choice-picker.anchored', side));
+  await wait(250);
+  const l = list && rect(list);
+  const s = side && rect($('.scroller', side));
+  const option = list && $('.pick-row', list);
+  const optionHit = option && document.elementFromPoint(rect(option).left + rect(option).width / 2, rect(option).top + rect(option).height / 2);
+  check('A value at the top of a row\'s page opens one list, at the value, not one more in the table', $$('.choice-picker').length === 1 && !$('.choice-picker', frame()), `${$$('.choice-picker').length} lists`);
+  check('The list of a value at the top of a row\'s page is whole, in its pane and in the window', l && l.left >= s.left - 0.5 && l.right <= Math.min(s.right, innerWidth) + 0.5 && l.top >= s.top - 0.5 && l.bottom <= Math.min(s.bottom, innerHeight) + 0.5 && option.contains(optionHit) && Math.abs(l.top - (rect(value.closest('.value-cell')).bottom + 4)) < 3, l && `${[l.left, l.top, l.right, l.bottom].map(Math.round).join(',')} in pane ${[s.left, s.top, s.right, s.bottom].map(Math.round).join(',')}; value ends at ${Math.round(rect(value).bottom)}`);
+  snap('pick-row-page-choice');
+  await closeMenu();
+  $('[data-peek="close"]', shownPane('Alpha'))?.click();
+  await until(() => $$('.pane').filter((p) => p.offsetParent).length === 1);
 });
 
 await run('Choices like Notion', async () => {
@@ -2662,7 +3259,7 @@ await run('The mock pages', async () => {
   check('The name column takes the room that is left, and five columns need no scrolling', widths[0] > widths[1] * 1.6 && box().scrollWidth <= box().clientWidth + 1, widths.join(','));
   snap('mock-table');
   $('[data-row-op="row-menu"]', await rowHandle(box(), 4)).click();
-  await until(() => $('.row-menu', box()));
+  await until(() => $('.row-menu', box().parentElement));
   await wait(200);
   snap('mock-row-menu');
   await closeMenu();
@@ -3321,7 +3918,7 @@ await run('Links between notes', async () => {
   check('"@" and the start of a name lists the pages that fit', await until(() => menu() && names().join('|') === 'Link Target', 3000), names().join('|'));
   check('The page itself is not in the list', !names().includes('Link Source'));
   key(first, 'Enter');
-  const link = await until(() => $('a[href^="notion2://page/"]', first), 3000);
+  const link = await until(() => $('a[href^="rune://page/"]', first), 3000);
   check('Return puts a link to the page in place of what was typed', link && link.textContent === 'Link Target' && text(first).startsWith('See Link Target') && !text(first).includes('@') && !menu(), text(first));
   check('The link looks like a tag, not like a web address', link && getComputedStyle(link).textDecorationLine === 'none' && getComputedStyle(link).backgroundColor !== 'rgba(0, 0, 0, 0)');
   check('Typing goes on after the link', document.activeElement === first && T().selIn(first)?.start === text(first).length, `${T().selIn(first)?.start} of ${text(first).length}`);
@@ -3343,8 +3940,34 @@ await run('Links between notes', async () => {
   const fresh = await until(() => $('.page-links [data-link-new]'), 3000);
   check('"[[" and a name that no page has offers a new page of that name', fresh && /New page “Fresh Idea”/.test(fresh.textContent), fresh?.textContent);
   key(third, 'Enter');
-  const made = await until(() => $('a[href^="notion2://page/"]', third), 3000);
+  const made = await until(() => $('a[href^="rune://page/"]', third), 3000);
   check('Return makes the page inside this one and links it', made && made.textContent === 'Fresh Idea' && (await until(() => treeItem('Fresh Idea'), 3000)) && shownPane('Link Source'), made?.textContent);
+
+  // A page's copied link (Copy link), pasted: on an empty line, the page's own
+  // line; in words, a link with the page's name.
+  {
+    const target = treeItem('Link Target')?.dataset.page;
+    const paste = (el, text) => {
+      const data = new DataTransfer();
+      data.setData('text/plain', text);
+      el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+    };
+    third.focus();
+    T().setSel(third, third.textContent.replace(/​/g, '').length);
+    key(third, 'Enter');
+    const empty = await until(() => {
+      const a = document.activeElement;
+      return a?.classList.contains('blk') && a !== third && a.textContent.replace(/​/g, '') === '' && a;
+    }, 3000);
+    paste(empty, `rune://page/${target}`);
+    const rows = () => $$('.block-row', pane('Link Source'));
+    check('A copied page link pasted on an empty line is the page’s own line, with its name', await until(() => rows().some((r) => r.classList.contains('kind-page') && r.textContent.includes('Link Target')), 3000), rows().map((r) => r.className.match(/kind-\w+/)?.[0]).join('|'));
+    const words = await until(() => document.activeElement?.classList.contains('blk') && document.activeElement, 3000);
+    typeIn(words, 'Also see ');
+    await wait(100);
+    paste(words, `notion2://page/${target}`);
+    check('…and pasted in words, a link with the page’s name (an old link too)', await until(() => $$('a[href^="rune://page/"]', words).some((a) => a.textContent === 'Link Target'), 3000), words.innerHTML);
+  }
 
   // The page that is linked shows what links to it.
   link.click();
@@ -3362,9 +3985,9 @@ await run('Links between notes', async () => {
   await until(() => treeItem('Link Goal'), 3000);
   back.click();
   await until(() => pane('Link Source'), 3000);
-  const again = await until(() => $$('a[href^="notion2://page/"]', pane('Link Source')).find((a) => a.textContent === 'Link Goal'), 3000);
+  const again = await until(() => $$('a[href^="rune://page/"]', pane('Link Source')).find((a) => a.textContent === 'Link Goal'), 3000);
   check('From there, a click goes back to the page with the link', pane('Link Source'));
-  check('The link has the page’s new name', again, $$('a[href^="notion2://page/"]', pane('Link Source')).map((a) => a.textContent).join('|'));
+  check('The link has the page’s new name', again, $$('a[href^="rune://page/"]', pane('Link Source')).map((a) => a.textContent).join('|'));
   check('A page with no links to it shows no such line', !$('.backlinks', pane('Link Source')));
   snap('page-link');
 });
@@ -3785,10 +4408,8 @@ await run('Speak to edit', async () => {
     const m = await until(() => $('.page-menu'));
     return $$('.menu-item', m).map((i) => i.querySelector(':scope > span:not(.menu-icon):not(.menu-shortcut)')?.textContent);
   };
-  check('The page menu holds only what belongs to this page', (await items()).join(', ') === 'Copy link, Copy for Aven, Move to…, Page history, Move to Trash', (await (async () => $$('.page-menu .menu-item').map((i) => i.textContent).join(', '))()));
-  $('#send-to-aven').click();
-  check('The page can be given to a chat in Aven: the note names the live page', await until(() => /^From my Rune note “Edit by voice” \(page id [^;]+; the notion2 tools can read and change the live page\):$/.test(document.body.dataset.sentToAven || '')), document.body.dataset.sentToAven);
-  check('It says what to do next, and the menu closes', await until(() => $('.toast')?.textContent === 'Copied. Paste it in the Aven chat (⌘V)') && !$('.page-menu'), $('.toast')?.textContent);
+  check('The page menu holds only what belongs to this page', (await items()).join(', ') === 'Copy link, Move to…, Page history, Move to Trash', (await (async () => $$('.page-menu .menu-item').map((i) => i.textContent).join(', '))()));
+  check('The page menu has no item for Aven', !$('#send-to-aven'));
   key(document.body, 'Escape');
   T().command('read_aloud');
   const stop = await menu('Stop reading');
@@ -4997,12 +5618,12 @@ await run('Dates on to-dos and the day of the calendar', async () => {
     const list = await until(() => $('.slash-menu.page-links'), 3000);
     check('Beside the day, "@" and a name lists the pages that fit', list && $$('.page-links .menu-item .link-title').map((t) => t.textContent).join('|') === 'Website plan', $$('.page-links .menu-item .link-title').map((t) => t.textContent).join('|'));
     key(second, 'Enter');
-    const made = await until(() => $('a[href^="notion2://page/"]', second), 3000);
+    const made = await until(() => $('a[href^="rune://page/"]', second), 3000);
     check('…and Return puts the link in place of what was typed', made && made.textContent === 'Website plan' && bare(second).startsWith('See Website plan') && !bare(second).includes('@') && !$('.slash-menu.page-links') && document.activeElement === second, bare(second));
     T().command('undo');
-    check('Undo there takes the link away again', await until(() => !$('a[href^="notion2://page/"]', page), 3000), $$('.blk', page).map((b) => bare(b)).join('|'));
+    check('Undo there takes the link away again', await until(() => !$('a[href^="rune://page/"]', page), 3000), $$('.blk', page).map((b) => bare(b)).join('|'));
     T().command('redo');
-    check('…and Redo brings it back', await until(() => $('.day-notes-page a[href^="notion2://page/"]')?.textContent === 'Website plan', 3000));
+    check('…and Redo brings it back', await until(() => $('.day-notes-page a[href^="rune://page/"]')?.textContent === 'Website plan', 3000));
     delete document.body.dataset.copied;
     T().command('copy_markdown');
     check('"Copy as Markdown" copies the notes beside the day', await until(() => (document.body.dataset.copied || '').includes('Two versions of the price table'), 3000) && document.body.dataset.copied.includes('Website plan'), JSON.stringify(document.body.dataset.copied));
@@ -5205,7 +5826,7 @@ await run('The graph of pages', async () => {
   typeIn(first, 'See @Graph B');
   await until(() => $('.slash-menu.page-links'), 3000);
   key(first, 'Enter');
-  await until(() => $('a[href^="notion2://page/"]', first), 3000);
+  await until(() => $('a[href^="rune://page/"]', first), 3000);
   await oneTab();
 
   const tile = $$('.tile').find((t) => t.title.startsWith('Graph'));
@@ -5584,6 +6205,24 @@ await run('Drag an event in the calendar', async () => {
   check('In the month, an event is carried to the next day the same way', await until(() => inMonth()?.closest('.cal-day')?.dataset.day === target.dataset.day && target.dataset.day !== fromDay, 3000), `${fromDay} to ${inMonth()?.closest('.cal-day')?.dataset.day}`);
   $$('.cal-toolbar .segmented button').find((b) => b.textContent === 'Week').click();
   await until(() => $('.cal-week:not(.one-day)'));
+
+  // ⌘C with the pointer on an event, ⌘V with the pointer on another time: a copy there.
+  {
+    const named = () => $$('.cal-event[data-event]').filter((e) => e.querySelector('.ev-title')?.textContent === 'Move me');
+    await until(() => named().length === 1, 3000);
+    const one = named()[0];
+    const r = one.getBoundingClientRect();
+    window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: r.left + r.width / 2, clientY: r.top + 6 }));
+    key(document.body, 'c', { metaKey: true });
+    check('⌘C with the pointer on an event copies it', await until(() => /Copied “Move me”/.test($('.toast')?.textContent || ''), 3000), $('.toast')?.textContent);
+    const target = cols()[5].getBoundingClientRect();
+    window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: target.left + 10, clientY: target.top + 14 * 48 + 3 }));
+    key(document.body, 'v', { metaKey: true });
+    const pasted = () => named().find((e) => e !== one && e.closest('.cal-col') === cols()[5]);
+    check('⌘V with the pointer on another time puts a copy there, as long as the first', await until(() => named().length === 2 && pasted() && parseFloat(pasted().style.top) === 14 * 48 && pasted().style.height === one.style.height, 3000), `${named().length} | ${pasted()?.style.top} ${pasted()?.style.height} / ${one.style.height}`);
+    check('The first stays where it was', one.isConnected && one.closest('.cal-col') !== cols()[5]);
+    key(document.body, 'Escape');
+  }
 });
 
 await run('Join a meeting from its event', async () => {

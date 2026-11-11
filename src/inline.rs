@@ -534,18 +534,37 @@ pub fn link(text: &str, url: &str) -> String {
     to_md(&[Run { text: text.to_string(), marks: Marks::default(), link: Some(url.to_string()) }])
 }
 
+/// The address of a page in a link: `rune://page/<id>`. Notes written
+/// before the name Rune link with `notion2://page/<id>`: both are read,
+/// and new links are written with the first.
+pub const PAGE_URL: &str = "rune://page/";
+pub const OLD_PAGE_URL: &str = "notion2://page/";
+/// The address of a picture or a drawing in a page's Markdown (both read).
+pub const BLOCK_URL: &str = "rune://block/";
+pub const OLD_BLOCK_URL: &str = "notion2://block/";
+
+/// The link to a page.
+pub fn page_url(id: &str) -> String {
+    format!("{PAGE_URL}{id}")
+}
+
+/// The page a link is to, in either form.
+pub fn page_id_of(url: &str) -> Option<&str> {
+    let url = url.trim();
+    url.strip_prefix(PAGE_URL).or_else(|| url.strip_prefix(OLD_PAGE_URL)).map(|id| id.trim_end_matches('/')).filter(|id| !id.is_empty())
+}
+
 /// The pages that stored Markdown links to, by id (in the order of the text).
 pub fn page_links(md: &str) -> Vec<String> {
-    const PAGE: &str = "notion2://page/";
-    if !md.contains(PAGE) {
+    if !md.contains(PAGE_URL) && !md.contains(OLD_PAGE_URL) {
         return Vec::new();
     }
-    parse(md)
-        .iter()
-        .filter_map(|r| r.link.as_deref()?.strip_prefix(PAGE))
-        .map(|id| id.trim_end_matches('/').to_string())
-        .filter(|id| !id.is_empty())
-        .collect()
+    parse(md).iter().filter_map(|r| page_id_of(r.link.as_deref()?)).map(str::to_string).collect()
+}
+
+/// Whether stored Markdown has a link to a page, in either form.
+pub fn links_to_page(md: &str, id: &str) -> bool {
+    links_to(md, &page_url(id)) || links_to(md, &format!("{OLD_PAGE_URL}{id}"))
 }
 
 /// Whether stored Markdown has a link to this address.
@@ -638,7 +657,7 @@ fn html_escape(s: &str) -> String {
 /// Links the editor may open: the web, mail, and this app's own page links.
 pub fn safe_url(url: &str) -> bool {
     let lower = url.trim().to_ascii_lowercase();
-    ["http://", "https://", "mailto:", "notion2://page/"].iter().any(|p| lower.starts_with(p))
+    ["http://", "https://", "mailto:", PAGE_URL, OLD_PAGE_URL].iter().any(|p| lower.starts_with(p))
 }
 
 fn run_html(r: &Run) -> String {
@@ -736,6 +755,18 @@ pub fn to_html(kind: BlockKind, text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn page_links_are_read_in_both_forms_and_written_in_the_new_one() {
+        assert_eq!(super::page_url("abc"), "rune://page/abc");
+        assert_eq!(super::page_id_of("rune://page/abc/"), Some("abc"));
+        assert_eq!(super::page_id_of("notion2://page/abc"), Some("abc"));
+        assert_eq!(super::page_id_of("https://example.com"), None);
+        let md = format!("{} and {}", super::link("New", "rune://page/n1"), super::link("Old", "notion2://page/o1"));
+        assert_eq!(super::page_links(&md), ["n1", "o1"]);
+        assert!(super::links_to_page(&md, "o1") && super::links_to_page(&md, "n1") && !super::links_to_page(&md, "x"));
+        assert!(super::safe_url("rune://page/n1") && super::safe_url("notion2://page/o1"));
+    }
+
     use super::*;
 
     #[test]
