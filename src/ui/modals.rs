@@ -38,6 +38,42 @@ fn snippet_around(text: &str, query_lower: &str) -> Option<String> {
     Some(s)
 }
 
+/// How well a page fits what was typed in search, and the line of it to
+/// show. Every word must be in the page (its name or its text), in any
+/// order. 0: the name starts with what was typed; 1: the name holds it;
+/// 2: the name holds every word; 3: a line holds it as typed; 4: the words
+/// are spread over the page. `typed`, and `name`, in small letters.
+fn search_fit(typed: &str, name: &str, lines: &[String]) -> Option<(u8, Option<String>)> {
+    let words: Vec<&str> = typed.split_whitespace().collect();
+    if words.is_empty() {
+        return None;
+    }
+    let lower: Vec<String> = lines.iter().map(|l| l.to_lowercase()).collect();
+    if !words.iter().all(|w| name.contains(w) || lower.iter().any(|l| l.contains(w))) {
+        return None;
+    }
+    // The line to show: one with the words as typed, or else the line with the most of them.
+    let whole = lines.iter().find_map(|l| snippet_around(l, typed));
+    let shown = whole.clone().or_else(|| {
+        let count = |l: &String| words.iter().filter(|w| l.contains(**w)).count();
+        let best = (0..lower.len()).max_by_key(|&i| (count(&lower[i]), std::cmp::Reverse(i))).filter(|&i| count(&lower[i]) > 0)?;
+        let word = words.iter().find(|w| lower[best].contains(**w))?;
+        snippet_around(&lines[best], word)
+    });
+    let rank = if name.starts_with(typed) {
+        0
+    } else if name.contains(typed) {
+        1
+    } else if words.iter().all(|w| name.contains(w)) {
+        2
+    } else if whole.is_some() {
+        3
+    } else {
+        4
+    };
+    Some((rank, shown))
+}
+
 #[component]
 pub fn QuickFind() -> Element {
     let state = use_context::<AppState>();
@@ -50,7 +86,8 @@ pub fn QuickFind() -> Element {
     let pages = state.pages.read();
     let blocks = state.blocks.read();
     let path_of = |p: &Page| ancestors(&pages, &p.id).iter().map(|a| a.display_title().to_string()).collect::<Vec<_>>().join(" / ");
-    let mut hits: Vec<(u8, Hit)> = Vec::new();
+    // (how well it fits, when it was last changed, the hit)
+    let mut hits: Vec<(u8, i64, Hit)> = Vec::new();
     if q.is_empty() {
         let recent = state.ui.read().recent.clone();
         let mut ordered: Vec<&Page> = recent.iter().filter_map(|id| pages.get(id)).filter(|p| !p.trashed && p.space_id == space).collect();
@@ -58,23 +95,22 @@ pub fn QuickFind() -> Element {
         rest.sort_by_key(|p| std::cmp::Reverse(p.updated_at));
         ordered.extend(rest);
         for p in ordered.into_iter().take(30) {
-            hits.push((0, Hit { id: p.id.clone(), icon: p.display_icon().into(), title: p.display_title().into(), snippet: None, path: path_of(p) }));
+            hits.push((0, 0, Hit { id: p.id.clone(), icon: p.display_icon().into(), title: p.display_title().into(), snippet: None, path: path_of(p) }));
         }
     } else {
         for p in pages.values().filter(|p| !p.trashed && p.space_id == space) {
-            let title_match = p.display_title().to_lowercase().contains(&q);
-            let body = blocks.get(&p.id).and_then(|bs| bs.iter().find_map(|b| snippet_around(&b.plain_text(), &q)));
-            if title_match || body.is_some() {
-                let rank = if p.display_title().to_lowercase().starts_with(&q) { 0 } else if title_match { 1 } else { 2 };
-                hits.push((rank, Hit { id: p.id.clone(), icon: p.display_icon().into(), title: p.display_title().into(), snippet: body, path: path_of(p) }));
+            let lines: Vec<String> = blocks.get(&p.id).map(|bs| bs.iter().map(|b| b.plain_text()).collect()).unwrap_or_default();
+            if let Some((rank, snippet)) = search_fit(&q, &p.display_title().to_lowercase(), &lines) {
+                hits.push((rank, p.updated_at, Hit { id: p.id.clone(), icon: p.display_icon().into(), title: p.display_title().into(), snippet, path: path_of(p) }));
             }
         }
-        hits.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.title.to_lowercase().cmp(&b.1.title.to_lowercase())));
+        // The best fit first; among equal ones, the page changed last.
+        hits.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)).then(a.2.title.to_lowercase().cmp(&b.2.title.to_lowercase())));
         hits.truncate(30);
     }
     drop(blocks);
     drop(pages);
-    let hits: Vec<Hit> = hits.into_iter().map(|h| h.1).collect();
+    let hits: Vec<Hit> = hits.into_iter().map(|h| h.2).collect();
     (q.is_empty(), hits)
     });
     let (no_query, hits) = found();
@@ -221,7 +257,17 @@ impl Section {
 #[component]
 pub fn SettingsView() -> Element {
     let state = use_context::<AppState>();
-    let mut section = use_signal(|| Section::Appearance);
+    // Something can send the person to one part (the AI box, with no AI tool).
+    let mut first = state.settings_first;
+    let mut section = use_signal(|| {
+        let wanted = first.peek().and_then(|name| Section::ALL.into_iter().find(|s| s.label() == name));
+        wanted.unwrap_or(Section::Appearance)
+    });
+    use_effect(move || {
+        if first.peek().is_some() {
+            first.set(None);
+        }
+    });
     let current = section();
     rsx! {
         div { class: "settings-view", role: "dialog", "aria-label": "Settings",
@@ -492,6 +538,7 @@ fn SpaceSettings() -> Element {
 
 #[component]
 fn AiSettings() -> Element {
+    let app = use_context::<AppState>();
     let mut test = use_signal(|| None::<(bool, String)>);
     let mut testing = use_signal(|| false);
     let mut chosen = use_signal(|| store::setting(ai::PROVIDER_SETTING).and_then(|s| Provider::from_id(&s)));
@@ -499,7 +546,10 @@ fn AiSettings() -> Element {
     // Look for installed AI tools off the UI thread; "Look again" re-runs it.
     let tools = use_resource(move || async move {
         let refresh = lookups() > 0;
-        ai::local::installed_async(refresh || ai::local::installed_cached().is_none()).await
+        let found = ai::local::installed_async(refresh || ai::local::installed_cached().is_none()).await;
+        // A tool that was connected a moment ago: the AI parts show at once.
+        app.show_ai_state();
+        found
     });
     let found: Option<Vec<Installed>> = tools.read().clone();
     let looking = found.is_none();
@@ -544,6 +594,7 @@ fn AiSettings() -> Element {
             let mut outcome = None;
             while let Some(event) = rx.next().await {
                 match event {
+                    AiEvent::Step(..) => {}
                     AiEvent::Delta(t) => reply.push_str(&t),
                     AiEvent::Done => {
                         outcome = Some((true, format!("{label} replied: “{}”", reply.trim().chars().take(160).collect::<String>())));
@@ -583,6 +634,7 @@ fn AiSettings() -> Element {
                         onclick: move |_| {
                             store::set_setting(ai::PROVIDER_SETTING, choice.map(|p| p.id()).unwrap_or(""));
                             chosen.set(choice);
+                            app.show_ai_state();
                             test.set(None);
                         },
                         div { class: "set-copy",
@@ -644,6 +696,9 @@ fn UpdateSettings() -> Element {
     let mut auto = use_signal(update::automatic);
     let mut source = use_signal(|| update::source().display().to_string());
     let custom = source() != update::DEFAULT_SOURCE;
+    // With no build folder on this Mac, newer versions come from the published releases.
+    let released = update::from_releases();
+    let mut online = use_signal(update::online);
     let installed = update::own_app().is_some() && update::own_build().is_some();
     let ready = state.update.read().clone();
     let status = match (&ready, installed) {
@@ -677,6 +732,29 @@ fn UpdateSettings() -> Element {
                     span { class: "knob" }
                 }
             }
+            if released {
+                Row {
+                    label: "Look for new versions",
+                    note: "Asks the Rune page on GitHub for the newest version one time a day. Nothing of yours is sent.",
+                    button {
+                        id: "update-online",
+                        class: if online() { "switch on" } else { "switch" },
+                        role: "switch",
+                        "aria-checked": "{online()}",
+                        "aria-label": "Look for new versions",
+                        onclick: move |_| {
+                            let on = !online();
+                            update::set_online(on);
+                            online.set(on);
+                        },
+                        span { class: "knob" }
+                    }
+                }
+                Row { label: "Get a version by hand", note: "The page with every version of Rune.",
+                    button { class: "secondary-btn", onclick: move |_| state.open_url(update::RELEASES_PAGE), "Open the page" }
+                }
+            }
+            if !released {
             Row { label: "Where updates come from", note: source(), tone: "mono",
                 if custom {
                     button {
@@ -705,6 +783,7 @@ fn UpdateSettings() -> Element {
                     },
                     "Choose…"
                 }
+            }
             }
         }
     }
@@ -949,6 +1028,7 @@ fn NotificationSettings() -> Element {
         crate::notify::permission().await
     });
     let mut meeting_notes = use_signal(crate::meeting::enabled);
+    let mut meeting_pad = use_signal(|| crate::store::setting("meeting_pad").as_deref() != Some("off"));
     let permission = *notif.read();
     let (text, tone) = match permission {
         None => ("Checking…", ""),
@@ -981,7 +1061,7 @@ fn NotificationSettings() -> Element {
         Group { title: "Meetings",
             Row {
                 label: "Meeting notes",
-                note: "Makes a notes page when a Teams meeting starts. Nothing is recorded.",
+                note: "Makes a notes page when a call starts: in Teams, Zoom, Webex, Slack, Discord or FaceTime, or in a browser. Nothing is recorded.",
                 button {
                     id: "meeting-notes-switch",
                     class: if meeting_notes() { "switch on" } else { "switch" },
@@ -992,6 +1072,23 @@ fn NotificationSettings() -> Element {
                         let on = !meeting_notes();
                         crate::meeting::set_enabled(on);
                         meeting_notes.set(on);
+                    },
+                    span { class: "knob" }
+                }
+            }
+            Row {
+                label: "Meeting pad",
+                note: "A small card on the screen while the meeting is on: it asks whether to listen, takes your notes, and asks where to keep them.",
+                button {
+                    id: "meeting-pad-switch",
+                    class: if meeting_pad() { "switch on" } else { "switch" },
+                    role: "switch",
+                    "aria-checked": "{meeting_pad()}",
+                    "aria-label": "Meeting pad",
+                    onclick: move |_| {
+                        let on = !meeting_pad();
+                        crate::pad::set_enabled(on);
+                        meeting_pad.set(on);
                     },
                     span { class: "knob" }
                 }
@@ -1140,59 +1237,115 @@ pub fn AskNotesModal() -> Element {
     let mut offered = use_signal(Vec::<crate::voice::Note>::new);
     // "" idle · "work" · "done" · anything else: what went wrong.
     let mut status = use_signal(String::new);
+    // With the tools of Rune (see ai::Tools): the step the AI is at, and
+    // what it changed in this run.
+    let mut step = use_signal(String::new);
+    let mut did = use_signal(Vec::<crate::mcp::Change>::new);
+    // The pages it read with the tools, by name ("Looked in Run log and Week 4").
+    let mut looked = use_signal(Vec::<String>::new);
+    let model = use_hook(ai::chosen_label);
+    // The plan for a large job that the person said yes to (the next run does the work).
+    let mut plan_ok = use_signal(|| None::<String>);
     let ask = use_callback(move |_: ()| {
         let q = question.peek().trim().to_string();
         if q.is_empty() || status.peek().as_str() == "work" {
             return;
         }
+        let tools = ai::takes_tools()
+            .then(|| ai::Tools { journal: std::env::temp_dir().join(format!("rune-ask-{}-{}.jsonl", std::process::id(), crate::model::now_ms())) });
         let notes = state.notes_for(&q);
-        if notes.is_empty() {
+        if notes.is_empty() && tools.is_none() {
             status.set("There are no pages to look in yet.".into());
             return;
         }
-        let messages = vec![
-            ai::ChatMessage::system(crate::voice::ASK_NOTES),
-            ai::ChatMessage::user(crate::voice::ask_message(&q, &notes, 24_000)),
-        ];
+        let system = match &tools {
+            Some(_) => format!(
+                "{}\n\n{}\n\nNow it is {} (local time).",
+                crate::voice::ASK_NOTES,
+                ai::ASK_NOTES_TOOLS,
+                when::local(crate::model::now_ms()).format("%Y-%m-%d %H:%M, %A")
+            ),
+            None => crate::voice::ASK_NOTES.to_string(),
+        };
+        let request = match plan_ok.peek().as_ref() {
+            Some(plan) => ai::approved(&q, plan),
+            None => q.clone(),
+        };
+        plan_ok.set(None);
+        let messages = vec![ai::ChatMessage::system(system), ai::ChatMessage::user(crate::voice::ask_message(&request, &notes, 24_000))];
+        let journal = tools.as_ref().map(|t| t.journal.clone());
         asked.set(q);
         offered.set(notes);
         reply.set(String::new());
+        step.set(String::new());
+        did.set(Vec::new());
+        looked.set(Vec::new());
         status.set("work".into());
-        let mut rx = ai::start(ai::Prefs::load(), messages);
+        let mut rx = ai::start_with(ai::Prefs::load(), messages, tools);
         spawn(async move {
             while let Some(event) = rx.next().await {
                 match event {
-                    AiEvent::Delta(text) => reply.write().push_str(&text),
-                    AiEvent::Done => {
-                        status.set("done".into());
-                        break;
+                    AiEvent::Step(tool, input) => {
+                        let label = {
+                            let pages = state.pages.peek();
+                            ai::step_label(&tool, &input, |id| pages.get(id).map(|p| p.title.clone()))
+                        };
+                        if let Some(name) = label.strip_prefix("Read “").and_then(|l| l.strip_suffix('”')) {
+                            if !looked.peek().iter().any(|n| n == name) {
+                                looked.write().push(name.to_string());
+                            }
+                        }
+                        step.set(label);
+                        // What it wrote before a step was on its way to the step, not the answer.
+                        reply.set(String::new());
+                        crate::sync::check_outside_changes();
                     }
-                    AiEvent::Error(e) => {
-                        status.set(e);
+                    AiEvent::Delta(text) => reply.write().push_str(&text),
+                    AiEvent::Done | AiEvent::Error(_) => {
+                        did.set(journal.as_deref().map(crate::mcp::read_journal).unwrap_or_default());
+                        crate::sync::check_outside_changes();
+                        match event {
+                            AiEvent::Error(e) => status.set(e),
+                            _ => status.set("done".into()),
+                        }
                         break;
                     }
                 }
             }
         });
     });
+    let did_lines = crate::mcp::describe(&did.read());
+    let with_tools = ai::takes_tools();
+    let looked_in = match looked.read().as_slice() {
+        [] => String::new(),
+        [one] => format!("Looked in {one}"),
+        [first @ .., last] => format!("Looked in {} and {last}", first.join(", ")),
+    };
+    let waiting = if step.read().is_empty() { format!("Reading {} of your pages…", offered.read().len()) } else { format!("{}…", step.read()) };
     let working = status.read().as_str() == "work";
     let done = status.read().as_str() == "done";
     let problem = if !working && !done { status.read().clone() } else { String::new() };
-    let (answer, sources) = crate::voice::split_answer(&ai::clean_reply(&reply.read()).0, &offered.read());
+    // A plan for a large job: what it will build, its steps, and "Do it".
+    let job = if done { ai::split_plan(&ai::clean_reply(&reply.read()).0) } else { None };
+    let (answer, sources) = match &job {
+        Some((about, _)) => (about.clone(), Vec::new()),
+        None => crate::voice::split_answer(&ai::clean_reply(&reply.read()).0, &offered.read()),
+    };
+    let job_steps = job.as_ref().map(|(_, steps)| steps.clone()).unwrap_or_default();
+    let job_text = job_steps.iter().map(|s| format!("- {s}")).collect::<Vec<_>>().join("\n");
     let lines = crate::markdown::to_blocks(&answer);
     let read: Vec<String> = offered.read().iter().map(|n| n.title.clone()).collect();
     let (answer_kept, sources_kept) = (answer.clone(), sources.clone());
 
     rsx! {
-        div { class: "modal-backdrop soft", onclick: move |_| state.set_modal(None),
+        div { class: "modal-backdrop soft ask-back", onclick: move |_| state.set_modal(None),
             div { class: "modal ask-notes", role: "dialog", "aria-label": "Ask your notes", onclick: move |e| e.stop_propagation(),
                 div { class: "ask-row",
-                    span { class: "ask-icon", Icon { name: "sparkles", size: 18 } }
                     input {
                         id: "ask-notes-input",
                         class: "ask-input",
                         r#type: "text",
-                        placeholder: "Ask your notes anything…",
+                        placeholder: if with_tools { "Ask your notes, or say what to do…" } else { "Ask your notes anything…" },
                         "aria-label": "Ask your notes",
                         onmounted: move |e: MountedEvent| async move {
                             let _ = e.set_focus(true).await;
@@ -1205,18 +1358,49 @@ pub fn AskNotesModal() -> Element {
                             }
                         },
                     }
-                    button { class: "icon-btn mic-btn", "data-dictate": "ask-notes-input", title: "Speak your question", "aria-label": "Speak your question", Icon { name: "mic", size: 15 } }
-                    button { class: "primary-btn", id: "ask-notes-go", disabled: working || question.read().trim().is_empty(), onclick: move |_| ask.call(()), "Ask" }
+                    if let Some((dots, name)) = model.clone() {
+                        span { class: "ask-model", title: "The model that answers (Settings, AI)",
+                            span { class: "ai-pips", "aria-hidden": "true",
+                                for i in 0..4u8 {
+                                    i { "data-on": if i < dots { "1" } else { "0" } }
+                                }
+                            }
+                            "{name}"
+                        }
+                    }
+                    button { class: "ai-round mic-btn", "data-dictate": "ask-notes-input", title: "Speak your question", "aria-label": "Speak your question", Icon { name: "mic", size: 15 } }
+                    // Round, in the ink of the text, as in the AI bar of a page.
+                    button { class: "ai-round ai-send", id: "ask-notes-go", title: "Ask", "aria-label": "Ask", disabled: working || question.read().trim().is_empty(), onclick: move |_| ask.call(()), Icon { name: "arrow-up", size: 15 } }
                 }
                 if working || done {
                     div { class: "ask-body",
                         div { class: "ask-question", "{asked}" }
+                        if !looked_in.is_empty() {
+                            div { class: "ask-looked", id: "ask-looked", Icon { name: "search", size: 13 } span { "{looked_in}" } }
+                        }
                         if lines.is_empty() && working {
-                            div { class: "ask-wait", "Reading {read.len()} of your pages…" }
+                            div { class: "ask-wait", id: "ask-step", "{waiting}" }
                         }
                         div { class: "ask-answer",
                             for b in lines {
                                 VersionBlock { key: "{b.id}", block: b }
+                            }
+                        }
+                        if !job_steps.is_empty() {
+                            div { class: "ai-plan", id: "ask-plan", role: "list", "aria-label": "What the AI will do",
+                                for step in job_steps.iter() {
+                                    div { key: "{step}", class: "ai-plan-row", role: "listitem", Icon { name: "plus", size: 14 } span { "{step}" } }
+                                }
+                            }
+                        }
+                        if !working && !did_lines.is_empty() {
+                            div { class: "ai-plan ai-did", id: "ask-did", role: "list", "aria-label": "What the AI did",
+                                for line in did_lines.iter().take(8) {
+                                    div { key: "{line}", class: "ai-plan-row", role: "listitem", Icon { name: "check", size: 14 } span { "{line}" } }
+                                }
+                                if did_lines.len() > 8 {
+                                    div { class: "ai-plan-row", role: "listitem", span { class: "ai-more", "and {did_lines.len() - 8} more" } }
+                                }
                             }
                         }
                         if done && !sources.is_empty() {
@@ -1240,15 +1424,61 @@ pub fn AskNotesModal() -> Element {
                 if !problem.is_empty() {
                     div { class: "ask-problem", "{problem}" }
                 }
+                // While it listens: a line that says so, with the time and how to stop.
+                div { class: "ask-listening", "aria-hidden": "true",
+                    i { class: "ask-dot" }
+                    span { "Listening" }
+                    span { class: "ask-clock", "data-hear-clock": "1", "0:00" }
+                    span { class: "ask-stop-hint", "Press the microphone or esc to stop" }
+                }
                 div { class: "modal-foot ask-foot",
                     span { class: "modal-foot-note",
-                        if read.is_empty() {
+                        if read.is_empty() && with_tools {
+                            "Reads and changes your notes and calendar. One Undo takes a run back."
+                        } else if read.is_empty() {
                             "The AI reads only the pages of this space that match your question."
+                        } else if done && with_tools && did_lines.is_empty() {
+                            "The AI read: {read.join(\", \")}. It changed nothing."
                         } else {
                             "The AI read: {read.join(\", \")}."
                         }
                     }
-                    if done {
+                    if !working && !done {
+                        span { class: "ask-keys", "aria-hidden": "true",
+                            span { class: "ask-key", "↵" }
+                            "Ask"
+                            span { class: "ask-key", "esc" }
+                            "Close"
+                        }
+                    }
+                    if !working && !did_lines.is_empty() {
+                        button {
+                            class: "secondary-btn",
+                            id: "ask-undo",
+                            title: "Take back all that the AI did",
+                            onclick: move |_| {
+                                let changes = did.peek().clone();
+                                did.set(Vec::new());
+                                state.take_back(&changes);
+                                state.toast("Taken back.");
+                            },
+                            "Undo"
+                        }
+                    }
+                    if done && job.is_some() {
+                        button {
+                            class: "primary-btn",
+                            id: "ask-plan-go",
+                            title: "The AI does this now (Undo takes it back)",
+                            onclick: move |_| {
+                                plan_ok.set(Some(job_text.clone()));
+                                question.set(asked.peek().clone());
+                                ask.call(());
+                            },
+                            "Do it"
+                        }
+                    }
+                    if done && did_lines.is_empty() && job.is_none() {
                         button {
                             class: "secondary-btn",
                             id: "ask-notes-save",
@@ -1555,6 +1785,7 @@ fn VersionBlock(block: Block) -> Element {
         BlockKind::Drawing => rsx! { div { class: "{class}", style: "--indent: {indent}", "Drawing" } },
         BlockKind::Image => rsx! { div { class: "{class}", style: "--indent: {indent}", "Image" } },
         BlockKind::Table => rsx! { div { class: "{class}", style: "--indent: {indent}", "Table: {block.plain_text()}" } },
+        BlockKind::Chart => rsx! { div { class: "{class}", style: "--indent: {indent}", "Chart" } },
         BlockKind::PageLink => {
             let name = block.target.as_deref().map(|t| state.page_title(t)).unwrap_or_else(|| "Page".into());
             rsx! { div { class: "{class}", style: "--indent: {indent}", "{name}" } }
@@ -1632,5 +1863,28 @@ pub fn TrashModal() -> Element {
                 p { class: "note pad", "Pages in Trash can be restored. “Delete forever” removes them from this Mac and can't be undone." }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_takes_several_words_in_any_order() {
+        let lines = vec!["Packing for Rome".to_string(), "Passport, charger and the train tickets".to_string()];
+        let fit = |typed: &str, name: &str| search_fit(typed, name, &lines);
+        // The words as typed, in the name or in a line.
+        assert_eq!(fit("trip", "trip to italy").map(|f| f.0), Some(0));
+        assert_eq!(fit("italy", "trip to italy").map(|f| f.0), Some(1));
+        assert_eq!(fit("train tickets", "trip to italy"), Some((3, Some("Passport, charger and the train tickets".to_string()))));
+        // Words in another order, and spread over the name and the text.
+        assert_eq!(fit("italy trip", "trip to italy").map(|f| f.0), Some(2));
+        let spread = fit("rome packing", "trip to italy").unwrap();
+        assert_eq!((spread.0, spread.1.as_deref()), (4, Some("Packing for Rome")));
+        assert_eq!(fit("tickets italy", "trip to italy").map(|f| f.0), Some(4));
+        // Every word must be there.
+        assert_eq!(fit("rome hotel", "trip to italy"), None);
+        assert_eq!(fit("   ", "trip to italy"), None);
     }
 }

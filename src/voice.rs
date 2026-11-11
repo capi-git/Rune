@@ -157,7 +157,7 @@ pub fn clear_recap(page: &mut Vec<Block>) {
 /// Put `items` under the heading `name` of a page: after what is there (an
 /// empty line left by the template is dropped). A page with no such heading
 /// gets one at the end.
-fn add_under(page: &mut Vec<Block>, name: &str, items: Vec<Block>) {
+pub fn add_under(page: &mut Vec<Block>, name: &str, items: Vec<Block>) {
     if items.is_empty() {
         return;
     }

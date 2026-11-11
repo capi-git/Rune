@@ -320,15 +320,26 @@ pub fn HomeView() -> Element {
     let today = crate::when::today();
     let day_start = crate::when::midnight(today);
     let day_end = crate::when::midnight(crate::when::next_day(today));
+    // Every space's events, as the calendar shows them (unless the person
+    // chose to see only the space in front).
+    let every_space = state.cal.read().all_spaces;
     let events = state.events.read();
-    let mut of_today = crate::repeat::expand(events.values().filter(|e| e.space_id == space_id), day_start, day_end);
+    let mut of_today = crate::repeat::expand(events.values().filter(|e| every_space || e.space_id == space_id), day_start, day_end);
     of_today.extend(state.mac_events(&space_id, day_start, day_end));
     let ribbon = crate::state::day_ribbon(&of_today, day_start, now);
-    let mut upcoming: Vec<crate::model::Event> = crate::repeat::expand(events.values().filter(|e| e.space_id == space_id), now, now + 14 * 24 * crate::when::HOUR);
+    let mut upcoming: Vec<crate::model::Event> = crate::repeat::expand(events.values().filter(|e| every_space || e.space_id == space_id), now, now + 14 * 24 * crate::when::HOUR);
     drop(events);
     upcoming.extend(state.mac_events(&space_id, now, now + 14 * 24 * crate::when::HOUR));
     upcoming.sort_by_key(|e| e.start);
     upcoming.truncate(5);
+    // Each with the mark of its space, as in the calendar.
+    let upcoming: Vec<(crate::model::Event, Option<crate::model::Space>)> = upcoming
+        .into_iter()
+        .map(|e| {
+            let mark = super::calendar::space_mark(&state, &e);
+            (e, mark)
+        })
+        .collect();
     let hours: Vec<String> = (ribbon.first_hour..=ribbon.last_hour).step_by(2).map(crate::when::hour_label).collect();
     let weekday = crate::when::local(now).format("%A").to_string();
     let date = crate::when::local(now).format("%B %-d").to_string();
@@ -360,7 +371,7 @@ pub fn HomeView() -> Element {
                     }
                 }
                 // One line for the day. A place with three names under each other is a little higher.
-                div { class: "day-track", "data-rows": "{ribbon.rows}", style: "height: {66 + ribbon.rows.saturating_sub(2) * 18}px;",
+                div { class: "day-track", "data-rows": "{ribbon.rows}", "data-first": "{ribbon.first_hour}", "data-last": "{ribbon.last_hour}", style: "height: {66 + ribbon.rows.saturating_sub(2) * 18}px;",
                     div { class: "day-rail" }
                     for e in ribbon.events.clone() {
                         button {
@@ -481,7 +492,7 @@ pub fn HomeView() -> Element {
                     if upcoming.is_empty() {
                         div { class: "home-empty", "Nothing in the next two weeks. Click a time in the calendar to add something." }
                     }
-                    for e in upcoming {
+                    for (e, mark) in upcoming {
                         div {
                             key: "{e.id}",
                             class: "up-row",
@@ -500,6 +511,9 @@ pub fn HomeView() -> Element {
                                         "{crate::when::day_label(crate::when::date_of(e.start))} · {crate::when::time_label(e.start)}"
                                     }
                                 }
+                            }
+                            if let Some(sp) = mark {
+                                super::calendar::SpaceMark { space: sp }
                             }
                         }
                     }
@@ -529,8 +543,6 @@ pub fn PageView(page_id: String) -> Element {
     let icon_picker = matches!(&ui.popover, Some(Popover::IconPicker { page_id: p }) if *p == page_id);
     let cover_picker = matches!(&ui.popover, Some(Popover::CoverPicker { page_id: p }) if *p == page_id);
     drop(ui);
-    let ai_anchor = state.ai.read().as_ref().filter(|s| s.page_id == page_id).map(|s| s.anchor.clone());
-    let ai_orphan = ai_anchor.as_ref().is_some_and(|a| !blocks.iter().any(|b| &b.id == a));
 
     let visible = visibility(&blocks);
     let numbers = list_numbers(&blocks);
@@ -746,15 +758,11 @@ pub fn PageView(page_id: String) -> Element {
                         slash: slash.clone().filter(|s| s.block_id == block.id),
                         menu_open: block_menu.as_deref() == Some(block.id.as_str()),
                         due_open: due_menu.as_deref() == Some(block.id.as_str()),
-                        ai_here: ai_anchor.as_deref() == Some(block.id.as_str()),
                         picked: picked.contains(&block.id),
                         number,
                         has_children: kids,
                         block,
                     }
-                }
-                if ai_orphan {
-                    AiPanel {}
                 }
             }
             // The pages that link to this one.
@@ -828,7 +836,6 @@ fn BlockRow(
     has_children: bool,
     slash: Option<SlashState>,
     menu_open: bool,
-    ai_here: bool,
     #[props(default)] due_open: bool,
     #[props(default)] picked: bool,
     #[props(!optional)] appear: Option<usize>,
@@ -839,7 +846,7 @@ fn BlockRow(
     // A free picture is at a side of the page; the lines after it run beside it.
     let free = block.floats() && crate::files::valid_name(&block.data);
     // A line that is only a YouTube link shows the video under it.
-    let video = crate::video::in_block(kind, &block.text);
+    let video = crate::video::in_block(kind, &block.text).filter(|_| block.data != crate::video::HIDDEN);
     let class = format!(
         "block-row kind-{}{}{}{}{}{}",
         kind.as_str(),
@@ -964,7 +971,8 @@ fn BlockRow(
                     BlockKind::PageLink => rsx! { PageLinkView { target: block.target.clone() } },
                     BlockKind::Drawing => rsx! { DrawingView { page_id: page_id.clone(), id: id.clone(), data: block.data.clone() } },
                     BlockKind::Image => rsx! { ImageView { page_id: page_id.clone(), id: id.clone(), name: block.data.clone(), place: block.place, caption: block.text.clone() } },
-                    BlockKind::Table => rsx! { TableView { page_id: page_id.clone(), id: id.clone(), data: block.data.clone() } },
+                    BlockKind::Table => rsx! { super::tables::TableView { page_id: page_id.clone(), id: id.clone(), data: block.data.clone() } },
+                    BlockKind::Chart => rsx! { super::charts::ChartView { page_id: page_id.clone(), id: id.clone(), data: block.data.clone() } },
                     BlockKind::Code => rsx! {
                         div { class: "code-wrap",
                             select {
@@ -996,7 +1004,7 @@ fn BlockRow(
             }
             if let Some(video) = video {
                 for v in std::iter::once(video) {
-                    VideoView { key: "{v.id}:{v.start}", id: v.id.clone(), start: v.start }
+                    VideoView { key: "{v.id}:{v.start}", id: v.id.clone(), start: v.start, page_id: page_id.clone(), block_id: id.clone() }
                 }
             }
             if menu_open {
@@ -1004,9 +1012,6 @@ fn BlockRow(
             }
             if let Some(s) = slash {
                 SlashMenu { slash: s }
-            }
-            if ai_here {
-                AiPanel {}
             }
         }
     }
@@ -1016,21 +1021,34 @@ fn BlockRow(
 /// play button. A click plays it in the small player at the corner of the
 /// window (the page itself cannot hold YouTube's player: see player.rs).
 #[component]
-fn VideoView(id: String, start: u32) -> Element {
+fn VideoView(id: String, start: u32, page_id: String, block_id: String) -> Element {
     let state = use_context::<AppState>();
     let video = crate::video::Video { id: id.clone(), start };
     let still = crate::video::thumbnail(&id);
     let style = if still.is_empty() { "background-image: none;".to_string() } else { format!("background-image: url('{still}');") };
     rsx! {
-        button {
-            class: "video-embed",
-            "data-video": "{id}",
-            style: "{style}",
-            title: "Play the video here",
-            "aria-label": "Play the video here",
-            "data-watch": "{crate::video::watch_url(&video)}",
-            onclick: move |_| state.play_video(video.clone()),
-            span { class: "video-play", Icon { name: "triangle-right", size: 22 } }
+        div { class: "video-card",
+            button {
+                class: "video-embed",
+                "data-video": "{id}",
+                style: "{style}",
+                title: "Play the video here",
+                "aria-label": "Play the video here",
+                "data-watch": "{crate::video::watch_url(&video)}",
+                onclick: {
+                    let (page, line) = (page_id.clone(), block_id.clone());
+                    move |_| state.play_video_from(video.clone(), &page, &line)
+                },
+                span { class: "video-play", Icon { name: "triangle-right", size: 22 } }
+            }
+            // The picture can go; the link stays. (The menu of the line brings it back.)
+            button {
+                class: "video-hide",
+                title: "Remove the picture. The link stays.",
+                "aria-label": "Remove the picture of the video",
+                onclick: move |_| state.show_video_under(&page_id, &block_id, false),
+                Icon { name: "close", size: 14 }
+            }
         }
     }
 }
@@ -1149,51 +1167,6 @@ fn ImageView(page_id: String, id: String, name: String, place: Place, caption: S
                         document::eval("document.activeElement && document.activeElement.blur()");
                     }
                 },
-            }
-        }
-    }
-}
-
-/// A simple table: the first row is its header. Tab goes to the next cell
-/// and Return to the cell below (a new row at the end); the small buttons
-/// above it, shown while a cell has the caret, add and take out the row or
-/// column of that cell (see the page script).
-#[component]
-fn TableView(page_id: String, id: String, data: String) -> Element {
-    let state = use_context::<AppState>();
-    let table = crate::table::Table::parse(&data);
-    rsx! {
-        div { class: "table-block", "data-table": "{id}", "data-page": "{page_id}",
-            div { class: "table-tools",
-                button { class: "ghost-btn small", "data-table-op": "add-row", title: "Add a row below this one", "Add row" }
-                button { class: "ghost-btn small", "data-table-op": "add-column", title: "Add a column after this one", "Add column" }
-                button { class: "ghost-btn small", "data-table-op": "remove-row", title: "Take this row out", "Delete row" }
-                button { class: "ghost-btn small", "data-table-op": "remove-column", title: "Take this column out", "Delete column" }
-            }
-            table {
-                tbody {
-                    for (r, row) in table.rows.iter().enumerate() {
-                        tr { key: "{r}",
-                            for (c, cell) in row.iter().enumerate() {
-                                td { key: "{c}", class: if r == 0 { "head" } else { "" },
-                                    textarea {
-                                        class: "cell",
-                                        rows: "1",
-                                        spellcheck: false,
-                                        "data-r": "{r}",
-                                        "data-c": "{c}",
-                                        "aria-label": if r == 0 { format!("Heading of column {}", c + 1) } else { format!("Row {}, column {}", r + 1, c + 1) },
-                                        value: "{cell}",
-                                        oninput: {
-                                            let (pid, bid) = (page_id.clone(), id.clone());
-                                            move |e: FormEvent| state.set_table_cell(&pid, &bid, r, c, &e.value())
-                                        },
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
             }
         }
     }
@@ -1417,9 +1390,18 @@ fn BlockMenu(page_id: String, block: Block) -> Element {
     ];
     let (p1, b1) = (page_id.clone(), id.clone());
     let (p2, b2) = (page_id.clone(), id.clone());
+    // A line whose video picture was put away can show it again.
+    let video_hidden = block.data == crate::video::HIDDEN && crate::video::in_block(block.kind, &block.text).is_some();
+    let (p3, b3) = (page_id.clone(), id.clone());
 
     rsx! {
         div { class: "popover block-menu", onclick: move |e| e.stop_propagation(),
+            if video_hidden {
+                div { class: "menu-item compact", id: "show-video", onclick: move |_| state.show_video_under(&p3, &b3, true),
+                    span { class: "menu-icon", Icon { name: "triangle-right", size: 16 } }
+                    span { "Show the video" }
+                }
+            }
             div { class: "menu-item compact danger", onclick: move |_| state.delete_block(&p1, &b1),
                 span { class: "menu-icon", Icon { name: "trash", size: 16 } }
                 span { "Delete" }
@@ -1447,7 +1429,7 @@ fn BlockMenu(page_id: String, block: Block) -> Element {
                     }
                 }
             }
-            if editable && has_text {
+            if editable && has_text && *state.ai_on.read() {
                 div { class: "menu-section", "AI" }
                 for action in ai_actions {
                     div {
@@ -1507,6 +1489,56 @@ fn IconPicker(page_id: String) -> Element {
     }
 }
 
+/// The AI at the foot of a pane: a small button that opens into a bar. What
+/// the AI answers opens above the bar, over the page (never in its text).
+#[component]
+pub fn AiDock(route: Route, duplicate: bool) -> Element {
+    let state = use_context::<AppState>();
+    // A second pane with the same page only says where the page is.
+    let page = match &route {
+        Route::Page(id) if !duplicate => Some(id.clone()),
+        _ => None,
+    };
+    // Open: a bar to type in. With an answer: a card that grows upward.
+    let (open, answer) = match (&page, state.ai.read().as_ref()) {
+        (Some(p), Some(s)) if &s.page_id == p => (true, s.status != AiStatus::Prompting),
+        _ => (false, false),
+    };
+    let class = match (open, answer) {
+        (true, true) => "ai-dock open answer",
+        (true, false) => "ai-dock open",
+        _ => "ai-dock",
+    };
+    // No AI tool is connected: nothing of the AI shows.
+    if !*state.ai_on.read() && !open {
+        return rsx! {};
+    }
+    // What the AI did here a moment ago (sub-pages made), with a way back.
+    let done = state.ai_done.read().clone().filter(|d| page.as_deref() == Some(d.page.as_str()) && !open);
+    rsx! {
+        if let Some(done) = done {
+            div { class: "ai-done", id: "ai-done", role: "status",
+                Icon { name: "check", size: 14 }
+                span { "{done.text}" }
+                button { class: "secondary-btn small", id: "ai-undo", onclick: move |_| state.ai_undo_done(), "Undo" }
+            }
+        }
+        div { class: "{class}",
+            if open {
+                AiPanel {}
+            } else {
+                button {
+                    class: "ai-dock-btn",
+                    title: "Ask AI (⌘J)",
+                    "aria-label": "Ask AI",
+                    onclick: move |_| state.ai_shortcut(),
+                    Icon { name: "sparkles", size: 15 }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 fn AiPanel() -> Element {
     let state = use_context::<AppState>();
@@ -1556,9 +1588,39 @@ fn AiPanel() -> Element {
         None => (reply, false),
     };
     let streaming = session.status == AiStatus::Streaming;
+    // A reply that changes the page can ask for sub-pages: they are named
+    // before anything is done, and the text shown is the page itself.
+    let (reply, subpages) = if revises { crate::ai::split_pages(&reply) } else { (reply, Vec::new()) };
+    let planned = !subpages.is_empty() && session.status == AiStatus::Done;
+    // A plan for a large job: what it will build, its steps, and "Do it".
+    let job = if session.status == AiStatus::Done && !revises { crate::ai::split_plan(&reply) } else { None };
+    let reply = match &job {
+        Some((about, _)) => about.clone(),
+        None => reply,
+    };
+    // What the AI did with the tools of Rune in this run (a line for each
+    // thing), and while it works, the step it is at.
+    let did = if session.status == AiStatus::Streaming { Vec::new() } else { crate::mcp::describe(&session.did) };
+    let acted = !did.is_empty();
+    let more = did.len().saturating_sub(6);
+    let working = session.steps.last().cloned().unwrap_or_else(|| if session.output.trim().is_empty() { "Thinking" } else { "Writing" }.to_string());
+    // The plan is short. The text of the pages shows when the person asks.
+    let mut show_pages = use_signal(|| false);
+    let reply = match (planned, *show_pages.read()) {
+        (true, false) => String::new(),
+        (true, true) => {
+            let mut all = reply.trim_end().to_string();
+            for (name, text) in &subpages {
+                all.push_str(&format!("\n\n— {name} —\n{}", text.trim()));
+            }
+            all
+        }
+        _ => reply,
+    };
 
     rsx! {
         div { class: if streaming { "ai-panel live" } else { "ai-panel" }, onclick: move |e| e.stop_propagation(),
+          div { class: "ai-panel-in",
             if session.status == AiStatus::Prompting {
                 // After Aven's message box: the text, and at its end the
                 // model in quiet words, the microphone and a round button to
@@ -1617,6 +1679,104 @@ fn AiPanel() -> Element {
             } else {
                 div { class: "ai-caption", "{caption}" }
             }
+            if let Some((_, steps)) = &job {
+                div { class: "ai-plan", id: "ai-plan", role: "list", "aria-label": "What the AI will do",
+                    for step in steps.iter() {
+                        div { key: "{step}", class: "ai-plan-row", role: "listitem", Icon { name: "plus", size: 14 } span { "{step}" } }
+                    }
+                }
+            }
+            if planned {
+                div { class: "ai-plan", id: "ai-plan", role: "list", "aria-label": "What the AI will do",
+                    div { class: "ai-plan-row", role: "listitem", Icon { name: "file", size: 14 } span { "Change this page" } }
+                    for (name, _) in subpages.iter() {
+                        div { key: "{name}", class: "ai-plan-row", role: "listitem", "data-subpage": "{name}", Icon { name: "plus", size: 14 } span { "New sub-page: {name}" } }
+                    }
+                    div { class: "ai-plan-row", role: "listitem", Icon { name: "link", size: 14 } span { "Link the sub-pages in this page" } }
+                }
+            }
+            if !reply.trim().is_empty() {
+                div { class: "ai-output", "{reply}" }
+            }
+            if acted {
+                div { class: "ai-plan ai-did", id: "ai-did", role: "list", "aria-label": "What the AI did",
+                    for line in did.iter().take(6) {
+                        div { key: "{line}", class: "ai-plan-row", role: "listitem", Icon { name: "check", size: 14 } span { "{line}" } }
+                    }
+                    if more > 0 {
+                        div { class: "ai-plan-row", role: "listitem", span { class: "ai-more", "and {more} more" } }
+                    }
+                }
+            }
+            if invented {
+                div { class: "ai-warning",
+                    Icon { name: "warning", size: 14 }
+                    span { "The AI tried to run commands it doesn't have, so parts of this reply may be made up. It can only see this page." }
+                }
+            }
+            match session.status.clone() {
+                AiStatus::Streaming => rsx! {
+                    div { class: "ai-status",
+                        span { class: "ai-writing", id: "ai-step", "{working}" span { class: "dots" } }
+                        button { class: "ghost-btn", onclick: move |_| state.ai_stop(), "Stop" }
+                    }
+                },
+                AiStatus::Done => rsx! {
+                    div { class: "ai-actions",
+                        if job.is_some() {
+                            button { class: "primary-btn", id: "ai-plan-go", title: "The AI does this now (one Undo takes it all back)", onclick: move |_| state.ai_do_plan(), "Do it" }
+                            button { class: "secondary-btn", id: "ai-plan-change", onclick: move |_| state.ai_change_plan(), "Change the plan" }
+                            button { class: "ghost-btn", onclick: move |_| state.ai_discard(), "Not this" }
+                        } else if planned {
+                            button { class: "primary-btn", id: "ai-replace", title: "Change the page and make the sub-pages (one Undo takes it all back)", onclick: move |_| state.ai_revise(), "Do it" }
+                            button {
+                                class: "secondary-btn",
+                                id: "ai-show-pages",
+                                onclick: move |_| {
+                                    let on = *show_pages.peek();
+                                    show_pages.set(!on);
+                                },
+                                if *show_pages.read() { "Hide the pages" } else { "Show the pages" }
+                            }
+                            button { class: "ghost-btn", onclick: move |_| state.ai_discard(), "Not this" }
+                        } else if revises {
+                            button { class: "primary-btn", id: "ai-replace", title: "Put this in place of the page (Undo brings the page back)", onclick: move |_| state.ai_revise(), "Replace" }
+                            button { class: "secondary-btn", onclick: move |_| state.ai_accept(false), "Insert below" }
+                        } else if acted {
+                            // It is done already: keep it, or take all of it back.
+                            button { class: "primary-btn", id: "ai-ok", onclick: move |_| state.ai_discard(), "Done" }
+                            button { class: "secondary-btn", id: "ai-undo-run", title: "Take back all that the AI did", onclick: move |_| state.ai_undo_run(), "Undo" }
+                        } else if rewrite {
+                            button { class: "primary-btn", onclick: move |_| state.ai_accept(true), "Replace" }
+                            button { class: "secondary-btn", onclick: move |_| state.ai_accept(false), "Insert below" }
+                        } else {
+                            button { class: "primary-btn", onclick: move |_| state.ai_accept(false), "Insert" }
+                        }
+                        if !planned && !acted && job.is_none() {
+                            button { class: "ghost-btn", onclick: move |_| state.ai_run(), "Try again" }
+                        }
+                        if !planned && job.is_none() && (!acted || revises) {
+                            button { class: "ghost-btn", onclick: move |_| state.ai_discard(), "Discard" }
+                        }
+                    }
+                },
+                AiStatus::Error(message) => rsx! {
+                    div { class: "ai-error",
+                        div { "{message}" }
+                        div { class: "ai-actions",
+                            button {
+                                class: "secondary-btn",
+                                onclick: move |_| state.set_modal(Some(crate::state::Modal::Settings)),
+                                "Open Settings"
+                            }
+                            button { class: "ghost-btn", onclick: move |_| state.ai_run(), "Try again" }
+                            button { class: "ghost-btn", onclick: move |_| state.ai_discard(), "Discard" }
+                        }
+                    }
+                },
+                AiStatus::Prompting => rsx! {},
+            }
+          }
             if *menu.read() && session.status == AiStatus::Prompting {
                 // A press anywhere else puts the menu away.
                 div { class: "ai-menu-shade", onclick: move |_| menu.set(false) }
@@ -1685,53 +1845,6 @@ fn AiPanel() -> Element {
                         }
                     }
                 }
-            }
-            if !reply.trim().is_empty() {
-                div { class: "ai-output", "{reply}" }
-            }
-            if invented {
-                div { class: "ai-warning",
-                    Icon { name: "warning", size: 14 }
-                    span { "The AI tried to run commands it doesn't have, so parts of this reply may be made up. It can only see this page." }
-                }
-            }
-            match session.status {
-                AiStatus::Streaming => rsx! {
-                    div { class: "ai-status",
-                        span { class: "ai-writing", "Writing" span { class: "dots" } }
-                        button { class: "ghost-btn", onclick: move |_| state.ai_stop(), "Stop" }
-                    }
-                },
-                AiStatus::Done => rsx! {
-                    div { class: "ai-actions",
-                        if revises {
-                            button { class: "primary-btn", id: "ai-replace", title: "Put this in place of the page (Undo brings the page back)", onclick: move |_| state.ai_revise(), "Replace" }
-                            button { class: "secondary-btn", onclick: move |_| state.ai_accept(false), "Insert below" }
-                        } else if rewrite {
-                            button { class: "primary-btn", onclick: move |_| state.ai_accept(true), "Replace" }
-                            button { class: "secondary-btn", onclick: move |_| state.ai_accept(false), "Insert below" }
-                        } else {
-                            button { class: "primary-btn", onclick: move |_| state.ai_accept(false), "Insert" }
-                        }
-                        button { class: "ghost-btn", onclick: move |_| state.ai_run(), "Try again" }
-                        button { class: "ghost-btn", onclick: move |_| state.ai_discard(), "Discard" }
-                    }
-                },
-                AiStatus::Error(message) => rsx! {
-                    div { class: "ai-error",
-                        div { "{message}" }
-                        div { class: "ai-actions",
-                            button {
-                                class: "secondary-btn",
-                                onclick: move |_| state.set_modal(Some(crate::state::Modal::Settings)),
-                                "Open Settings"
-                            }
-                            button { class: "ghost-btn", onclick: move |_| state.ai_run(), "Try again" }
-                            button { class: "ghost-btn", onclick: move |_| state.ai_discard(), "Discard" }
-                        }
-                    }
-                },
-                AiStatus::Prompting => rsx! {},
             }
         }
     }

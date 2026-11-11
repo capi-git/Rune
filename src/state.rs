@@ -291,6 +291,10 @@ pub enum Popover {
     SpaceMenu,
     /// The days to choose from for the due day of a to-do.
     Due { block_id: Id },
+    /// The menu of a table's column: its kind, its total, its unit.
+    TableColumn { block_id: Id, column: usize },
+    /// What a chart draws.
+    Chart { block_id: Id },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -379,6 +383,16 @@ pub struct AiSession {
     pub output: String,
     pub status: AiStatus,
     pub task: Option<Task>,
+    /// What the AI does with the tools of Rune, a line for each step (the
+    /// last one shows while it works).
+    pub steps: Vec<String>,
+    /// Where the tools write down what this run changes (see mcp.rs).
+    pub journal: Option<std::path::PathBuf>,
+    /// What the run changed with the tools, read when it ends.
+    pub did: Vec<crate::mcp::Change>,
+    /// The plan for a large job that the person said yes to: the next run
+    /// does the work.
+    pub plan: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -441,7 +455,8 @@ pub fn slash_items() -> Vec<SlashItem> {
         turn(BlockKind::Code, "Capture a code snippet", "code snippet ```"),
         turn(BlockKind::Divider, "Visually divide blocks", "divider hr line ---"),
         turn(BlockKind::Image, "Add a picture or a screenshot", "image picture photo screenshot png jpg"),
-        turn(BlockKind::Table, "Rows and columns of text", "table grid rows columns cells spreadsheet"),
+        turn(BlockKind::Table, "Rows and columns: dates, numbers, text", "table grid rows columns cells spreadsheet log"),
+        turn(BlockKind::Chart, "Bars, a line, a ring or days from a table", "chart graph plot bars line ring progress streak days"),
         turn(BlockKind::Drawing, "Sketch with Excalidraw", "drawing excalidraw sketch whiteboard diagram draw canvas"),
         ai(AiAction::Ask, "Ask anything about this page", "ai ask chat question"),
         ai(AiAction::Continue, "Keep writing from here", "ai continue write"),
@@ -454,9 +469,16 @@ pub fn slash_items() -> Vec<SlashItem> {
 }
 
 pub fn filter_slash(query: &str) -> Vec<SlashItem> {
+    filter_slash_for(query, ai::shown())
+}
+
+/// The rows of the "/" menu for what is typed. Its AI rows are there only
+/// with an AI tool connected (`ai_on`).
+pub fn filter_slash_for(query: &str, ai_on: bool) -> Vec<SlashItem> {
     let q = query.to_lowercase();
     slash_items()
         .into_iter()
+        .filter(|item| ai_on || !matches!(item.action, SlashAction::Ai(_)))
         .filter(|item| {
             q.is_empty()
                 || item.label.to_lowercase().contains(&q)
@@ -515,6 +537,8 @@ pub enum Bridge {
     CoverY { page: String, y: f64 },
     /// Where the frame of the video player is in the window.
     PlayerPlace { x: f64, y: f64, w: f64, h: f64 },
+    /// The person moved the video player or gave it another size.
+    PlayerDock { h: String, v: String, x: f64, y: f64, w: f64 },
     /// An event was dragged in the calendar: so many days and minutes later
     /// (or earlier), or its end so many minutes later.
     EventMove { id: String, days: i64, minutes: i64, grow: i64 },
@@ -557,6 +581,10 @@ pub enum Bridge {
 pub const SIDEBAR_DEFAULT: f64 = 256.0;
 pub const SIDEBAR_MIN: f64 = 190.0;
 pub const SIDEBAR_MAX: f64 = 320.0;
+
+// Typed tables and charts (state/tables.rs).
+mod tables;
+pub use tables::ChartSource;
 
 mod erased {
     pub trait Json {
@@ -617,6 +645,17 @@ pub struct AppState {
     /// The side the list of a space comes in from when the space changes:
     /// 1 from the right (a space after this one), -1 from the left, 0 none.
     pub space_slide: Signal<i8>,
+    /// Is an AI tool connected? Every part of the AI shows only then
+    /// (see `ai::shown`); Settings is where a person connects one.
+    pub ai_on: Signal<bool>,
+    /// What the AI did to a page last (it changed the page and made
+    /// sub-pages): shown for a moment at the foot of the page, with Undo.
+    pub ai_done: Signal<Option<AiDone>>,
+    /// The part of Settings to open first, when something sends the person
+    /// to one part of it (the name of the part, as its button says it).
+    pub settings_first: Signal<Option<&'static str>>,
+    /// Where the video player is in the window, and how wide (kept between runs).
+    pub player_dock: Signal<DockPlace>,
     /// The pages that ask which page to keep them in, each with the time
     /// from which it asks (the notes of a meeting ask when it is over). Kept
     /// between runs of the app (the "place_asks" setting).
@@ -633,6 +672,9 @@ pub struct AppState {
     /// When each page was last written to in this window. (The page's own
     /// record is not touched at every key: the sidebar would redraw.)
     pub edited: Signal<HashMap<Id, i64>>,
+    /// The pad of the meeting in progress: a card of its own on the screen,
+    /// outside this window (see pad.rs). The first window keeps it.
+    pub pad: Signal<Option<crate::pad::Pad>>,
 }
 
 /// Blocks of one page picked as a whole (Command-A a second time, or a press
@@ -669,6 +711,8 @@ pub struct Listening {
     pub latest: String,
     /// Asked to stop; the last words are being finished.
     pub stopping: bool,
+    /// It hears a video in the player (only what the Mac plays), not a meeting.
+    pub video: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -707,6 +751,10 @@ pub struct Cal {
     /// In the day view an event's notes show without its panel (time,
     /// repeat, reminder); this is whether the panel is open too.
     pub details: bool,
+    /// The calendar shows the events of every space, each marked with its
+    /// space (the default), or only those of the space in front. Kept as the
+    /// setting "cal_spaces" ("all" or "here").
+    pub all_spaces: bool,
 }
 
 /// Glass settings: how see-through the window is, whether what's behind it is
@@ -979,7 +1027,7 @@ pub fn day_ribbon(events: &[Event], day_start: i64, now: i64) -> Ribbon {
 pub fn snippet_of(blocks: &[Block], most: usize) -> String {
     let mut out = String::new();
     for b in blocks {
-        if matches!(b.kind, BlockKind::Code | BlockKind::Divider | BlockKind::Drawing | BlockKind::Image | BlockKind::Table | BlockKind::PageLink) {
+        if matches!(b.kind, BlockKind::Code | BlockKind::Divider | BlockKind::Drawing | BlockKind::Image | BlockKind::Table | BlockKind::Chart | BlockKind::PageLink) {
             continue;
         }
         let line = b.plain_text();
@@ -1148,10 +1196,81 @@ impl MacCal {
     }
 }
 
+/// Where the player is in the window, and how wide: so far from the two
+/// edges of the window it is nearest to (so it stays by its corner when the
+/// window changes size). The person moves it and gives it its size.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DockPlace {
+    /// "left" or "right": the edge `x` is from.
+    pub h: String,
+    /// "top" or "bottom": the edge `y` is from.
+    pub v: String,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+}
+
+impl Default for DockPlace {
+    fn default() -> Self {
+        DockPlace { h: "right".into(), v: "bottom".into(), x: 18.0, y: 18.0, w: 440.0 }
+    }
+}
+
+impl DockPlace {
+    pub const LEAST: f64 = 260.0;
+    pub const MOST: f64 = 1600.0;
+
+    /// The same place with values the page can use, whatever was sent.
+    pub fn tidy(self) -> DockPlace {
+        let num = |n: f64, low: f64, high: f64| if n.is_finite() { n.clamp(low, high) } else { low };
+        DockPlace {
+            h: if self.h == "left" { "left".into() } else { "right".into() },
+            v: if self.v == "top" { "top".into() } else { "bottom".into() },
+            x: num(self.x, 0.0, 6000.0).round(),
+            y: num(self.y, 0.0, 6000.0).round(),
+            w: num(self.w, Self::LEAST, Self::MOST).round(),
+        }
+    }
+
+    /// How high the player is at its width: its bar, its 16:9 frame and the room round the frame.
+    pub fn height(&self) -> f64 {
+        42.0 + (self.w - 14.0) * 9.0 / 16.0
+    }
+
+    /// Its place as styles. Every side is named each time (a side that is
+    /// not named would keep its last value), and it never leaves the window.
+    pub fn style(&self) -> String {
+        let near = |from: f64, size: f64, view: &str| format!("max(8px, min({from:.0}px, calc(100{view} - {size:.0}px - 8px)))");
+        let across = near(self.x, self.w, "vw");
+        let down = near(self.y, self.height(), "vh");
+        let (left, right) = if self.h == "left" { (across.as_str(), "auto") } else { ("auto", across.as_str()) };
+        let (top, bottom) = if self.v == "top" { (down.as_str(), "auto") } else { ("auto", down.as_str()) };
+        format!("left: {left}; right: {right}; top: {top}; bottom: {bottom}; width: min({:.0}px, calc(100vw - 16px));", self.w)
+    }
+}
+
+/// What the AI did to a page: it changed the page and made these sub-pages.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AiDone {
+    pub page: Id,
+    /// What was done, in a few words.
+    pub text: String,
+    /// The page was changed as one step of Undo, and these sub-pages were
+    /// made with it.
+    pub step: bool,
+    pub made: Vec<Id>,
+    /// What the AI changed with the tools of Rune (see mcp.rs).
+    pub changes: Vec<crate::mcp::Change>,
+    stamp: u64,
+}
+
 /// A video in the player at the corner of the window.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Playing {
     pub video: crate::video::Video,
+    /// The page and the line the video was started from (its notes go
+    /// under that line).
+    pub from: Option<(Id, Id)>,
     /// Why it cannot play here, when it cannot.
     pub problem: Option<String>,
     /// YouTube's player came up in it.
@@ -1324,6 +1443,8 @@ struct MeetingNotes {
     app: Option<&'static str>,
     /// The meeting watcher saw it start (so it will also see it end).
     noticed: bool,
+    /// Its time on the calendar, when an event was on as it started.
+    span: Option<(i64, i64)>,
 }
 
 /// A meeting that ended this recently and starts again is the same meeting,
@@ -1333,6 +1454,11 @@ const JUST_MADE_MS: i64 = 15 * when::MINUTE;
 
 thread_local! {
     static MEETING: std::cell::RefCell<Option<MeetingNotes>> = const { std::cell::RefCell::new(None) };
+    /// (For the self-test: a meeting that starts takes no event of the
+    /// calendar, whatever is on it at the hour of the run.)
+    static MEETING_ALONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The loop that lets the pad's questions go away by themselves is running.
+    static PAD_WATCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// The pages made as meeting notes (the newest few hundred), wherever they
@@ -1520,6 +1646,7 @@ impl AppState {
                 anchor: when::today(),
                 selected: None,
                 details: false,
+                all_spaces: store::setting("cal_spaces").as_deref() != Some("here"),
             }),
             update: Signal::new(None),
             reading: Signal::new(false),
@@ -1533,7 +1660,12 @@ impl AppState {
             place_now: Signal::new(None),
             cal_draft: Signal::new(None),
             space_slide: Signal::new(0),
+            settings_first: Signal::new(None),
+            ai_done: Signal::new(None),
+            ai_on: Signal::new(ai::shown()),
+            player_dock: Signal::new(store::setting("player_dock").and_then(|s| serde_json::from_str::<DockPlace>(&s).ok()).unwrap_or_default().tidy()),
             day_page: Signal::new(None),
+            pad: Signal::new(None),
         }
     }
 
@@ -1772,6 +1904,25 @@ impl AppState {
     pub fn cal_set_view(mut self, view: CalView) {
         self.cal.write().view = view;
         store::set_setting("cal_view", view.as_str());
+    }
+
+    /// Show the events of every space in the calendar (and on Home), or only
+    /// those of the space in front.
+    pub fn cal_set_all_spaces(mut self, all: bool) {
+        self.cal.write().all_spaces = all;
+        store::set_setting("cal_spaces", if all { "all" } else { "here" });
+    }
+
+    /// Move an event (a repeating one with all its repeats) to another space.
+    pub fn set_event_space(self, id: &str, space: &str) {
+        let Some(name) = self.spaces.peek().iter().find(|s| s.id == space).map(|s| s.display_name().to_string()) else { return };
+        let (series, _) = repeat::split_id(id);
+        if self.events.peek().get(series).is_some_and(|e| e.space_id == space) {
+            return;
+        }
+        let space = space.to_string();
+        self.update_event(id, move |ev| ev.space_id = space);
+        self.toast(format!("Moved to {name}"));
     }
 
     /// Previous or next month/week.
@@ -2091,7 +2242,7 @@ impl AppState {
         // meeting watcher sees it start, it makes no second page.
         if MEETING.with(|m| m.borrow().as_ref().is_none_or(|n| n.page != page)) {
             let stamp = self.blocks.peek().get(&page).and_then(|b| b.first()).map(|b| b.id.clone()).unwrap_or_default();
-            MEETING.with(|m| *m.borrow_mut() = Some(MeetingNotes { page: page.clone(), stamp, started: now_ms(), ended: None, app: None, noticed: false }));
+            MEETING.with(|m| *m.borrow_mut() = Some(MeetingNotes { page: page.clone(), stamp, started: now_ms(), ended: None, app: None, noticed: false, span: (!e.all_day).then_some((e.start, e.end)) }));
             remember_meeting_page(&page);
         }
         // In the day view the notes are at the right of the day; elsewhere the page opens.
@@ -3559,14 +3710,16 @@ impl AppState {
     /// Look for a newer build now. `say` tells the person the answer.
     pub fn check_update(mut self, say: bool) {
         spawn_forever(async move {
-            let found = crate::update::check().await;
+            // ("Check now" asks the published releases at once; by itself the app asks once a day.)
+            let (found, problem) = crate::update::check(say).await;
             if *self.update.peek() != found {
                 self.update.set(found.clone());
             }
             if say {
-                match found {
-                    Some(u) => self.toast(format!("A newer build is ready ({})", crate::update::build_label(u.build))),
-                    None => self.toast("Rune is up to date"),
+                match (found, problem) {
+                    (Some(u), _) => self.toast(format!("A newer build is ready ({})", crate::update::build_label(u.build))),
+                    (None, Some(why)) => self.notice(format!("Rune could not look for a newer version: {why}.")),
+                    (None, None) => self.toast("Rune is up to date"),
                 }
             }
         });
@@ -3589,7 +3742,19 @@ impl AppState {
     /// Tell the page script whether there is an AI to ask (it hides what
     /// needs one, and words the microphones to match).
     pub fn show_ai_state(self) {
-        document::eval(&format!("document.body.dataset.ai = '{}'", if ai::has_ai() { 1 } else { 0 }));
+        let on = ai::shown();
+        let mut ai_on = self.ai_on;
+        if *ai_on.peek() != on {
+            ai_on.set(on);
+        }
+        // Kept for the next time the app opens (only what it knows for certain).
+        if ai::local::installed_cached().is_some() && std::env::var_os("NOTION2_SELFTEST").is_none() {
+            let found = if on { "1" } else { "0" };
+            if store::setting(ai::FOUND_SETTING).as_deref() != Some(found) {
+                store::set_setting(ai::FOUND_SETTING, found);
+            }
+        }
+        document::eval(&format!("document.body.dataset.ai = '{}'", if on { 1 } else { 0 }));
     }
 
     /// Plain voice: have the Mac's Dictation type what is said into the text
@@ -3714,7 +3879,7 @@ impl AppState {
     /// that went, say) makes it a box for a new page.
     pub fn open_voice(mut self, what: VoiceFor) {
         if !ai::has_ai() {
-            return self.toast("This needs an AI tool. See Settings, AI.");
+            return;
         }
         let has_block = |page: &Id, block: &Id| self.blocks.peek().get(page).is_some_and(|bs| bs.iter().any(|b| &b.id == block));
         let ok = match &what {
@@ -3761,6 +3926,7 @@ impl AppState {
             let mut error = None;
             while let Some(event) = rx.next().await {
                 match event {
+                    AiEvent::Step(..) => {}
                     AiEvent::Delta(text) => {
                         reply.push_str(&text);
                         if now_ms() - shown_at > 200 && !voice::may_be_directives(&reply) {
@@ -3884,6 +4050,7 @@ impl AppState {
             let mut error = None;
             while let Some(event) = rx.next().await {
                 match event {
+                    AiEvent::Step(..) => {}
                     AiEvent::Delta(text) => {
                         reply.push_str(&text);
                         // The page is made when the first text for it is here.
@@ -4020,6 +4187,7 @@ impl AppState {
             let mut reply = String::new();
             while let Some(event) = rx.next().await {
                 match event {
+                    AiEvent::Step(..) => {}
                     AiEvent::Delta(text) => reply.push_str(&text),
                     AiEvent::Done => break,
                     AiEvent::Error(e) => return self.toast(format!("Couldn't change the text. {e}")),
@@ -4056,6 +4224,7 @@ impl AppState {
             let mut error = None;
             while let Some(event) = rx.next().await {
                 match event {
+                    AiEvent::Step(..) => {}
                     AiEvent::Delta(text) => reply.push_str(&text),
                     AiEvent::Done => break,
                     AiEvent::Error(e) => {
@@ -4120,12 +4289,16 @@ impl AppState {
         self.listen_offer.set(None);
         let (listener, mut heard) = match crate::listen::start(true) {
             Ok(started) => started,
-            Err(e) => return self.notice(e),
+            Err(e) => {
+                self.pad_problem(page, &e);
+                return self.notice(e);
+            }
         };
         LISTENER.with(|l| *l.borrow_mut() = Some(listener));
+        self.pad_listens(page);
         let page = page.to_string();
         let started = now_ms();
-        self.listening.set(Some(Listening { page: page.clone(), started, seconds: 0, others: false, words: 0, latest: String::new(), stopping: false }));
+        self.listening.set(Some(Listening { page: page.clone(), started, seconds: 0, others: false, words: 0, latest: String::new(), stopping: false, video: false }));
         // The clock on the "Listening" line.
         spawn_forever(async move {
             loop {
@@ -4171,7 +4344,10 @@ impl AppState {
                             self.write_transcript(&page, &mut toggle, &transcript);
                         }
                     }
-                    Heard::Note(message) => self.notice(message),
+                    Heard::Note(message) => {
+                        self.pad_problem(&page, &message);
+                        self.notice(message)
+                    }
                     Heard::Error(message) => {
                         problem = Some(message);
                         break;
@@ -4183,15 +4359,20 @@ impl AppState {
             self.write_transcript(&page, &mut toggle, &transcript);
             self.listening.set(None);
             if let Some(message) = problem {
+                self.pad_problem(&page, &message);
+                self.pad_status(&page, "", false);
                 return self.notice(message);
             }
             if transcript.words() == 0 {
+                self.pad_status(&page, "Nothing was heard, so there are no notes.", false);
                 return self.notice("Nothing was heard, so there are no notes. Check the microphone, and that Rune may record audio (System Settings, Privacy & Security).");
             }
             // The AI writes the notes; without one, the transcript is what there is.
             if !ai::has_ai() || transcript.words() < 12 {
+                self.pad_status(&page, "The transcript is in the page.", false);
                 return self.toast("The transcript is in the page");
             }
+            self.pad_status(&page, "Writing the notes…", true);
             self.toast("Writing the notes…");
             let messages = vec![
                 ai::ChatMessage::system(crate::listen::NOTES),
@@ -4202,6 +4383,7 @@ impl AppState {
             let mut error = None;
             while let Some(event) = rx.next().await {
                 match event {
+                    AiEvent::Step(..) => {}
                     AiEvent::Delta(text) => reply.push_str(&text),
                     AiEvent::Done => break,
                     AiEvent::Error(e) => {
@@ -4213,9 +4395,18 @@ impl AppState {
             let notes = markdown::to_blocks(ai::clean_reply(&reply).0.trim());
             let added = if self.pages.peek().contains_key(&page) { self.edit_blocks(&page, move |bs| voice::fill_recap(bs, notes)) } else { 0 };
             match (error, added) {
-                (Some(e), 0) => self.notice(format!("The transcript is in the page, but the AI could not write the notes. {e}")),
-                (_, 0) => self.toast("The transcript is in the page"),
-                _ => self.toast("The notes are in the page"),
+                (Some(e), 0) => {
+                    self.pad_status(&page, "The transcript is in the page. The AI could not write the notes.", false);
+                    self.notice(format!("The transcript is in the page, but the AI could not write the notes. {e}"))
+                }
+                (_, 0) => {
+                    self.pad_status(&page, "The transcript is in the page.", false);
+                    self.toast("The transcript is in the page")
+                }
+                _ => {
+                    self.pad_status(&page, "The notes are in the page.", false);
+                    self.toast("The notes are in the page")
+                }
             }
         });
     }
@@ -4234,6 +4425,7 @@ impl AppState {
         // a meeting asks where to keep it.
         if let Some(page) = self.listening.peek().as_ref().map(|l| l.page.clone()).filter(|p| meeting_page_ids().contains(p)) {
             self.ask_place(&page, now_ms());
+            self.pad_end(&page);
         }
         if let Some(l) = self.listening.write().as_mut() {
             l.stopping = true;
@@ -4452,10 +4644,12 @@ impl AppState {
         let now = now_ms();
         let space = self.ui.peek().space.clone();
         // The timed event on the calendar now, or about to start.
-        let event = {
+        let event = if MEETING_ALONE.with(std::cell::Cell::get) {
+            None
+        } else {
             let events = self.events.peek();
             let mut on = repeat::expand(
-                events.values().filter(|e| e.space_id == space && !e.all_day),
+                events.values().filter(|e| !e.all_day),
                 now - 5 * when::MINUTE,
                 now + 10 * when::MINUTE,
             );
@@ -4466,8 +4660,7 @@ impl AppState {
         };
         let plain_name = match (&event, app) {
             (Some(e), _) => e.display_title().to_string(),
-            (None, Some("Microsoft Teams")) => "Teams meeting".to_string(),
-            (None, Some(app)) => format!("{app} meeting"),
+            (None, Some(app)) => crate::meeting::call_app_named(app).map(|a| a.title.to_string()).unwrap_or_else(|| format!("{app} meeting")),
             (None, None) => "Meeting".to_string(),
         };
         // With no event on the calendar: the meeting that comes at this time
@@ -4537,6 +4730,7 @@ impl AppState {
         if let Some(home) = kept_title {
             self.toast(format!("These notes are in “{home}”, as before"));
         }
+        let span = event.as_ref().map(|e| (e.start, e.end));
         // A one-off event of the app with no notes page yet gets this one.
         if let Some(e) = event.filter(|e| e.repeat.is_none() && e.page_id.is_none() && !e.id.starts_with(crate::maccal::PREFIX)) {
             let page = id.clone();
@@ -4547,7 +4741,7 @@ impl AppState {
         if crate::listen::available() && self.listening.peek().is_none() {
             self.listen_offer.set(Some(id.clone()));
         }
-        MEETING.with(|m| *m.borrow_mut() = Some(MeetingNotes { page: id.clone(), stamp: stamp_id, started: now, ended: None, app, noticed: app.is_some() }));
+        MEETING.with(|m| *m.borrow_mut() = Some(MeetingNotes { page: id.clone(), stamp: stamp_id, started: now, ended: None, app, noticed: app.is_some(), span }));
         self.open_in_new_tab(Route::Page(id.clone()));
         self.focus(Caret::start(&note_id));
         id
@@ -4576,7 +4770,7 @@ impl AppState {
 
     /// A Teams meeting started: make its notes page and say so with a
     /// notification (the app is usually behind the meeting).
-    pub fn meeting_started(self) {
+    pub fn meeting_started(self, app: &'static str) {
         let now = now_ms();
         // The same meeting carrying on (a short gap, or notes made by hand
         // just before it): no second page.
@@ -4587,18 +4781,37 @@ impl AppState {
                 Some(end) => now - end < SAME_MEETING_MS,
                 None => now - n.started < JUST_MADE_MS,
             };
+            // Notes made by hand, or by joining from the calendar, that the
+            // watcher sees for the first time now.
+            let first_seen = same && !n.noticed;
             if same {
                 n.noticed = true;
             }
-            same.then(|| n.ended.take())
+            same.then(|| (n.ended.take(), first_seen, n.page.clone()))
         });
-        if let Some(was_ended) = carried_on {
+        if let Some((was_ended, first_seen, page)) = carried_on {
             self.restamp_meeting(was_ended);
+            // The app is behind the meeting now: its pad asks on the screen.
+            if first_seen && self.pad.peek().is_none() {
+                self.open_pad(&page);
+            }
             return;
         }
-        let id = self.make_meeting_notes(Some("Microsoft Teams"));
+        let id = self.make_meeting_notes(Some(app));
+        // The app is behind the call: its pad asks on the screen itself,
+        // and no notification is needed to say that the page is there.
+        let padded = self.open_pad(&id);
         let title = self.page_title(&id);
         spawn_forever(async move {
+            // The pad is the message. But if it cannot be seen a moment
+            // after it opened (macOS kept it off another program's full
+            // screen), the notification says that the page is there.
+            if padded {
+                ai::sleep_ms(2500).await;
+                if crate::pad::in_view() || crate::pad::inline() {
+                    return;
+                }
+            }
             let mut allowed = crate::notify::permission().await;
             if allowed == crate::notify::Permission::NotAsked {
                 allowed = crate::notify::request_permission().await;
@@ -4853,9 +5066,11 @@ impl AppState {
             // Listening to this meeting: it is over, so write the notes. (No
             // spoken recap is asked for then.)
             let page = MEETING.with(|m| m.borrow().as_ref().map(|n| n.page.clone()));
-            // The meeting is over: its page asks where to keep it.
+            // The meeting is over: its page asks where to keep it (its pad
+            // does, while that is on the screen).
             if let Some(page) = &page {
                 self.ask_place(page, now_ms());
+                self.pad_end(page);
             }
             if self.listen_offer.peek().is_some() && *self.listen_offer.peek() == page {
                 self.listen_offer.set(None);
@@ -4866,7 +5081,8 @@ impl AppState {
             }
             // Offer to take a spoken recap (the notification opens the box).
             // The AI writes it, so only when there is one.
-            if let Some(page) = MEETING.with(|m| m.borrow().as_ref().map(|n| n.page.clone())).filter(|_| ai::has_ai()) {
+            // (Not while the pad shows that the meeting is over: one message is enough.)
+            if let Some(page) = MEETING.with(|m| m.borrow().as_ref().map(|n| n.page.clone())).filter(|_| ai::has_ai() && self.pad.peek().is_none()) {
                 spawn_forever(async move {
                     if crate::notify::permission().await == crate::notify::Permission::Allowed {
                         crate::notify::show_now(&format!("recap:{page}"), "The meeting ended", "Click to speak a short recap. The AI writes the notes and action items.").await;
@@ -4874,6 +5090,269 @@ impl AppState {
                 });
             }
         }
+    }
+
+    // ----- the meeting pad (see pad.rs) -----------------------------------
+
+    /// Show the pad for the meeting whose notes page is `page`: the question
+    /// whether to listen, or, when the app cannot listen now, the small
+    /// form. Says whether a pad shows (Settings can turn it off).
+    pub fn open_pad(mut self, page: &str) -> bool {
+        use crate::pad::{Form, Pad};
+        if !crate::pad::enabled() {
+            return false;
+        }
+        let now = now_ms();
+        let can_listen = crate::listen::available() && self.listening.peek().is_none();
+        let (started, span) = MEETING.with(|m| m.borrow().as_ref().filter(|n| n.page == page).map(|n| (n.started, n.span))).unwrap_or((now, None));
+        let mut pad = Pad::new(page, if can_listen { Form::Ask } else { Form::Small }, now, span);
+        pad.started = started;
+        self.pad.set(Some(pad));
+        self.watch_pad();
+        true
+    }
+
+    /// The pad's two questions go away by themselves (see `pad::by_itself`).
+    fn watch_pad(self) {
+        use crate::pad::{ByItself, Form};
+        if PAD_WATCH.replace(true) {
+            return;
+        }
+        spawn_forever(async move {
+            loop {
+                ai::sleep_ms(400).await;
+                let Some(pad) = self.pad.peek().clone() else { break };
+                // Its page was put in the trash: there is nothing to show.
+                if !self.pages.peek().get(&pad.page).is_some_and(|p| !p.trashed) {
+                    self.close_pad();
+                    continue;
+                }
+                let asks = self.place_asks.peek().iter().any(|(p, _)| *p == pad.page);
+                let now = now_ms();
+                match crate::pad::by_itself(pad.form, pad.since, now, asks, pad.busy) {
+                    Some(ByItself::Fold) => self.change_pad(|p| p.turn(Form::Small, now)),
+                    Some(ByItself::Go) => self.close_pad(),
+                    None => {}
+                }
+            }
+            PAD_WATCH.set(false);
+        });
+    }
+
+    /// Change the pad, if there is one (nothing is drawn again when the
+    /// change changes nothing).
+    fn change_pad(mut self, change: impl FnOnce(&mut crate::pad::Pad)) {
+        let Some(mut pad) = self.pad.peek().clone() else { return };
+        let before = pad.clone();
+        change(&mut pad);
+        if pad != before {
+            self.pad.set(Some(pad));
+        }
+    }
+
+    pub fn close_pad(mut self) {
+        if self.pad.peek().is_some() {
+            self.pad.set(None);
+        }
+    }
+
+    /// A click in the pad.
+    pub fn pad_command(self, command: crate::pad::Command) {
+        use crate::pad::{Command, Form};
+        let Some(page) = self.pad.peek().as_ref().map(|p| p.page.clone()) else { return };
+        let listens = self.listening.peek().as_ref().is_some_and(|l| l.page == page);
+        let now = now_ms();
+        match command {
+            Command::Listen => {
+                self.change_pad(|p| {
+                    p.turn(Form::Open, now);
+                    p.problem.clear();
+                });
+                if self.listening.peek().is_none() {
+                    self.start_listening(&page);
+                }
+            }
+            Command::NotesOnly | Command::Open => self.change_pad(|p| p.turn(Form::Open, now)),
+            Command::Small => self.change_pad(|p| p.turn(Form::Small, now)),
+            // Never while it listens: the pad is the sign that it does.
+            Command::NotNow => {
+                if !listens {
+                    self.close_pad();
+                }
+            }
+            Command::Stop => {
+                if listens {
+                    self.stop_listening();
+                }
+            }
+            Command::Lines(lines) => self.pad_lines(&page, lines),
+            Command::OpenPage => {
+                // (A test run keeps its window where it is.)
+                if !crate::pad::inline() {
+                    let window = dioxus::desktop::window();
+                    window.set_visible(true);
+                    window.set_focus();
+                }
+                self.open_page(&page);
+            }
+            Command::Keep(home) => {
+                self.keep_page_in(&page, &home);
+                self.pad_kept(&page);
+            }
+            Command::Done => self.pad_kept(&page),
+        }
+    }
+
+    /// The question at the end is answered: the pad says where the notes
+    /// are, for a moment, and the page asks no more.
+    fn pad_kept(self, page: &str) {
+        self.place_done(page);
+        let kept = self.pages.peek().get(page).and_then(|p| p.parent_id.clone()).map(|home| self.page_title(&home)).unwrap_or_default();
+        let now = now_ms();
+        self.change_pad(|p| {
+            p.kept = kept;
+            p.turn(crate::pad::Form::Kept, now);
+        });
+    }
+
+    /// The lines typed in the pad go under "Notes" of the meeting's page.
+    fn pad_lines(self, page: &str, lines: Vec<String>) {
+        let Some(mut written) = self.pad.peek().as_ref().map(|p| p.written.clone()) else { return };
+        if !self.pages.peek().contains_key(page) {
+            return;
+        }
+        self.edit_blocks(page, |blocks| crate::pad::put_lines(blocks, &mut written, &lines));
+        let typed = lines.iter().any(|l| !l.trim().is_empty());
+        self.change_pad(|p| {
+            p.lines = lines;
+            p.written = written;
+            p.used |= typed;
+        });
+    }
+
+    /// The meeting is over, or listening was stopped: the pad asks where to
+    /// keep the notes. A pad that was not used (nothing heard, nothing
+    /// typed) just goes.
+    fn pad_end(self, page: &str) {
+        use crate::pad::Form;
+        let Some(pad) = self.pad.peek().clone().filter(|p| p.page == page) else { return };
+        if matches!(pad.form, Form::End | Form::Kept) {
+            return;
+        }
+        let listens = self.listening.peek().as_ref().is_some_and(|l| l.page == page);
+        if !pad.used && !listens {
+            return self.close_pad();
+        }
+        let now = now_ms();
+        self.change_pad(|p| {
+            p.turn(Form::End, now);
+            p.ended = Some(now);
+            if listens {
+                // The last words are being finished; then the notes are written.
+                p.status = "Finishing…".into();
+                p.busy = true;
+            } else if !p.heard && !p.lines.is_empty() {
+                p.status = "Your notes are in the page.".into();
+            }
+        });
+    }
+
+    /// The app listens for this page's pad.
+    fn pad_listens(self, page: &str) {
+        self.change_pad(|p| {
+            if p.page == page {
+                p.heard = true;
+                p.used = true;
+                p.problem.clear();
+            }
+        });
+    }
+
+    /// Why the app does not listen (or does not hear the others), for the pad.
+    fn pad_problem(self, page: &str, problem: &str) {
+        self.change_pad(|p| {
+            if p.page == page {
+                p.problem = problem.to_string();
+            }
+        });
+    }
+
+    /// What became of the notes, for the pad's last card. While `busy` the
+    /// card waits; when they are written its time starts anew.
+    fn pad_status(self, page: &str, status: &str, busy: bool) {
+        let now = now_ms();
+        self.change_pad(|p| {
+            if p.page == page {
+                p.status = status.to_string();
+                p.busy = busy;
+                if p.form == crate::pad::Form::End {
+                    p.since = now;
+                }
+            }
+        });
+    }
+
+    /// What the pad draws now (None: there is no pad, or its page is gone).
+    /// The theme and the glass colours are added by the window that hands it on.
+    pub fn pad_view(&self) -> Option<crate::pad::View> {
+        use crate::pad::{Form, Hears, Place, View};
+        let pad = self.pad.read().clone()?;
+        let (title, icon, parent) = {
+            let pages = self.pages.read();
+            let page = pages.get(&pad.page).filter(|p| !p.trashed)?;
+            (name_before_date(page.display_title()).to_string(), page.icon.clone(), page.parent_id.clone())
+        };
+        let listening = self.listening.read().clone();
+        let hears = listening.as_ref().filter(|l| l.page == pad.page).map(|l| Hears {
+            clock: crate::pad::clock(l.seconds),
+            latest: l.latest.clone(),
+            stopping: l.stopping,
+        });
+        let when = if matches!(pad.form, Form::End | Form::Kept) {
+            let minutes = ((pad.ended.unwrap_or_else(now_ms) - pad.started) as f64 / when::MINUTE as f64).round().max(1.0) as i64;
+            format!("Over · {minutes} min")
+        } else {
+            match pad.span {
+                Some((start, end)) => format!("{} – {}", when::time_label(start), when::time_label(end)),
+                None => format!("Started {}", when::time_label(pad.started)),
+            }
+        };
+        let mut view = View {
+            form: pad.form,
+            title,
+            when,
+            icon,
+            can_listen: crate::listen::available() && listening.as_ref().is_none_or(|l| l.page == pad.page),
+            has_ai: ai::has_ai(),
+            sound: crate::listen::where_speech_goes().to_string(),
+            hears,
+            lines: pad.lines.clone(),
+            status: pad.status.clone(),
+            kept: pad.kept.clone(),
+            problem: pad.problem.clone(),
+            ..View::default()
+        };
+        if pad.form == Form::End {
+            view.asks_place = self.place_asks.read().iter().any(|(p, _)| *p == pad.page);
+            view.here = parent.clone().unwrap_or_default();
+            let pages = self.pages.read();
+            if let Some(home) = parent.as_ref().and_then(|home| pages.get(home)) {
+                view.here_title = home.display_title().to_string();
+                view.here_icon = home.icon.clone();
+            }
+            if view.asks_place {
+                view.places = self
+                    .meeting_places(&pad.page)
+                    .into_iter()
+                    .map(|(id, title, depth)| Place { icon: pages.get(&id).and_then(|p| p.icon.clone()), id, title, depth })
+                    .collect();
+                drop(pages);
+                view.before = self.slot_of_page(&pad.page).0;
+            } else if !view.here_title.is_empty() {
+                view.told = format!("These notes are in “{}”, as before.", view.here_title);
+            }
+        }
+        Some(view)
     }
 
     // ----- export and import (see transfer.rs) ----------------------------
@@ -5201,6 +5680,7 @@ impl AppState {
             Bridge::TableOp { page, id, op, row, column } => self.table_op(&page, &id, &op, row, column),
             Bridge::CoverY { page, y } => self.set_cover_y(&page, y.round().clamp(0.0, 100.0) as u8),
             Bridge::PlayerPlace { x, y, w, h } => self.place_player(crate::player::Place { x, y, w, h }),
+            Bridge::PlayerDock { h, v, x, y, w } => self.set_player_dock(DockPlace { h, v, x, y, w }),
             Bridge::EventMove { id, days, minutes, grow } => self.move_event(&id, days, minutes, grow),
             Bridge::EventDraw { day, from, to } => self.draw_event(&day, from, to),
             Bridge::TodoPlan { page, block, day, minutes } => self.plan_todo(&page, &block, &day, minutes),
@@ -5335,10 +5815,16 @@ impl AppState {
     /// first (and in page order inside a page). Subscribes the caller to
     /// pages and blocks, so the list follows what is typed and ticked.
     pub fn open_todos(&self) -> Vec<OpenTodo> {
+        self.open_todos_of(false)
+    }
+
+    /// The open to-dos of the space in front, or of every space (for the
+    /// calendar, when it shows every space).
+    pub fn open_todos_of(&self, every_space: bool) -> Vec<OpenTodo> {
         let space = self.ui.read().space.clone();
         let pages = self.pages.read();
         let blocks = self.blocks.read();
-        let mut list: Vec<&Page> = pages.values().filter(|p| p.space_id == space && !p.trashed).collect();
+        let mut list: Vec<&Page> = pages.values().filter(|p| (every_space || p.space_id == space) && !p.trashed).collect();
         list.sort_by_key(|p| std::cmp::Reverse(p.updated_at));
         let mut out = Vec::new();
         for p in list {
@@ -5358,7 +5844,8 @@ impl AppState {
     /// were due before it and are not done.
     pub fn todos_due(&self, day: chrono::NaiveDate) -> Vec<OpenTodo> {
         let today = when::today();
-        self.open_todos().into_iter().filter(|t| t.due.is_some_and(|d| d == day || (day == today && d < today))).collect()
+        let every_space = self.cal.read().all_spaces;
+        self.open_todos_of(every_space).into_iter().filter(|t| t.due.is_some_and(|d| d == day || (day == today && d < today))).collect()
     }
 
     // ----- the video player ---------------------------------------------------
@@ -5389,14 +5876,173 @@ impl AppState {
                 }
             }
         });
-        self.player.set(Some(Playing { video, problem: None, ready: false }));
+        self.player.set(Some(Playing { video, from: None, problem: None, ready: false }));
         document::eval("requestAnimationFrame(()=>requestAnimationFrame(()=>window.__n2_player && window.__n2_player()))");
+    }
+
+    /// Play a video from its line in a page (the player remembers the line).
+    pub fn play_video_from(mut self, video: crate::video::Video, page: &str, block: &str) {
+        // Another video takes the player: the notes of the one before end.
+        self.stop_video_notes();
+        self.play_video(video);
+        if let Some(playing) = self.player.write().as_mut() {
+            playing.from = Some((page.to_string(), block.to_string()));
+        }
+    }
+
+    /// Write down what the video in the player says, and make notes of it.
+    /// Only what the Mac plays is heard; the microphone is not used. The
+    /// words go under the video's line in its page as they are heard, in a
+    /// closed toggle; when it stops, the AI writes the notes over them, in
+    /// an open one. With no AI tool the words are what there is.
+    pub fn take_video_notes(mut self) {
+        if self.listening.peek().is_some() {
+            return self.toast("Already listening");
+        }
+        let Some(playing) = self.player.peek().clone() else { return };
+        // The page the video's line is in; a video with no line (or a line
+        // that is gone) writes at the end of the page on screen.
+        let from = playing.from.filter(|(page, _)| self.pages.peek().get(page).is_some_and(|p| !p.trashed));
+        let (page, line) = match from {
+            Some((page, line)) => (page, Some(line)),
+            None => match self.current_page() {
+                Some(page) => (page, None),
+                None => return self.toast("Open a page first"),
+            },
+        };
+        let (listener, mut heard) = match crate::listen::start_from(crate::listen::Source::Sound) {
+            Ok(started) => started,
+            Err(e) => return self.notice(e),
+        };
+        LISTENER.with(|l| *l.borrow_mut() = Some(listener));
+        let started = now_ms();
+        self.listening.set(Some(Listening { page: page.clone(), started, seconds: 0, others: true, words: 0, latest: String::new(), stopping: false, video: true }));
+        spawn_forever(async move {
+            loop {
+                ai::sleep_ms(1000).await;
+                let mut guard = self.listening.write();
+                match guard.as_mut().filter(|l| l.started == started) {
+                    Some(l) => l.seconds = (now_ms() - started) / 1000,
+                    None => break,
+                }
+            }
+        });
+        spawn_forever(async move {
+            use crate::listen::Heard;
+            let last_words = |text: &str| {
+                let words: Vec<&str> = text.split_whitespace().collect();
+                words[words.len().saturating_sub(9)..].join(" ")
+            };
+            // (A copy of the state for the closure: it is used between the writes below.)
+            let put = {
+                let (state, page, line) = (self, page.clone(), line.clone());
+                move |toggle: &mut Option<Id>, title: &str, closed: bool, lines: Vec<Block>| {
+                    let Some(mut blocks) = state.blocks.peek().get(&page).cloned() else { return };
+                    crate::listen::put_under(&mut blocks, toggle, title, closed, line.as_deref(), lines);
+                    state.set_blocks(&page, blocks, true);
+                }
+            };
+            let mut transcript = crate::listen::Transcript::default();
+            let (mut words, mut notes) = (None, None);
+            let mut written_at = now_ms();
+            let mut problem = None;
+            while let Some(event) = heard.next().await {
+                match event {
+                    Heard::Listening { .. } => {}
+                    Heard::Partial { text, .. } => {
+                        if let Some(l) = self.listening.write().as_mut() {
+                            l.latest = last_words(&text);
+                        }
+                    }
+                    Heard::Final { text, at, .. } => {
+                        transcript.add(crate::listen::Who::Others, &text, at);
+                        if let Some(l) = self.listening.write().as_mut() {
+                            l.words = transcript.words();
+                            l.latest = last_words(&text);
+                        }
+                        // Into the page now and then, so nothing is lost if the app closes.
+                        if now_ms() - written_at > 20_000 {
+                            written_at = now_ms();
+                            put(&mut words, "Transcript of the video", true, transcript.plain_blocks());
+                        }
+                    }
+                    Heard::Note(message) => self.notice(message),
+                    Heard::Error(message) => {
+                        problem = Some(message);
+                        break;
+                    }
+                    Heard::Done => break,
+                }
+            }
+            LISTENER.with(|l| l.borrow_mut().take());
+            put(&mut words, "Transcript of the video", true, transcript.plain_blocks());
+            self.listening.set(None);
+            if let Some(message) = problem {
+                return self.notice(message);
+            }
+            if transcript.words() == 0 {
+                return self.notice("Nothing was heard of the video. Check that it plays with sound, and that Rune may record the Mac's audio (System Settings, Privacy & Security).");
+            }
+            // The AI writes the notes; without one, the words are what there is.
+            if !ai::has_ai() || transcript.words() < 12 {
+                return self.toast("The words of the video are under it");
+            }
+            self.toast("Writing the notes…");
+            let messages = vec![
+                ai::ChatMessage::system(crate::listen::VIDEO_NOTES),
+                ai::ChatMessage::user(crate::listen::for_ai(&transcript.plain_text(), 120_000)),
+            ];
+            let mut rx = ai::start(ai::Prefs::load(), messages);
+            let mut reply = String::new();
+            let mut error = None;
+            while let Some(event) = rx.next().await {
+                match event {
+                    AiEvent::Step(..) => {}
+                    AiEvent::Delta(text) => reply.push_str(&text),
+                    AiEvent::Done => break,
+                    AiEvent::Error(e) => {
+                        error = Some(e);
+                        break;
+                    }
+                }
+            }
+            // Its points, one step in (they go inside a toggle). A heading it
+            // wrote all the same is not a point.
+            let points: Vec<Block> = markdown::to_blocks(ai::clean_reply(&reply).0.trim())
+                .into_iter()
+                .filter(|b| !matches!(b.kind, BlockKind::Heading1 | BlockKind::Heading2 | BlockKind::Heading3 | BlockKind::Divider) && !b.text.trim().is_empty())
+                .map(|mut b| {
+                    b.indent += 1;
+                    b
+                })
+                .collect();
+            let wrote = !points.is_empty() && self.pages.peek().contains_key(&page);
+            if wrote {
+                put(&mut notes, "Notes of the video", false, points);
+            }
+            match (error, wrote) {
+                (Some(e), false) => self.notice(format!("The words of the video are under it, but the AI could not write the notes. {e}")),
+                (_, false) => self.toast("The words of the video are under it"),
+                _ => self.toast("The notes are under the video"),
+            }
+        });
+    }
+
+    /// The video's notes end (the player closes, or plays another video).
+    fn stop_video_notes(self) {
+        if self.listening.peek().as_ref().is_some_and(|l| l.video && !l.stopping) {
+            self.stop_listening();
+        }
     }
 
     /// The frame of the player is here in the window: put the player on it.
     fn place_player(mut self, place: crate::player::Place) {
         let Some(playing) = self.player.peek().clone().filter(|p| p.problem.is_none()) else { return };
-        // A test run has the frame and no player (nothing is fetched).
+        // A test run has the frame and no player (nothing is fetched): it
+        // notes where the player was told to go, so a check can read it.
+        if std::env::var_os("NOTION2_SELFTEST").is_some() {
+            document::eval(&format!("document.body.dataset.playerAt = '{:.0},{:.0},{:.0},{:.0}'", place.x, place.y, place.w, place.h));
+        }
         if crate::video::stand_in() || place.w < 40.0 {
             return;
         }
@@ -5414,7 +6060,38 @@ impl AppState {
         }
     }
 
+    /// Put the picture of the video under a line away (the link stays), or
+    /// bring it back.
+    pub fn show_video_under(self, page: &str, id: &str, show: bool) {
+        self.set_popover(None);
+        let id = id.to_string();
+        self.edit_blocks(page, move |bs| {
+            if let Some(b) = bs.iter_mut().find(|b| b.id == id && crate::video::in_block(b.kind, &b.text).is_some()) {
+                b.data = if show { String::new() } else { crate::video::HIDDEN.to_string() };
+            }
+        });
+    }
+
+    /// Open Settings at one of its parts ("AI", "Data"…).
+    pub fn open_settings_at(mut self, part: &'static str) {
+        self.settings_first.set(Some(part));
+        self.set_modal(Some(Modal::Settings));
+    }
+
+    /// The person moved the player or gave it another size: it is kept,
+    /// and the player goes where its frame is now.
+    pub fn set_player_dock(mut self, place: DockPlace) {
+        let place = place.tidy();
+        if *self.player_dock.peek() != place {
+            store::set_setting("player_dock", &serde_json::to_string(&place).unwrap_or_default());
+            self.player_dock.set(place);
+        }
+        document::eval("requestAnimationFrame(()=>requestAnimationFrame(()=>window.__n2_player && window.__n2_player()))");
+    }
+
     pub fn close_player(mut self) {
+        // The video is over for the person: its notes are written.
+        self.stop_video_notes();
         crate::player::hide();
         PLAYER_SAYS.with(|says| says.borrow_mut().take());
         if self.player.peek().is_some() {
@@ -6131,6 +6808,10 @@ impl AppState {
     /// Open the inline AI panel under a block (⌘J, the slash menu or a block menu).
     pub fn ai_open(mut self, action: AiAction, page: &str, anchor: &str) {
         self.ai_stop();
+        // A run before this one that changed things: say so as it goes.
+        if let Some(old) = self.ai.peek().clone() {
+            self.ai_note_done(&old);
+        }
         ai::warm_up();
         let prompting = matches!(action, AiAction::Ask | AiAction::Recap);
         *self.ai.write() = Some(AiSession {
@@ -6142,6 +6823,10 @@ impl AppState {
             output: String::new(),
             status: AiStatus::Prompting,
             task: None,
+            steps: Vec::new(),
+            journal: None,
+            did: Vec::new(),
+            plan: None,
         });
         self.set_popover(None);
         if !prompting {
@@ -6151,6 +6836,11 @@ impl AppState {
 
     /// ⌘J: ask AI about the block with the caret, or the end of the page.
     pub fn ai_shortcut(self) {
+        // No AI tool is connected: no AI box. The person asked for the AI by
+        // name (the menu bar or its key), so show where one is connected.
+        if !ai::has_ai() {
+            return self.open_settings_at("AI");
+        }
         // With no page in front (Home, Calendar) the question is for all the notes.
         let Some(page) = self.current_page() else {
             self.set_modal(Some(Modal::AskNotes));
@@ -6179,7 +6869,7 @@ impl AppState {
     /// there is no second box for it.
     pub fn ai_recap(self, page: &str) {
         if !ai::has_ai() {
-            return self.toast("This needs an AI tool. See Settings, AI.");
+            return;
         }
         if !self.pages.peek().contains_key(page) {
             return;
@@ -6214,44 +6904,172 @@ impl AppState {
         // the page with its pictures, drawings and links to pages as lines
         // it can keep in place (see `ai_revise`).
         let page_text = if session.action == AiAction::Ask { self.page_for_ai(&session.page_id) } else { self.page_markdown(&session.page_id) };
-        let messages = ai::build_messages(&session.action, &page_text, &block_text, &session.prompt);
+        // A request in the person's own words is run with the tools of Rune
+        // (where the AI tool can use them): the AI can then do anything in
+        // the app, and what it changes is written down for "Undo".
+        let tools = (session.action == AiAction::Ask && ai::takes_tools())
+            .then(|| ai::Tools { journal: std::env::temp_dir().join(format!("rune-ai-{}-{}.jsonl", std::process::id(), now_ms())) });
+        let messages = match &tools {
+            Some(_) => {
+                let title = self.pages.peek().get(&session.page_id).map(|p| p.title.clone()).unwrap_or_default();
+                let now = when::local(now_ms()).format("%Y-%m-%d %H:%M, %A").to_string();
+                // After the person's yes to a plan, the request says so.
+                let request = match &session.plan {
+                    Some(plan) => ai::approved(&session.prompt, plan),
+                    None => session.prompt.clone(),
+                };
+                ai::build_agent_messages(&session.page_id, &title, &page_text, &request, &now)
+            }
+            None => ai::build_messages(&session.action, &page_text, &block_text, &session.prompt),
+        };
+        let journal = tools.as_ref().map(|t| t.journal.clone());
         let run = session.run + 1;
         // Whichever AI Settings picks (an installed tool by default); a missing
         // tool or key arrives as an Error event.
-        let mut rx = ai::start(ai::Prefs::load(), messages);
+        let mut rx = ai::start_with(ai::Prefs::load(), messages, tools);
         let task = spawn(async move {
             while let Some(event) = rx.next().await {
-                let mut guard = self.ai.write();
-                let Some(s) = guard.as_mut().filter(|s| s.run == run) else { break };
-                match event {
-                    AiEvent::Delta(text) => s.output.push_str(&text),
-                    AiEvent::Done => {
-                        s.status = if s.output.trim().is_empty() {
-                            AiStatus::Error("The AI returned an empty reply.".into())
-                        } else {
-                            AiStatus::Done
-                        };
-                        s.task = None;
-                        if s.status == AiStatus::Done && !dioxus::desktop::window().window.is_focused() {
-                            let first = ai::clean_reply(&s.output).0.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").trim_start_matches('#').trim().chars().take(120).collect::<String>();
-                            spawn(async move { crate::notify::show_now("ai", "AI reply ready", &first).await });
+                // After a step and at the end: show what the tools changed in the notes.
+                let mut look = false;
+                let mut ended = false;
+                {
+                    let mut guard = self.ai.write();
+                    let Some(s) = guard.as_mut().filter(|s| s.run == run) else { break };
+                    match event {
+                        AiEvent::Delta(text) => s.output.push_str(&text),
+                        AiEvent::Step(tool, input) => {
+                            let label = {
+                                let pages = self.pages.peek();
+                                ai::step_label(&tool, &input, |id| pages.get(id).map(|p| p.title.clone()))
+                            };
+                            s.steps.push(label);
+                            // What it wrote before a step was on its way to the step, not the answer.
+                            s.output.clear();
+                            look = true;
                         }
-                        break;
+                        AiEvent::Done => {
+                            s.did = s.journal.as_deref().map(crate::mcp::read_journal).unwrap_or_default();
+                            if s.output.trim().is_empty() && !s.did.is_empty() {
+                                s.output = "Done.".into();
+                            }
+                            s.status = if s.output.trim().is_empty() {
+                                AiStatus::Error("The AI returned an empty reply.".into())
+                            } else {
+                                AiStatus::Done
+                            };
+                            s.task = None;
+                            if s.status == AiStatus::Done && !dioxus::desktop::window().window.is_focused() {
+                                let first = ai::clean_reply(&s.output).0.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").trim_start_matches('#').trim().chars().take(120).collect::<String>();
+                                spawn(async move { crate::notify::show_now("ai", "AI reply ready", &first).await });
+                            }
+                            look = true;
+                            ended = true;
+                        }
+                        AiEvent::Error(e) => {
+                            s.did = s.journal.as_deref().map(crate::mcp::read_journal).unwrap_or_default();
+                            s.status = AiStatus::Error(e);
+                            s.task = None;
+                            look = true;
+                            ended = true;
+                        }
                     }
-                    AiEvent::Error(e) => {
-                        s.status = AiStatus::Error(e);
-                        s.task = None;
-                        break;
-                    }
+                }
+                if look {
+                    sync::check_outside_changes();
+                }
+                if ended {
+                    break;
                 }
             }
         });
         if let Some(s) = self.ai.write().as_mut() {
             s.run = run;
             s.output.clear();
+            s.steps.clear();
+            s.did.clear();
+            s.journal = journal;
             s.status = AiStatus::Streaming;
             s.task = Some(task);
         }
+    }
+
+    /// A run that changed things with the tools of Rune goes from the
+    /// screen: a line at the foot of its page says what it did, with Undo.
+    fn ai_note_done(self, session: &AiSession) {
+        if session.did.is_empty() {
+            return;
+        }
+        self.show_ai_done(AiDone {
+            page: session.page_id.clone(),
+            text: crate::mcp::count_line(&session.did),
+            step: false,
+            made: Vec::new(),
+            changes: session.did.clone(),
+            stamp: 0,
+        });
+    }
+
+    /// Show the line that says what the AI did, for some seconds.
+    fn show_ai_done(mut self, mut done: AiDone) {
+        let stamp = now_ms() as u64;
+        done.stamp = stamp;
+        // It stays longer when something was removed: an event that the AI
+        // removed can come back only by this Undo.
+        let removed = done.changes.iter().any(|c| match c {
+            crate::mcp::Change::EventWas { gone, .. } => *gone,
+            crate::mcp::Change::PageWas { what, .. } => what == "trashed",
+            _ => false,
+        });
+        let shown_ms = if removed { 30_000 } else { 9_000 };
+        self.ai_done.set(Some(done));
+        let mut slot = self.ai_done;
+        spawn_forever(async move {
+            ai::sleep_ms(shown_ms).await;
+            if slot.peek().as_ref().is_some_and(|d| d.stamp == stamp) {
+                slot.set(None);
+            }
+        });
+    }
+
+    /// "Do it" under a plan for a large job: the AI does the work now.
+    pub fn ai_do_plan(mut self) {
+        let plan = self.ai.peek().as_ref().and_then(|s| ai::split_plan(&ai::clean_reply(&s.output).0)).map(|(_, steps)| steps.iter().map(|s| format!("- {s}")).collect::<Vec<_>>().join("\n"));
+        let Some(plan) = plan else { return };
+        if let Some(s) = self.ai.write().as_mut() {
+            s.plan = Some(plan);
+        }
+        self.ai_run();
+    }
+
+    /// "Change the plan": back to the request, to say it in another way.
+    pub fn ai_change_plan(mut self) {
+        self.ai_stop();
+        if let Some(s) = self.ai.write().as_mut() {
+            s.plan = None;
+            s.output.clear();
+            s.steps.clear();
+            s.status = AiStatus::Prompting;
+        }
+    }
+
+    /// "Undo" in the AI box, after a run that changed things with the tools:
+    /// all of it is taken back, and the box goes.
+    pub fn ai_undo_run(mut self) {
+        let Some(session) = self.ai.peek().clone() else { return };
+        self.ai_stop();
+        let did = self.ai.peek().as_ref().map(|s| s.did.clone()).unwrap_or(session.did);
+        *self.ai.write() = None;
+        if !did.is_empty() {
+            self.take_back(&did);
+            self.toast("Taken back.");
+        }
+    }
+
+    /// Take back what the tools of Rune changed (see mcp.rs), and show the
+    /// notes as they are now in every window.
+    pub fn take_back(self, changes: &[crate::mcp::Change]) {
+        store::with(|s| crate::mcp::undo_changes(s, changes));
+        sync::reload_now();
     }
 
     pub fn ai_stop(mut self) {
@@ -6262,17 +7080,26 @@ impl AppState {
         if let Some(s) = self.ai.write().as_mut() {
             s.task = None;
             if s.status == AiStatus::Streaming {
+                // Stopped part way: what the tools changed up to now is known.
+                s.did = s.journal.as_deref().map(crate::mcp::read_journal).unwrap_or_default();
+                if s.output.trim().is_empty() && !s.did.is_empty() {
+                    s.output = "Stopped.".into();
+                }
                 s.status = if s.output.is_empty() { AiStatus::Prompting } else { AiStatus::Done };
             }
+        }
+        if self.ai.peek().as_ref().is_some_and(|s| !s.did.is_empty()) {
+            sync::check_outside_changes();
         }
     }
 
     pub fn ai_discard(mut self) {
         self.ai_stop();
-        let anchor = self.ai.peek().as_ref().map(|s| s.anchor.clone());
+        let session = self.ai.peek().clone();
         *self.ai.write() = None;
-        if let Some(a) = anchor {
-            self.focus(Caret::end(&a));
+        if let Some(s) = session {
+            self.ai_note_done(&s);
+            self.focus(Caret::end(&s.anchor));
         }
     }
 
@@ -6293,23 +7120,83 @@ impl AppState {
     pub fn ai_revise(mut self) {
         let Some(session) = self.ai.peek().clone() else { return };
         let Some(body) = ai::split_revision(&ai::clean_reply(&session.output).0) else { return };
-        let new = {
-            let pages = self.pages.peek();
-            let title = pages.get(&session.page_id).map(|p| p.title.clone()).unwrap_or_default();
-            crate::mcp::parse_body(&pages, &crate::mcp::strip_title_heading(&body, &title))
-        };
-        if new.iter().all(|b| b.text.trim().is_empty() && b.kind.is_editable()) {
+        // The page itself, and the sub-pages the reply asks for.
+        let (body, wanted) = ai::split_pages(&body);
+        let title = self.pages.peek().get(&session.page_id).map(|p| p.title.clone()).unwrap_or_default();
+        let empty = |blocks: &[Block]| blocks.iter().all(|b| b.text.trim().is_empty() && b.kind.is_editable());
+        if empty(&crate::mcp::parse_body(&self.pages.peek(), &crate::mcp::strip_title_heading(&body, &title))) {
             return self.toast("The AI sent an empty page, so nothing was changed");
         }
+        // The sub-pages first, so that the page can link to them.
+        let mut made: Vec<(String, Id)> = Vec::new();
+        for (name, text) in wanted {
+            let id = self.create_page(Some(session.page_id.clone()));
+            if let Some(p) = self.pages.write().get_mut(&id) {
+                p.title = name.clone();
+            }
+            self.save_page(&id);
+            let blocks = crate::mcp::parse_body(&self.pages.peek(), &crate::mcp::strip_title_heading(&text, &name));
+            self.blocks.write().insert(id.clone(), if empty(&blocks) { vec![Block::text("")] } else { blocks });
+            self.save_blocks(&id);
+            made.push((name, id));
+        }
+        let mut body = ai::link_pages(&body, &made);
+        // A sub-page that the page does not link to gets its link at the end.
+        for (name, id) in &made {
+            let link = format!("notion2://page/{id}");
+            if !body.contains(&link) {
+                body.push_str(&format!("\n\n[{name}]({link})\n"));
+            }
+        }
+        let new = crate::mcp::parse_body(&self.pages.peek(), &crate::mcp::strip_title_heading(&body, &title));
         let caret = self.edit_blocks(&session.page_id, |bs| {
             let merged = keep_unchanged(bs, crate::mcp::keep_media(bs, new));
             *bs = merged;
             bs.iter().rev().find(|b| b.kind.is_editable()).map(|b| Caret::end(&b.id))
         });
         *self.ai.write() = None;
-        self.toast("The page was changed. Undo brings it back.");
+        let made: Vec<Id> = made.into_iter().map(|(_, id)| id).collect();
+        // One step: Undo takes back the change and the sub-pages together.
+        self.history.write().attach(&session.page_id, &[], &made);
+        if made.is_empty() {
+            self.toast("The page was changed. Undo brings it back.");
+            self.ai_note_done(&session);
+        } else {
+            // Its sub-pages show under it in the sidebar; the foot of the
+            // page says what was done, with a way to take it all back.
+            self.ui.write().expanded.insert(session.page_id.clone());
+            self.save_ui();
+            let text = format!("Page changed · {} {} made and linked", made.len(), if made.len() == 1 { "sub-page" } else { "sub-pages" });
+            self.show_ai_done(AiDone { page: session.page_id.clone(), text, step: true, made, changes: session.did.clone(), stamp: 0 });
+        }
         if let Some(caret) = caret {
             self.focus(caret);
+        }
+    }
+
+    /// Take back what the AI did last: its sub-pages go to the Trash and
+    /// the page is as it was before.
+    pub fn ai_undo_done(mut self) {
+        let Some(done) = self.ai_done.peek().clone() else { return };
+        self.ai_done.set(None);
+        if !done.step {
+            // What the AI did with the tools of Rune.
+            self.take_back(&done.changes);
+            return self.toast("Taken back.");
+        }
+        // While nothing was changed after it, this is the step that Undo takes back.
+        let latest = self.current_page().as_deref() == Some(done.page.as_str()) && self.history.peek().last_created(&done.page) == done.made.as_slice();
+        if latest {
+            self.undo();
+            self.toast("Taken back. The sub-pages are in the Trash.");
+        } else {
+            for id in &done.made {
+                self.set_trashed(id, true);
+            }
+            self.toast("The sub-pages are in the Trash. The page was changed after that, so it stays as it is.");
+        }
+        if !done.changes.is_empty() {
+            self.take_back(&done.changes);
         }
     }
 
@@ -6349,6 +7236,7 @@ impl AppState {
             }
         });
         *self.ai.write() = None;
+        self.ai_note_done(&session);
         if let Some(id) = last_id {
             self.focus(Caret::end(&id));
         }
@@ -6357,6 +7245,13 @@ impl AppState {
     // ----- commands (menu bar and keyboard shortcuts) ----------------------
 
     pub fn command(self, name: &str) {
+        // (For the self-test: a script for the page of the meeting pad's own window.)
+        if let Some(script) = name.strip_prefix("pad_run:") {
+            return crate::pad::run_in_window(script);
+        }
+        if let Some(selector) = name.strip_prefix("pad_press:") {
+            return crate::pad::press_in_window(selector);
+        }
         match name {
             "settings" => self.set_modal(Some(Modal::Settings)),
             "new_page" => self.new_page(None),
@@ -6428,7 +7323,13 @@ impl AppState {
             // box, by the app's own listener or by the Mac's Dictation.
             "dictate" => self.dictate_box(),
             "dictate_stop" => Self::stop_box_ears(),
-            "ask_notes" => self.set_modal(Some(Modal::AskNotes)),
+            "ask_notes" => {
+                if ai::has_ai() {
+                    self.set_modal(Some(Modal::AskNotes));
+                } else {
+                    self.open_settings_at("AI");
+                }
+            }
             // Paste from the short text menu: the page script puts it where the caret is.
             "paste_clipboard" => {
                 if let Ok(text) = arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
@@ -6461,8 +7362,34 @@ impl AppState {
             }
             // What the meeting watcher calls; also reachable by name so the
             // self-test can stand in for a real meeting.
-            "meeting_started" => self.meeting_started(),
+            "meeting_started" => self.meeting_started(crate::meeting::TEAMS.name),
             "meeting_ended" => self.meeting_ended(now_ms()),
+            // The self-test draws the meeting pad in this window (see
+            // `pad::inline`), and makes the pad's questions old at once.
+            "pad_inline" => crate::pad::set_inline(true),
+            "pad_inline_off" => {
+                self.close_pad();
+                crate::pad::set_inline(false);
+            }
+            "pad_old" => self.change_pad(|p| p.since -= 10 * when::MINUTE),
+            // Only when the test asks for the pad's real window (NOTION2_REAL_PAD).
+            // (For the try of the pad by hand: this window goes behind the
+            // others and gives the keyboard back.)
+            "step_back" => crate::glass::step_back(&dioxus::desktop::window().window),
+            "pad_window" => crate::pad::set_real_in_test(true),
+            // (For a picture of the pad in a test run. A pad that is kept out
+            // of screen captures cannot be photographed: `screencapture -l`
+            // on its window says "could not create image from window", which
+            // also shows that the keeping-out works.)
+            "pad_in_captures" => store::set_setting("pad_shared", "on"),
+            "pad_window_off" => {
+                self.close_pad();
+                crate::pad::set_real_in_test(false);
+            }
+            "pad_probe" => {
+                let facts = serde_json::to_string(&crate::ui::pad::probe().to_string()).unwrap_or_default();
+                document::eval(&format!("document.body.dataset.padProbe = {facts};"));
+            }
             "export_page" => match self.current_page() {
                 Some(id) => self.export_page(&id),
                 None => self.toast("Open a page first"),
@@ -6487,6 +7414,16 @@ impl AppState {
             "forget_meeting_slots" => {
                 save_meeting_slots(&[]);
                 store::set_setting("meeting_homes", "");
+            }
+            // (For the self-test: the next meeting that starts is a new one.)
+            "forget_meeting" => MEETING.with(|m| *m.borrow_mut() = None),
+            // (For the self-test: the meetings that start take no event of the
+            // calendar, so that a check of a meeting with no event does not
+            // hang on what the other checks left there at this hour.)
+            "meetings_alone" | "meetings_alone_off" => {
+                if std::env::var_os("NOTION2_SELFTEST").is_some() {
+                    MEETING_ALONE.with(|m| m.set(name == "meetings_alone"));
+                }
             }
             "space_next" => self.step_space(1),
             "space_prev" => self.step_space(-1),
@@ -6575,12 +7512,12 @@ fn seed(pages: &mut HashMap<Id, Page>, blocks: &mut HashMap<Id, Vec<Block>>, spa
     code.language = Some("rust".into());
     let mut tips = Block::new(
         BlockKind::Callout,
-        "AI uses what's already on this Mac: **Claude Code** or **Codex**, or an API key in Settings (⌘,). Press ⌘J or type `/ai` to ask, summarize, rewrite or translate.",
+        "AI is optional. It uses a tool that is already on this Mac: **Claude Code** or **Codex** (Settings, ⌘, then AI shows how to set one up). Then press ⌘J or type `/ai` to ask, summarize, rewrite or translate.",
     );
     tips.icon = Some("sparkles:purple".into());
     let mut agents = Block::new(
         BlockKind::Callout,
-        "Aven and Claude can read and write these pages too. Add this app as an MCP server; the README shows how.",
+        "Claude, Codex and other AI tools can read and write these pages too: Settings (⌘,), AI, **Connect AI tools** gives each tool its lines.",
     );
     agents.icon = Some("bot:blue".into());
 
@@ -6636,6 +7573,19 @@ fn seed(pages: &mut HashMap<Id, Page>, blocks: &mut HashMap<Id, Vec<Block>>, spa
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_place_of_the_video_player() {
+        let usual = DockPlace::default();
+        assert_eq!(usual.style(), "left: auto; right: max(8px, min(18px, calc(100vw - 440px - 8px))); top: auto; bottom: max(8px, min(18px, calc(100vh - 282px - 8px))); width: min(440px, calc(100vw - 16px));");
+        // Every side is named, also at the other corner.
+        let moved = DockPlace { h: "left".into(), v: "top".into(), x: 30.4, y: 52.0, w: 700.0 }.tidy();
+        assert!(moved.style().starts_with("left: max(8px, min(30px, calc(100vw - 700px - 8px))); right: auto; top: max(8px, min(52px, calc(100vh - 428px - 8px))); bottom: auto;"), "{}", moved.style());
+        // Whatever is sent, the page gets values it can use.
+        let odd = DockPlace { h: "up".into(), v: "".into(), x: f64::NAN, y: -40.0, w: 12.0 }.tidy();
+        assert_eq!(odd, DockPlace { h: "right".into(), v: "bottom".into(), x: 0.0, y: 0.0, w: DockPlace::LEAST });
+        assert_eq!(DockPlace { w: 99999.0, ..DockPlace::default() }.tidy().w, DockPlace::MOST);
+    }
+
     use super::*;
 
     #[test]
@@ -6980,11 +7930,16 @@ mod tests {
 
     #[test]
     fn slash_filter_matches_labels_and_keywords() {
-        assert_eq!(filter_slash("").len(), slash_items().len());
-        assert_eq!(filter_slash("h2")[0].action, SlashAction::Turn(BlockKind::Heading2));
-        assert!(filter_slash("todo").iter().any(|i| i.action == SlashAction::Turn(BlockKind::Todo)));
-        assert!(filter_slash("ai").iter().all(|i| matches!(i.action, SlashAction::Ai(_))));
-        assert!(filter_slash("zzz").is_empty());
+        assert_eq!(filter_slash_for("", true).len(), slash_items().len());
+        assert_eq!(filter_slash_for("h2", true)[0].action, SlashAction::Turn(BlockKind::Heading2));
+        assert!(filter_slash_for("todo", true).iter().any(|i| i.action == SlashAction::Turn(BlockKind::Todo)));
+        let ai_rows = filter_slash_for("ai", true);
+        assert!(!ai_rows.is_empty() && ai_rows.iter().all(|i| matches!(i.action, SlashAction::Ai(_))));
+        assert!(filter_slash_for("zzz", true).is_empty());
+        // With no AI tool connected, the menu has no AI rows, and the other rows are all there.
+        let plain = filter_slash_for("", false);
+        assert!(plain.iter().all(|i| !matches!(i.action, SlashAction::Ai(_))) && plain.len() == slash_items().len() - ai_rows.len().max(7));
+        assert!(filter_slash_for("ai", false).is_empty());
     }
 
     #[test]

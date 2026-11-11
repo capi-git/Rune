@@ -65,6 +65,48 @@ pub fn helper() -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// Whether Apple's speech recognition turns speech into text on this Mac
+/// for the language of this Mac (0: not known yet, 1: yes, 2: no, it uses
+/// Apple's servers). The listener program says; it is asked one time.
+static ON_THIS_MAC: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// None until the listener program was asked (and in a test run).
+pub fn on_this_mac() -> Option<bool> {
+    match ON_THIS_MAC.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => Some(true),
+        2 => Some(false),
+        _ => None,
+    }
+}
+
+/// What `n2listen --check` says about recognition on this Mac.
+fn on_this_mac_in(answer: &str) -> Option<bool> {
+    serde_json::from_str::<serde_json::Value>(answer.trim()).ok()?.get("on_device")?.as_bool()
+}
+
+/// Ask the listener program, off the calling thread. It asks for no
+/// permission and hears nothing.
+pub fn learn_where_speech_goes() {
+    if testing() || std::env::var_os("NOTION2_SELFTEST").is_some() {
+        return;
+    }
+    let Some(helper) = helper() else { return };
+    std::thread::spawn(move || {
+        let out = std::process::Command::new(helper).arg("--check").stdin(std::process::Stdio::null()).output();
+        if let Some(yes) = out.ok().and_then(|o| on_this_mac_in(&String::from_utf8_lossy(&o.stdout))) {
+            ON_THIS_MAC.store(if yes { 1 } else { 2 }, std::sync::atomic::Ordering::Relaxed);
+        }
+    });
+}
+
+/// The sentence that tells the person where the sound of a meeting goes.
+pub fn where_speech_goes() -> &'static str {
+    match on_this_mac() {
+        Some(false) => "Tell the others first. For your language, Apple turns the speech into text on its servers.",
+        _ => "Tell the others first. The sound stays on this Mac.",
+    }
+}
+
 /// A test run hears a stand-in, unless it asks for the real listener
 /// (`NOTION2_REAL_LISTENER`, to prove the real one end to end).
 fn testing() -> bool {
@@ -127,13 +169,33 @@ impl Drop for Listener {
 /// Start listening: to the microphone, and with `meeting` to the Mac's sound
 /// too. What is heard arrives on the receiver.
 pub fn start(meeting: bool) -> Result<(Listener, UnboundedReceiver<Heard>), String> {
+    start_from(if meeting { Source::Meeting } else { Source::Mic })
+}
+
+/// What the listener hears.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// The microphone (the voice box, a line of a page).
+    Mic,
+    /// The microphone and what the Mac plays (a meeting).
+    Meeting,
+    /// Only what the Mac plays (a video): the microphone is not used.
+    Sound,
+}
+
+/// Start listening to a source. What is heard arrives on the receiver.
+pub fn start_from(source: Source) -> Result<(Listener, UnboundedReceiver<Heard>), String> {
     let (tx, rx) = unbounded();
     if testing() {
-        return Ok((stand_in(tx, meeting), rx));
+        return Ok((stand_in(tx, source), rx));
     }
     let program = helper().ok_or("This copy of Rune has no listener. Use the installed app.")?;
     let mut child = Command::new(program)
-        .arg(if meeting { "--meeting" } else { "--mic" })
+        .arg(match source {
+            Source::Mic => "--mic",
+            Source::Meeting => "--meeting",
+            Source::Sound => "--system",
+        })
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -230,11 +292,25 @@ pub fn test(args: &[String]) -> i32 {
 }
 
 /// For the self-test: says what a short meeting might, then waits to be stopped.
-fn stand_in(tx: UnboundedSender<Heard>, meeting: bool) -> Listener {
+fn stand_in(tx: UnboundedSender<Heard>, source: Source) -> Listener {
+    let meeting = source == Source::Meeting;
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
     std::thread::spawn(move || {
         let wait = |ms| std::thread::sleep(std::time::Duration::from_millis(ms));
+        if source == Source::Sound {
+            // A video: only what the Mac plays, and nobody is "me".
+            let _ = tx.unbounded_send(Heard::Listening { others: true });
+            wait(150);
+            let _ = tx.unbounded_send(Heard::Final { who: Who::Others, text: "Warm up for four minutes before the first block.".into(), at: 1.0 });
+            wait(150);
+            let _ = tx.unbounded_send(Heard::Final { who: Who::Others, text: "Then do two rounds of the power circuit, with forty seconds of work.".into(), at: 4.0 });
+            while !flag.load(Ordering::Relaxed) {
+                wait(50);
+            }
+            let _ = tx.unbounded_send(Heard::Done);
+            return;
+        }
         let _ = tx.unbounded_send(Heard::Listening { others: meeting });
         wait(150);
         let _ = tx.unbounded_send(Heard::Partial { who: Who::Me, text: "so the budget".into() });
@@ -437,6 +513,65 @@ impl Transcript {
             })
             .collect()
     }
+}
+
+impl Transcript {
+    /// For a video (one side only, with no name): the words with their time,
+    /// one block for each turn, to go inside a toggle.
+    pub fn plain_blocks(&self) -> Vec<Block> {
+        self.turns.iter().map(|t| Block::text(format!("{} — {}", Self::clock(t.at), crate::inline::escape(&t.text))).with_indent(1)).collect()
+    }
+
+    /// The words alone, a turn on each line (for the AI that writes the notes of a video).
+    pub fn plain_text(&self) -> String {
+        self.turns.iter().map(|t| t.text.as_str()).collect::<Vec<_>>().join("\n")
+    }
+}
+
+/// What the AI is told when it writes the notes of a video.
+pub const VIDEO_NOTES: &str = "You write notes of a video from its transcript. The transcript came from speech recognition, so it has wrong words and little punctuation. Reply with Markdown only, with no preamble, no heading and no closing remark: the main points, steps, numbers and names as `-` bullets, in the order of the video, the most at fifteen. A detail of a point is a bullet under it, indented by two spaces. Use only what the transcript says: do not add facts or guess names. Write in the language of the video.";
+
+/// Put lines inside a toggle of a page, in place of what the toggle held
+/// before. The toggle is made the first time: right under the block `after`
+/// and what is inside that block (the line of a video and its notes), or at
+/// the end of the page when that block is gone. `toggle` remembers which
+/// block the toggle is. The lines come one step in (`indent` 1).
+pub fn put_under(page: &mut Vec<Block>, toggle: &mut Option<Id>, title: &str, collapsed: bool, after: Option<&str>, lines: Vec<Block>) {
+    if lines.is_empty() {
+        return;
+    }
+    let at = toggle.as_ref().and_then(|id| page.iter().position(|b| &b.id == id));
+    let at = match at {
+        Some(i) => i,
+        None => {
+            let mut head = Block::new(BlockKind::Toggle, title);
+            head.collapsed = collapsed;
+            *toggle = Some(head.id.clone());
+            match after.and_then(|id| page.iter().position(|b| b.id == id)) {
+                Some(line) => {
+                    head.indent = page[line].indent;
+                    page.insert(line + 1, head);
+                    line + 1
+                }
+                None => {
+                    page.push(head);
+                    page.len() - 1
+                }
+            }
+        }
+    };
+    let depth = page[at].indent;
+    // What the toggle holds: the deeper blocks after it.
+    let end = page[at + 1..].iter().position(|b| b.indent <= depth).map(|i| at + 1 + i).unwrap_or(page.len());
+    let mut lines = lines;
+    for (i, line) in lines.iter_mut().enumerate() {
+        line.indent += depth;
+        // Lines already there keep their ids, so the page is not redrawn for them.
+        if let Some(old) = page[at + 1..end].get(i) {
+            line.id = old.id.clone();
+        }
+    }
+    page.splice(at + 1..end, lines);
 }
 
 /// Put the transcript into a page: inside a "Transcript" toggle at the end
@@ -687,6 +822,55 @@ pub fn for_ai(transcript: &str, budget_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_notes_and_the_words_of_a_video_go_under_its_line() {
+        use super::*;
+        let text = |b: &Block| format!("{}{}:{}", "  ".repeat(b.indent as usize), b.kind.as_str(), b.text);
+        let mut page = vec![Block::text("Before"), Block::text("https://youtu.be/jNQXAC9IVRw"), Block::text("After")];
+        let video = page[1].id.clone();
+        let mut heard = Transcript::default();
+        heard.add(Who::Others, "Warm up for four minutes.", 1.0);
+        let (mut words, mut notes) = (None, None);
+        // While it listens: the words, in a closed toggle right under the video's line.
+        put_under(&mut page, &mut words, "Transcript of the video", true, Some(&video), heard.plain_blocks());
+        assert_eq!(page.iter().map(text).collect::<Vec<_>>(), ["text:Before", "text:https://youtu.be/jNQXAC9IVRw", "toggle:Transcript of the video", "  text:0:01 — Warm up for four minutes.", "text:After"]);
+        assert!(page[2].collapsed);
+        // More is heard: the same toggle, with the new words in place of the old.
+        heard.add(Who::Others, "Then two rounds.", 70.0);
+        let first_line = page[3].id.clone();
+        put_under(&mut page, &mut words, "Transcript of the video", true, Some(&video), heard.plain_blocks());
+        assert_eq!(page.len(), 6);
+        assert_eq!(page[3].id, first_line);
+        assert_eq!(page[4].text, "1:10 — Then two rounds.");
+        // At the end: the notes, in an open toggle between the line and the words.
+        let mut point = Block::new(BlockKind::Bulleted, "Warm up: four minutes");
+        point.indent = 1;
+        put_under(&mut page, &mut notes, "Notes of the video", false, Some(&video), vec![point]);
+        assert_eq!(
+            page.iter().map(text).collect::<Vec<_>>(),
+            ["text:Before", "text:https://youtu.be/jNQXAC9IVRw", "toggle:Notes of the video", "  bulleted:Warm up: four minutes", "toggle:Transcript of the video", "  text:0:01 — Warm up for four minutes.", "  text:1:10 — Then two rounds.", "text:After"]
+        );
+        assert!(!page[2].collapsed);
+        // The line of the video is gone: a new toggle goes to the end of the page.
+        let mut late = None;
+        put_under(&mut page, &mut late, "Transcript of the video", true, Some("no such block"), heard.plain_blocks());
+        assert_eq!(page[page.len() - 3].text, "Transcript of the video");
+        // A video inside a list: its toggles are as deep as its line.
+        let mut deep = vec![Block::new(BlockKind::Bulleted, "https://youtu.be/jNQXAC9IVRw").with_indent(1)];
+        let line = deep[0].id.clone();
+        put_under(&mut deep, &mut None, "Transcript of the video", true, Some(&line), heard.plain_blocks());
+        assert_eq!((deep[1].indent, deep[2].indent), (1, 2));
+        assert_eq!(heard.plain_text(), "Warm up for four minutes.\nThen two rounds.");
+    }
+
+    #[test]
+    fn the_listener_says_where_speech_is_turned_into_text() {
+        assert_eq!(on_this_mac_in(r#"{"microphone":"not asked","on_device":true,"language":"en_US","speech":"not asked","t":"check"}"#), Some(true));
+        assert_eq!(on_this_mac_in("{\"on_device\":false,\"t\":\"check\"}\n"), Some(false));
+        assert_eq!(on_this_mac_in(""), None);
+        assert_eq!(on_this_mac_in("{\"t\":\"check\"}"), None);
+    }
+
     use super::*;
 
     /// A page as a meeting leaves it: notes, then the transcript in its toggle.

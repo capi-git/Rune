@@ -74,6 +74,9 @@ final class Transcriber {
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
     private var text = ""
+    /// How many of the first words of `text` are final already (said to the
+    /// app at a pause, while the stretch goes on).
+    private var done = 0
     private var changed = Date()
     private var stopping = false
     private var began = Date()
@@ -110,6 +113,7 @@ final class Transcriber {
             request.requiresOnDeviceRecognition = true
         }
         text = ""
+        done = 0
         changed = Date()
         began = Date()
         lock.lock()
@@ -125,11 +129,24 @@ final class Transcriber {
                 guard current else { return }
                 if let result {
                     let heard = result.bestTranscription.formattedString
-                    if heard != self.text {
+                    if result.isFinal && self.isEndOfText(heard) {
+                        // The last answer of a stretch can hold only the end
+                        // of what was said. All of it stays.
+                    } else if heard != self.text {
+                        // After a short pause the speech engine of the Mac
+                        // starts its text again, in the same stretch. What
+                        // was said before the pause is then final: without
+                        // this it went from the screen and was lost.
+                        if self.startedAgain(heard) {
+                            self.say(final: self.rest(self.text))
+                            self.done = 0
+                        }
                         self.text = heard
+                        self.done = min(self.done, self.pieces(heard).count)
                         self.changed = Date()
-                        if !result.isFinal {
-                            emit(["t": "partial", "who": self.who, "text": heard])
+                        let more = self.rest(heard)
+                        if !result.isFinal && !more.isEmpty {
+                            emit(["t": "partial", "who": self.who, "text": more])
                         }
                     }
                 }
@@ -143,7 +160,54 @@ final class Transcriber {
         }
     }
 
-    /// A pause: ask for the final text of this stretch.
+    /// A text as its words, as they are written.
+    private func pieces(_ text: String) -> [Substring] {
+        text.split(whereSeparator: { $0 == " " || $0 == "\n" })
+    }
+
+    /// The words of a text that are not final yet.
+    private func rest(_ text: String) -> String {
+        pieces(text).dropFirst(done).joined(separator: " ")
+    }
+
+    /// The words of a text, in small letters, with no signs at their ends.
+    private func words(_ text: String) -> [String] {
+        text.split(whereSeparator: { $0 == " " || $0 == "\n" }).map { $0.lowercased().trimmingCharacters(in: .punctuationCharacters) }.filter { !$0.isEmpty }
+    }
+
+    /// Is `heard` a new start of the text, and not a correction of it? A
+    /// correction comes while the person speaks, and it keeps the start of
+    /// the text or most of its length. A new start is short, and it comes
+    /// after a pause or begins with another word.
+    private func startedAgain(_ heard: String) -> Bool {
+        let old = words(text)
+        let new = words(heard)
+        guard !old.isEmpty else { return false }
+        if new.isEmpty { return true }
+        let paused = Date().timeIntervalSince(changed) > 0.7
+        let short = new.count * 2 <= old.count || (paused && new.count <= 2 && new.count <= old.count)
+        return short && (paused || new.first != old.first)
+    }
+
+    /// Is `heard` only the last words of the text that is there?
+    private func isEndOfText(_ heard: String) -> Bool {
+        let old = words(text)
+        let new = words(heard)
+        return !new.isEmpty && new.count < old.count && Array(old.suffix(new.count)) == new
+    }
+
+    /// These words are final.
+    private func say(final text: String) {
+        let said = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !said.isEmpty {
+            emit(["t": "final", "who": who, "text": said, "at": (Date().timeIntervalSince(started) * 10).rounded() / 10])
+        }
+    }
+
+    /// A pause: what was said up to here is final, and the stretch goes on.
+    /// (A new stretch at each pause lost the first words after the pause:
+    /// they went to the stretch that was at its end.) Only a long stretch
+    /// ends, at a longer silence, so that no stretch is without end.
     private func endStretchIfQuiet() {
         if debugging {
             ticks += 1
@@ -156,23 +220,28 @@ final class Transcriber {
                 debug(["who": who, "buffers": count, "peak": (Double(loudest) * 1000).rounded() / 1000, "task": task != nil])
             }
         }
-        guard !text.isEmpty, Date().timeIntervalSince(changed) > 1.6 else { return }
+        let quiet = Date().timeIntervalSince(changed)
+        guard !text.isEmpty, quiet > 1.6 else { return }
+        let more = rest(text)
+        if !more.isEmpty {
+            say(final: more)
+            done = pieces(text).count
+        }
+        guard Date().timeIntervalSince(began) > 50, quiet > 3 else { return }
         lock.lock()
         let request = self.request
         lock.unlock()
         request?.endAudio()
-        // If no final answer comes, close it ourselves.
-        if Date().timeIntervalSince(changed) > 4 {
+        // If no last answer comes, close it ourselves.
+        if quiet > 6 {
             closeStretch()
         }
     }
 
     private func closeStretch() {
-        let said = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !said.isEmpty {
-            emit(["t": "final", "who": who, "text": said, "at": (Date().timeIntervalSince(started) * 10).rounded() / 10])
-        }
+        say(final: rest(text))
         text = ""
+        done = 0
         task?.cancel()
         task = nil
         lock.lock()

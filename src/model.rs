@@ -49,6 +49,8 @@ pub enum BlockKind {
     /// A simple table; its cells are in `Block::data` (see table.rs), and
     /// their words are mirrored in `Block::text` for search.
     Table,
+    /// A chart of a table; what it draws is in `Block::data` (see chart.rs).
+    Chart,
 }
 
 impl BlockKind {
@@ -84,6 +86,7 @@ impl BlockKind {
             BlockKind::Drawing => "drawing",
             BlockKind::Image => "image",
             BlockKind::Table => "table",
+            BlockKind::Chart => "chart",
         }
     }
 
@@ -103,6 +106,7 @@ impl BlockKind {
             "drawing" => BlockKind::Drawing,
             "image" => BlockKind::Image,
             "table" => BlockKind::Table,
+            "chart" => BlockKind::Chart,
             "page" => BlockKind::PageLink,
             _ => BlockKind::Text,
         }
@@ -126,6 +130,7 @@ impl BlockKind {
             BlockKind::Drawing => "Drawing",
             BlockKind::Image => "Image",
             BlockKind::Table => "Table",
+            BlockKind::Chart => "Chart",
         }
     }
 
@@ -148,6 +153,7 @@ impl BlockKind {
             BlockKind::Drawing => "drawing",
             BlockKind::Image => "image",
             BlockKind::Table => "table",
+            BlockKind::Chart => "chart-bars",
         }
     }
 
@@ -161,7 +167,7 @@ impl BlockKind {
 
     /// Blocks that hold editable text.
     pub fn is_editable(self) -> bool {
-        !matches!(self, BlockKind::Divider | BlockKind::PageLink | BlockKind::Drawing | BlockKind::Image | BlockKind::Table)
+        !matches!(self, BlockKind::Divider | BlockKind::PageLink | BlockKind::Drawing | BlockKind::Image | BlockKind::Table | BlockKind::Chart)
     }
 
     pub fn placeholder(self) -> &'static str {
@@ -176,7 +182,7 @@ impl BlockKind {
             BlockKind::Quote => "Empty quote",
             BlockKind::Callout => "Type something…",
             BlockKind::Code => "Code",
-            BlockKind::Divider | BlockKind::PageLink | BlockKind::Drawing | BlockKind::Image | BlockKind::Table => "",
+            BlockKind::Divider | BlockKind::PageLink | BlockKind::Drawing | BlockKind::Image | BlockKind::Table | BlockKind::Chart => "",
         }
     }
 }
@@ -347,7 +353,7 @@ impl Block {
 }
 
 /// A calendar event.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Event {
     pub id: Id,
     pub space_id: Id,
@@ -450,7 +456,7 @@ impl Space {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Page {
     pub id: Id,
     /// The space the page lives in (sub-pages share their parent's).
@@ -737,7 +743,7 @@ pub fn press_backspace_at_start(blocks: &mut Vec<Block>, idx: usize, value: &str
             blocks.remove(prev);
             Some(Caret::start(&current.id))
         }
-        BlockKind::PageLink | BlockKind::Drawing | BlockKind::Image | BlockKind::Table => {
+        BlockKind::PageLink | BlockKind::Drawing | BlockKind::Image | BlockKind::Table | BlockKind::Chart => {
             if current.plain_text().is_empty() {
                 blocks.remove(idx);
                 ensure_not_empty(blocks);

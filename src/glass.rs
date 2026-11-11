@@ -139,6 +139,25 @@ fn frost(window: &Window, number: isize, on: bool) {
     }
 }
 
+/// The glass of a small card that floats by itself (the meeting pad): the
+/// frosted material under the page, with round corners of `radius` points.
+/// (The window server's own blur covers the whole square of a window with
+/// no frame, so its corners would show; this material can be rounded.) The
+/// page tints it with the same colour as the app's other floating things.
+pub fn card(window: &Window, radius: f64) {
+    let Some(view) = content_view(window) else { return };
+    let _ = clear_vibrancy(&view);
+    if let Err(e) = apply_vibrancy(&view, NSVisualEffectMaterial::Popover, Some(NSVisualEffectState::Active), Some(radius)) {
+        eprintln!("Couldn't turn on the glass of the meeting pad: {e}");
+    }
+    if let Some(ns_window) = ns_window(window) {
+        // SAFETY: the live window; the message takes nothing and returns nothing.
+        unsafe {
+            let _: () = objc2::msg_send![ns_window.as_ptr(), invalidateShadow];
+        }
+    }
+}
+
 /// The page's glass colours for a transparency of 0–100, as CSS variables
 /// for `.app` (style.css falls back to the default when they're absent).
 /// Solid at 0. In dark mode the frame keeps a fifth of its colour even at
@@ -215,6 +234,20 @@ pub fn show_behind(window: &Window) {
     // sender (none) and returns nothing.
     unsafe {
         let _: () = objc2::msg_send![ns_window, orderBack: std::ptr::null::<AnyObject>()];
+    }
+}
+
+/// Give the place in front back to the program the person was in (a test
+/// copy that was started by the person's own click is made the active
+/// program by macOS, with its window in front and the keyboard in it).
+pub fn step_back(window: &Window) {
+    show_behind(window);
+    // SAFETY: the shared application; the message takes nothing and returns nothing.
+    unsafe {
+        let app: *mut AnyObject = objc2::msg_send![objc2::class!(NSApplication), sharedApplication];
+        if !app.is_null() {
+            let _: () = objc2::msg_send![app, deactivate];
+        }
     }
 }
 

@@ -88,6 +88,18 @@ pub fn outside_change_pending() -> bool {
     SEEN_VERSION.with(|v| v.get()).is_some_and(|seen| seen != version)
 }
 
+/// Everything again as it is on disk, in every window: for a change that
+/// the app wrote to the notes file itself, round the windows' own copies
+/// (it takes back what an AI did, see mcp.rs).
+pub fn reload_now() {
+    if let Some(loaded) = store::with(|s| s.load()) {
+        everyone(SyncMsg::Reload(Rc::new(loaded)));
+    }
+    if let Some(events) = store::with(|s| s.load_events()) {
+        everyone(SyncMsg::Events(events));
+    }
+}
+
 /// Called on a timer by every window. The first to notice that another
 /// process wrote to the database reloads it and tells all windows.
 pub fn check_outside_changes() {

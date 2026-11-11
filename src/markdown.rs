@@ -133,9 +133,20 @@ pub fn to_blocks(md: &str) -> Vec<Block> {
         }
         if let Some((lang, lines)) = code.as_mut() {
             if raw.trim_start().starts_with("```") {
-                let mut b = Block::new(BlockKind::Code, lines.join("\n"));
-                b.language = lang.take();
-                out.push(b);
+                let text = lines.join("\n");
+                let chart = lang.as_deref().filter(|l| l.eq_ignore_ascii_case("chart")).and_then(|_| crate::chart::Chart::from_markdown(&text));
+                match chart {
+                    Some(chart) => {
+                        let mut b = Block::new(BlockKind::Chart, chart.title.trim());
+                        b.data = chart.to_data();
+                        out.push(b);
+                    }
+                    None => {
+                        let mut b = Block::new(BlockKind::Code, text);
+                        b.language = lang.take();
+                        out.push(b);
+                    }
+                }
                 code = None;
             } else {
                 lines.push(raw.to_string());
@@ -285,6 +296,7 @@ pub fn render(title: &str, blocks: &[Block], mut special: impl FnMut(&Block) -> 
             BlockKind::Image if b.text.trim().is_empty() => format!("{pad}[Image]"),
             BlockKind::Image => format!("{pad}[Image: {}]", b.text.trim()),
             BlockKind::Table => crate::table::Table::parse(&b.data).to_markdown(&pad),
+            BlockKind::Chart => crate::chart::Chart::parse(&b.data).to_markdown(),
             BlockKind::PageLink => "[Page]".to_string(),
             }
         };
@@ -297,6 +309,22 @@ pub fn render(title: &str, blocks: &[Block], mut special: impl FnMut(&Block) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_chart_and_a_typed_table_there_and_back() {
+        let md = "| Date | km |\n| --- | --- |\n| Tue 1 Dec | 6 |\n<!-- columns: date | number km sum -->\n\n```chart\n{\"shape\": \"bars\", \"y\": \"km\", \"by\": \"week\"}\n```\n\n```rust\nfn main() {}\n```";
+        let blocks = to_blocks(md);
+        let kinds: Vec<BlockKind> = blocks.iter().map(|b| b.kind).collect();
+        assert_eq!(kinds, [BlockKind::Table, BlockKind::Chart, BlockKind::Code]);
+        let table = crate::table::Table::parse(&blocks[0].data);
+        assert_eq!(table.kind(1), crate::table::Kind::Number);
+        assert_eq!(table.total(1), Some(("Sum", "6".to_string())));
+        assert_eq!(crate::chart::Chart::parse(&blocks[1].data).y, "km");
+        let back = from_blocks("", &blocks, |_| String::new());
+        assert_eq!(to_blocks(&back).iter().map(|b| (b.kind, b.data.clone())).collect::<Vec<_>>(), blocks.iter().map(|b| (b.kind, b.data.clone())).collect::<Vec<_>>());
+        // A chart block that is not a chart stays code.
+        assert_eq!(to_blocks("```chart\nnot json\n```")[0].kind, BlockKind::Code);
+    }
 
     #[test]
     fn shortcuts_are_detected() {

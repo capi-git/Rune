@@ -78,6 +78,11 @@ impl History {
         }
     }
 
+    /// The pages that the step Undo would take back on `page` made.
+    pub fn last_created(&self, page: &str) -> &[Id] {
+        self.undo.iter().rfind(|e| e.page == page).map(|e| e.created.as_slice()).unwrap_or(&[])
+    }
+
     pub fn take_undo(&mut self, page: &str) -> Option<Entry> {
         let i = self.undo.iter().rposition(|e| e.page == page)?;
         Some(self.undo.remove(i))

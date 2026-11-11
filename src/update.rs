@@ -14,6 +14,12 @@
 //!
 //! `notion2 --update-check` and `--update-install` do the same from Terminal,
 //! without opening a window or restarting.
+//!
+//! On every Mac but the one that builds the app there is no build folder.
+//! There the app asks the published releases for the newest version (one
+//! small request a day, or "Check now"; nothing of the person's is sent),
+//! brings a newer one to this Mac, and installs it the same way: the copy
+//! must be whole and signed by the same developer.
 
 use std::path::{Path, PathBuf};
 
@@ -23,6 +29,16 @@ pub const BUILD: Option<&str> = option_env!("N2_BUILD_STAMP");
 pub const COMMIT: Option<&str> = option_env!("N2_BUILD_COMMIT");
 /// Where the build script puts the app (on the Mac that built this copy).
 pub const DEFAULT_SOURCE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/release/Rune.app");
+
+/// The newest published release (GitHub's answer is JSON).
+pub const RELEASES: &str = "https://api.github.com/repos/capi-git/Rune/releases/latest";
+/// Where a release's download must come from.
+const RELEASE_FILES: &str = "https://github.com/capi-git/Rune/releases/download/";
+/// The page to send a person to who must get a release by hand.
+pub const RELEASES_PAGE: &str = "https://github.com/capi-git/Rune/releases/latest";
+const ASSET: &str = "Rune.zip";
+/// How often the releases are asked without "Check now".
+const ASK_EVERY_MS: i64 = 20 * 60 * 60 * 1000;
 
 const BUNDLE_ID: &str = "com.jackhagan.notion2";
 const PROGRAM: &str = "Contents/MacOS/notion2";
@@ -113,9 +129,149 @@ pub fn available_at(own: &Path, build: u64, source: &Path) -> Option<Update> {
     (newer > build).then(|| Update { source: source.to_path_buf(), build: newer })
 }
 
-/// The update waiting for this copy of the app, if any.
+/// The update waiting for this copy of the app, if any: in the build
+/// folder, or a release that was brought to this Mac before.
 pub fn available() -> Option<Update> {
-    available_at(&own_app()?, own_build()?, &source())
+    let (own, build) = (own_app()?, own_build()?);
+    available_at(&own, build, &source()).or_else(|| downloaded().and_then(|app| available_at(&own, build, &app)))
+}
+
+// ----- the published releases (for every Mac but the one that builds) ------
+
+/// Whether the app may ask the published releases for a newer version (Settings).
+pub fn online() -> bool {
+    crate::store::setting("update_online").as_deref() != Some("off")
+}
+
+pub fn set_online(on: bool) {
+    crate::store::set_setting("update_online", if on { "on" } else { "off" });
+}
+
+/// Whether this copy gets its updates from the published releases: it has
+/// no build folder to look in (and none was chosen in Settings).
+pub fn from_releases() -> bool {
+    !source().exists()
+}
+
+/// "v0.1.3" or "0.1.3" as numbers.
+fn version_numbers(s: &str) -> Option<Vec<u64>> {
+    let s = s.trim().trim_start_matches(['v', 'V']);
+    let parts: Option<Vec<u64>> = s.split('.').map(|p| p.parse().ok()).collect();
+    parts.filter(|p| !p.is_empty() && p.len() <= 4)
+}
+
+/// Whether version `theirs` is later than `ours`.
+pub fn newer_version(theirs: &str, ours: &str) -> bool {
+    match (version_numbers(theirs), version_numbers(ours)) {
+        (Some(mut a), Some(mut b)) => {
+            let n = a.len().max(b.len());
+            a.resize(n, 0);
+            b.resize(n, 0);
+            a > b
+        }
+        _ => false,
+    }
+}
+
+/// The newest release in what the releases answered: its version, and
+/// where its download is.
+pub fn release_in(answer: &str) -> Option<(String, String)> {
+    let json: serde_json::Value = serde_json::from_str(answer).ok()?;
+    if json.get("draft").and_then(|d| d.as_bool()) == Some(true) || json.get("prerelease").and_then(|d| d.as_bool()) == Some(true) {
+        return None;
+    }
+    let version = json.get("tag_name")?.as_str()?.to_string();
+    let url = json.get("assets")?.as_array()?.iter().find(|a| a.get("name").and_then(|n| n.as_str()) == Some(ASSET))?.get("browser_download_url")?.as_str()?.to_string();
+    version_numbers(&version)?;
+    Some((version, url))
+}
+
+/// Where releases that were brought to this Mac are kept until they are installed.
+fn downloads() -> Option<PathBuf> {
+    Some(PathBuf::from(std::env::var_os("HOME")?).join("Library/Caches/Rune Updates"))
+}
+
+/// The newest release that is on this Mac already.
+fn downloaded() -> Option<PathBuf> {
+    let mut found: Vec<(u64, PathBuf)> = std::fs::read_dir(downloads()?)
+        .ok()?
+        .flatten()
+        .map(|e| e.path().join("Rune.app"))
+        .filter_map(|app| build_of(&app).map(|b| (b, app)))
+        .collect();
+    found.sort();
+    found.pop().map(|(_, app)| app)
+}
+
+/// Remove the releases on this Mac that are not newer than this copy.
+fn tidy_downloads() {
+    let (Some(dir), Some(build)) = (downloads(), own_build()) else { return };
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    for entry in entries.flatten() {
+        let folder = entry.path();
+        if !build_of(&folder.join("Rune.app")).is_some_and(|b| b > build) {
+            let _ = std::fs::remove_dir_all(&folder);
+        }
+    }
+}
+
+fn curl(args: &[&str]) -> Result<Vec<u8>, String> {
+    let out = std::process::Command::new("/usr/bin/curl")
+        .args(["--fail", "--silent", "--show-error", "--location", "--proto", "=https,file", "--user-agent", "Rune-updater"])
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("couldn't ask for the newest version ({e})"))?;
+    if !out.status.success() {
+        return Err("couldn't reach the releases (is this Mac on the internet?)".into());
+    }
+    Ok(out.stdout)
+}
+
+/// Ask `feed` for the newest release; when it is later than this version,
+/// bring it to this Mac. Gives the app to install from, or none when this
+/// copy is the newest. Blocks: call it off the UI thread.
+pub fn fetch_release(feed: &str) -> Result<Option<PathBuf>, String> {
+    // A feed that is not the real one (a test) may name a file on this Mac.
+    let real = feed == RELEASES;
+    let answer = curl(&["--max-time", "20", "-H", "Accept: application/vnd.github+json", feed])?;
+    let Some((version, url)) = release_in(&String::from_utf8_lossy(&answer)) else { return Ok(None) };
+    if !newer_version(&version, env!("CARGO_PKG_VERSION")) {
+        return Ok(None);
+    }
+    if real && !url.starts_with(RELEASE_FILES) {
+        return Err("the newest release has its download in a place that is not expected".into());
+    }
+    let name: String = version.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '.').collect();
+    let folder = downloads().ok_or("this Mac has no home folder")?.join(name);
+    let app = folder.join("Rune.app");
+    if build_of(&app).is_some() {
+        return Ok(Some(app));
+    }
+    let _ = std::fs::remove_dir_all(&folder);
+    std::fs::create_dir_all(&folder).map_err(|e| format!("couldn't make room for the download ({e})"))?;
+    let zip = folder.join(ASSET);
+    let fetched = curl(&["--max-time", "600", "--output", &zip.display().to_string(), &url]);
+    let opened = fetched.and_then(|_| {
+        let done = std::process::Command::new("/usr/bin/ditto").arg("-x").arg("-k").arg(&zip).arg(&folder).status();
+        if done.is_ok_and(|s| s.success()) { Ok(()) } else { Err("couldn't open the download".to_string()) }
+    });
+    let _ = std::fs::remove_file(&zip);
+    if let Err(why) = opened {
+        let _ = std::fs::remove_dir_all(&folder);
+        return Err(why);
+    }
+    if build_of(&app).is_none() {
+        let _ = std::fs::remove_dir_all(&folder);
+        return Err("the download is not a build of this app".into());
+    }
+    Ok(Some(app))
+}
+
+/// Whether it is time to ask the releases again by itself.
+fn time_to_ask(now: i64) -> bool {
+    let last = crate::store::setting("update_asked_at").and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+    now - last >= ASK_EVERY_MS
 }
 
 /// The developer team an app is signed by, if it is signed by one.
@@ -214,6 +370,7 @@ pub fn relaunch(own: &Path) -> ! {
 pub fn at_launch() {
     let Some(own) = own_app() else { return };
     tidy_at(&own);
+    tidy_downloads();
     if !automatic() {
         return;
     }
@@ -229,18 +386,39 @@ pub fn at_launch() {
     }
 }
 
-/// `available` off the calling thread; safe to await from the UI.
-pub async fn check() -> Option<Update> {
+/// `available` off the calling thread; safe to await from the UI. A copy
+/// that gets its updates from the published releases also asks them: when
+/// `now` is true ("Check now"), or once a day by itself. The second value
+/// says why the releases could not be asked, when they could not.
+pub async fn check(now: bool) -> (Option<Update>, Option<String>) {
     let (tx, rx) = futures_channel::oneshot::channel();
-    // The setting is read here, on the UI thread, where the workspace lives.
+    // The settings are read here, on the UI thread, where the workspace lives.
     let (own, build, source) = (own_app(), own_build(), source());
+    let at = crate::model::now_ms();
+    let feed = std::env::var("NOTION2_UPDATE_FEED").ok().filter(|f| !f.is_empty());
+    let ask = from_releases() && (feed.is_some() || online()) && (now || time_to_ask(at));
+    if ask {
+        crate::store::set_setting("update_asked_at", &at.to_string());
+    }
     crate::ai::runtime().spawn_blocking(move || {
-        let _ = tx.send(match (own, build) {
-            (Some(own), Some(build)) => available_at(&own, build, &source),
-            _ => None,
-        });
+        let (Some(own), Some(build)) = (own, build) else {
+            let _ = tx.send((None, None));
+            return;
+        };
+        let mut found = available_at(&own, build, &source).or_else(|| downloaded().and_then(|app| available_at(&own, build, &app)));
+        let mut problem = None;
+        // Only a copy signed by its developer takes a build from the
+        // internet: the signature is what says the download is the real one.
+        if found.is_none() && ask && team_of(&own).is_some() {
+            match fetch_release(feed.as_deref().unwrap_or(RELEASES)) {
+                Ok(Some(app)) => found = available_at(&own, build, &app),
+                Ok(None) => {}
+                Err(why) => problem = Some(why),
+            }
+        }
+        let _ = tx.send((found, problem));
     });
-    rx.await.ok().flatten()
+    rx.await.unwrap_or((None, None))
 }
 
 /// Install `update` over this copy (off the UI thread). On success the
@@ -272,13 +450,34 @@ pub fn describe() -> String {
 pub fn command_line(install: bool) -> i32 {
     println!("{}", describe());
     let source = PathBuf::from(DEFAULT_SOURCE);
-    println!("Update source: {}", source.display());
     let (Some(own), Some(build)) = (own_app(), own_build()) else {
+        println!("Update source: {}", source.display());
         println!("This copy does not update itself (it is not an installed build).");
         return 0;
     };
     tidy_at(&own);
-    match available_at(&own, build, &source) {
+    // NOTION2_UPDATE_FEED names another feed than the published releases
+    // (for a test), and has this copy use it even beside a build folder.
+    let test_feed = std::env::var("NOTION2_UPDATE_FEED").ok().filter(|f| !f.is_empty());
+    let mut found = None;
+    if source.exists() && test_feed.is_none() {
+        println!("Update source: {}", source.display());
+        found = available_at(&own, build, &source);
+    } else {
+        // No build folder on this Mac: the published releases.
+        let feed = test_feed.unwrap_or_else(|| RELEASES.to_string());
+        println!("Update source: the published releases ({feed})");
+        if team_of(&own).is_none() {
+            println!("This copy is not signed by its developer, so it takes no build from the internet.");
+        } else {
+            match fetch_release(&feed) {
+                Ok(Some(app)) => found = available_at(&own, build, &app),
+                Ok(None) => {}
+                Err(why) => println!("Couldn't ask the releases: {why}."),
+            }
+        }
+    }
+    match found {
         None => {
             println!("Up to date.");
             0
@@ -302,6 +501,34 @@ pub fn command_line(install: bool) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn versions_are_compared_as_numbers() {
+        assert!(newer_version("v0.1.3", "0.1.2"));
+        assert!(newer_version("0.2", "0.1.9"));
+        assert!(newer_version("v0.1.10", "0.1.9"), "ten is more than nine");
+        assert!(newer_version("1.0.0.1", "1.0"));
+        assert!(!newer_version("v0.1.2", "0.1.2"));
+        assert!(!newer_version("0.1", "0.1.0"));
+        assert!(!newer_version("v0.1.1", "0.1.2"));
+        // What is not a version is never newer.
+        for odd in ["", "latest", "v1.x", "1..2", "1.2.3.4.5"] {
+            assert!(!newer_version(odd, "0.1.0"), "{odd}");
+        }
+    }
+
+    #[test]
+    fn the_newest_release_is_read_from_the_answer() {
+        let answer = r#"{"tag_name":"v0.1.3","draft":false,"prerelease":false,"assets":[
+            {"name":"notes.txt","browser_download_url":"https://github.com/capi-git/Rune/releases/download/v0.1.3/notes.txt"},
+            {"name":"Rune.zip","browser_download_url":"https://github.com/capi-git/Rune/releases/download/v0.1.3/Rune.zip"}]}"#;
+        assert_eq!(release_in(answer), Some(("v0.1.3".to_string(), "https://github.com/capi-git/Rune/releases/download/v0.1.3/Rune.zip".to_string())));
+        // No download for this app, a draft, a name that is no version, or no JSON: nothing.
+        assert_eq!(release_in(r#"{"tag_name":"v0.1.3","assets":[]}"#), None);
+        assert_eq!(release_in(&answer.replace("\"draft\":false", "\"draft\":true")), None);
+        assert_eq!(release_in(&answer.replace("v0.1.3\",\"draft", "newest\",\"draft")), None);
+        assert_eq!(release_in("<html>rate limit</html>"), None);
+    }
+
     use super::*;
 
     /// A stand-in app on disk: an Info.plist with a build number, and a program.

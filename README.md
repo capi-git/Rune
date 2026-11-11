@@ -19,7 +19,11 @@ Your notes stay on your Mac. There is no account and no server.
    internet: press **Open**. Apple has checked this build for harmful
    software.
 
-It needs a Mac with Apple silicon and macOS 12 or later.
+It needs a Mac with Apple silicon and macOS 14.2 or later.
+
+Rune looks for a newer version one time a day and offers it at the bottom of
+the sidebar. It asks the Rune page on GitHub and sends nothing of yours. You
+can turn this off in Settings → Data.
 
 ## A first walk through (five minutes)
 
@@ -28,8 +32,11 @@ It needs a Mac with Apple silicon and macOS 12 or later.
 2. **Make a page.** Press ⌘N (or the + at the top of the sidebar). Type a
    name, press Return and write. The page saves as you type.
 3. **Add blocks.** Type `/` on an empty line for the list: headings, to-dos,
-   tables, pictures, drawings, a sub-page. Shortcuts work too: `#` and a space
-   makes a heading, `[]` a to-do, `-` a bullet.
+   tables, charts, pictures, drawings, a sub-page. Shortcuts work too: `#` and
+   a space makes a heading, `[]` a to-do, `-` a bullet. A column of a table
+   can have a kind (date, number, time, pace, checkbox, choice) and a total at
+   its foot, and **New row for today** adds a row with today's date. A chart
+   (bars, a line, a ring, or days) draws from a table.
 4. **Link pages.** Type `@` and the start of a page's name, then Return. The
    graph tile in the sidebar shows how your pages connect.
 5. **Two pages side by side.** Hold ⌥ and click a page in the sidebar. Drag
@@ -38,14 +45,24 @@ It needs a Mac with Apple silicon and macOS 12 or later.
    words, for example `Lunch with Sam Friday 1pm`, then Return. Drag an event
    to move it. The **Day** view shows the notes of an event beside the day.
    An event has a field for its meeting link (Teams, Zoom, Meet); **Join**
-   beside it opens the call and the notes of the event.
+   beside it opens the call and the notes of the event. The calendar shows
+   the events of every space, each with a small mark for its space; the
+   control at its top shows this space only.
 7. **To-dos with a day.** On a to-do, press **Give it a day**. It then shows
    on Home and in the calendar. Drag it onto a time to plan it.
-8. **Meetings.** When a Teams meeting starts, Rune makes a notes page for it
-   (you can turn this off in Settings → Notifications). **Listen** on that
-   page writes down what is said and, with an AI connected, writes the notes.
-   Rune never listens by itself. When the meeting is over, the page asks which
-   page to keep the notes in. Rune learns from your answer: the next meeting
+8. **Meetings.** When a call starts, Rune makes a notes page for it: in Teams,
+   Zoom, Webex, Slack, Discord or FaceTime, or a call in Chrome, Arc, Edge,
+   Brave or Firefox (you can turn this off in Settings → Notifications). For
+   a meeting in a room, use **File → New Meeting Notes**. Rune also shows a
+   small card at the corner of the screen, over the call: the **meeting
+   pad**. It asks whether to listen. **Listen** writes down what is said and,
+   with an AI connected, writes the notes. Rune never listens by itself; with
+   no answer the card becomes a small pill and does nothing. The pad is also
+   a notepad: what you type goes under "Notes" of the page. You can drag it
+   anywhere, make it small, and open the page from it. When the meeting is
+   over, the pad asks which page to keep the notes in, then goes away. (With
+   the pad turned off in Settings, the page itself asks these things.) Rune
+   learns from your answer: the next meeting
    with the same calendar event name goes there by itself. A meeting with no
    calendar event is known by its day and its start time: the second time you
    get the same page as a one-click proposal, and after that the notes go
@@ -62,8 +79,8 @@ It needs a Mac with Apple silicon and macOS 12 or later.
 Rune works with no AI. There are two things you can connect, and each is
 optional.
 
-**1. AI inside Rune** (Ask AI with ⌘J, the `/` menu, meeting notes). Rune has
-no AI of its own. It uses an AI tool that is on your Mac and signed in with
+**1. AI inside Rune** (Ask AI with ⌘J or the small round button at the foot of
+a page, the `/` menu, meeting notes). Rune has no AI of its own. It uses an AI tool that is on your Mac and signed in with
 your own account:
 
 - [Claude Code](https://claude.com/claude-code): install it, then run `claude`
@@ -134,10 +151,17 @@ NOTION2_DB=/tmp/notion2-test.db NOTION2_SELFTEST=/tmp/notion2-report.json cargo 
   recolour or delete one in Settings (the button at the bottom left).
 - **Glass:** Settings → Appearance sets how see-through the window is, whether
   what's behind it is blurred, and its tint (any colour).
-- **Calendar:** the calendar tile (⇧⌘C) shows the space's events by week or
-  month. Double-click an empty spot to add an event, click one to edit its
-  time, colour and notes, or turn its notes into a page. Home lists what's
-  coming up.
+- **Calendar:** the calendar tile (⇧⌘C) shows your events by week or month,
+  from every space (each with the mark of its space) or from this space only.
+  Double-click an empty spot to add an event, click one for its panel: quiet
+  rows for the day, the times, repeat, reminder, colour, space, meeting link
+  and notes, each with Rune's own picker; or turn its notes into a page. Home
+  lists what's coming up.
+- **Tables and charts:** a table column has a kind (text, date, number, time,
+  pace, checkbox, choice), a unit and a total at the foot; **New row for
+  today** starts a row. A chart block (type `/chart`) draws bars, a line, a
+  ring or days from the table above it or from a table of another page. With
+  an AI connected, "I ran 6 km in 34 minutes today" adds the row.
 - **Notifications:** each event has a reminder (new events default to 10
   minutes before; change it in Settings). Reminders for the next two weeks are
   handed to macOS, so they arrive even when the app is closed, and clicking one
@@ -153,7 +177,7 @@ NOTION2_DB=/tmp/notion2-test.db NOTION2_SELFTEST=/tmp/notion2-report.json cargo 
   take the space. ⌥-click a sidebar page, or "Open in split view", to open it
   to the right of the page you're in. Layouts are kept between launches.
 - **Home:** today's date, a jot box that saves a line as a page, recently
-  visited and edited pages, upcoming events and favorites.
+  visited and edited pages, your to-dos and upcoming events.
 - **Tabs:** clicking a page (sidebar, Home, search, links) opens it in a tab of
   its own, or brings forward the tab already showing it. Drag a tab onto
   another tab's edge to reorder it, or onto its middle to bring its pages into
@@ -164,7 +188,7 @@ NOTION2_DB=/tmp/notion2-test.db NOTION2_SELFTEST=/tmp/notion2-report.json cargo 
   tab's middle to join that tab, or on a page to put it there). "Separate
   Pages" in the tab's right-click menu gives every page its own tab. A tab
   that just moved glows briefly.
-- **Windows:** ⌘⇧N, "Open in new window" on a page, or "Move to New Window" on
+- **Windows:** ⌘⇧N, or "Move to New Window" on
   a tab. Windows stay in step with each other and with agents using the MCP
   server.
 
@@ -189,10 +213,26 @@ the panel warns that the reply may be made up.
 An app opened from Finder doesn't get your shell's PATH, so the app asks your
 login shell for it once and also checks the usual install folders.
 
-Use ⌘J, the `/` menu (Ask AI, Continue writing, Summarize, Action items, Improve,
-Fix grammar, Translate) or a block's ⋮⋮ menu. To check the installed tools for
-real (sends one tiny prompt to each):
-`cargo test live_installed_tools -- --ignored --nocapture`.
+Use ⌘J or the round button at the foot of a page (it opens into a bar over the
+page), the `/` menu (Ask AI, Continue writing, Summarize, Action items, Improve,
+Fix grammar, Translate) or a block's ⋮⋮ menu. Ask AI can change the page, and
+it can make sub-pages and link them ("give each workout its own page"): it
+shows what it will do first, and one Undo takes it all back.
+
+Ask AI can also do things in the rest of Rune. For a request in your own words
+it runs with Rune's own tools (the same ones as the MCP server below, and no
+others): it can search and read your notes, make, change, name, move and remove
+pages, and add, change and remove calendar events ("make a page named Fitness
+and move my run logs into it", "add a run tomorrow at 7"). While it works the
+card shows the step it is at. At the end it lists what it did, with Undo: one
+press takes all of it back. A page it removes goes to the Trash. With no AI
+tool connected, none of the AI shows in the app; Settings ▸ AI is where you
+connect one.
+
+To check the installed tools for real (sends one tiny prompt to each):
+`cargo test live_installed_tools -- --ignored --nocapture`. To see the real
+tool use Rune's tools on a throwaway workspace (build the app first):
+`cargo test live_agent_tools -- --ignored --nocapture`.
 
 ## Use it from Aven, Claude Code or Codex (MCP)
 

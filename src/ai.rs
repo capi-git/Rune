@@ -247,19 +247,87 @@ pub fn has_ai() -> bool {
     }
 }
 
+/// The setting that holds what the app found the last time: "1" when an AI
+/// tool was connected, "0" when none was.
+pub const FOUND_SETTING: &str = "ai_found";
+
+/// For what shows on the screen: is an AI tool connected? In the first
+/// moments after the app opens it does not know yet, and what it found the
+/// last time is the answer (so nothing of the AI shows and then goes, or
+/// comes late, each time the app opens).
+pub fn shown() -> bool {
+    if PRETEND_NONE.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    if CANNED.lock().unwrap_or_else(|e| e.into_inner()).is_some() || std::env::var_os("NOTION2_SELFTEST").is_some() {
+        return true;
+    }
+    match local::installed_cached() {
+        Some(found) => pick_provider(&Prefs::load(), &found).is_some_and(|p| found.iter().any(|i| i.provider == p)),
+        None => crate::store::setting(FOUND_SETTING).as_deref() == Some("1"),
+    }
+}
+
 /// Start a request with whichever AI the settings pick. Text arrives as
 /// `Delta` events, then `Done` or `Error`. Dropping the receiver stops it.
 pub fn start(prefs: Prefs, messages: Vec<ChatMessage>) -> UnboundedReceiver<AiEvent> {
+    start_with(prefs, messages, None)
+}
+
+/// As `start`, and with `tools` the AI can use the tools of Rune.
+pub fn start_with(prefs: Prefs, messages: Vec<ChatMessage>, tools: Option<Tools>) -> UnboundedReceiver<AiEvent> {
     let (tx, rx) = unbounded();
     if let Some(reply) = CANNED.lock().unwrap_or_else(|e| e.into_inner()).clone() {
         // A test can say what the stand-in AI answers: "[[reply: text]]" in
         // what it sends (with \n for a new line) is answered with that text.
         let asked = messages.iter().rev().find(|m| m.role == "user").map(|m| m.content.as_str()).unwrap_or("");
+        let asked = asked.split("\n\nHow to reply.").next().unwrap_or(asked);
+        // The request itself, where it has such a mark: not a page given
+        // with it that holds a mark from an earlier test.
+        let asked = asked.rsplit_once("</page>").map(|(_, after)| after).filter(|t| t.contains("[[reply:") || t.contains("[[tool:")).unwrap_or(asked);
         let reply = match asked.split_once("[[reply:").and_then(|(_, rest)| rest.rsplit_once("]]")) {
             Some((text, _)) => text.trim().replace("\\n", "\n"),
             None => reply,
         };
+        // A test of a large job: the reply is a plan ("@plan …"). The tools
+        // are used only after the yes, and the answer is then "[[then: text]]".
+        let is_plan = split_plan(&reply).is_some();
+        let yes = asked.contains(PLAN_OK);
+        let reply = if is_plan && yes {
+            asked.split_once("[[then:").and_then(|(_, rest)| rest.split_once("]]")).map(|(text, _)| text.trim().to_string()).unwrap_or_else(|| "Done.".into())
+        } else {
+            reply
+        };
+        let tools = if is_plan && !yes { None } else { tools };
+        // A test can also say which tools the stand-in AI uses, before its
+        // answer: "[[tool: create_page {"title":"Trip"}]]". They are the
+        // real tools, on the notes of the test, with the record of changes.
+        let mut steps: Vec<(String, serde_json::Value)> = Vec::new();
+        if let Some(tools) = &tools {
+            let mut rest = asked.split("[[reply:").next().unwrap_or(asked);
+            let mut calls: Vec<String> = Vec::new();
+            while let Some((_, after)) = rest.split_once("[[tool:") {
+                let Some((call, tail)) = after.split_once("]]") else { break };
+                calls.push(call.trim().to_string());
+                rest = tail;
+            }
+            if !calls.is_empty() {
+                if let Ok(store) = crate::store::Store::open(crate::store::Store::default_path()) {
+                    let mut server = crate::mcp::Server::new(store).with_journal(tools.journal.clone());
+                    for call in calls {
+                        let (name, args) = call.split_once(' ').unwrap_or((call.as_str(), "{}"));
+                        let args: serde_json::Value = serde_json::from_str(args.trim()).unwrap_or_else(|_| serde_json::json!({}));
+                        server.tool(name, &args);
+                        steps.push((format!("mcp__{TOOLS_NAME}__{name}"), args));
+                    }
+                }
+            }
+        }
         runtime().spawn(async move {
+            for (name, args) in steps {
+                tokio::time::sleep(Duration::from_millis(60)).await;
+                let _ = tx.unbounded_send(AiEvent::Step(name, args));
+            }
             // In a few pieces, as a real reply arrives.
             let chars: Vec<char> = reply.chars().collect();
             for piece in chars.chunks(24) {
@@ -271,7 +339,7 @@ pub fn start(prefs: Prefs, messages: Vec<ChatMessage>) -> UnboundedReceiver<AiEv
         return rx;
     }
     runtime().spawn(async move {
-        let result = dispatch(&prefs, &messages, &tx).await;
+        let result = dispatch(&prefs, &messages, tools.as_ref(), &tx).await;
         let _ = tx.unbounded_send(match result {
             Ok(()) => AiEvent::Done,
             Err(e) => AiEvent::Error(e),
@@ -280,7 +348,7 @@ pub fn start(prefs: Prefs, messages: Vec<ChatMessage>) -> UnboundedReceiver<AiEv
     rx
 }
 
-async fn dispatch(prefs: &Prefs, messages: &[ChatMessage], tx: &UnboundedSender<AiEvent>) -> Result<(), String> {
+async fn dispatch(prefs: &Prefs, messages: &[ChatMessage], tools: Option<&Tools>, tx: &UnboundedSender<AiEvent>) -> Result<(), String> {
     let provider = match prefs.provider {
         Some(p) => p,
         None => {
@@ -288,7 +356,7 @@ async fn dispatch(prefs: &Prefs, messages: &[ChatMessage], tx: &UnboundedSender<
             pick_provider(prefs, &found).ok_or_else(|| NO_AI.to_string())?
         }
     };
-    local::run(provider, prefs.model(provider), &prefs.effort, messages, tx).await
+    local::run(provider, prefs.model(provider), &prefs.effort, messages, tools, tx).await
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -309,8 +377,123 @@ impl ChatMessage {
 #[derive(Clone, Debug, PartialEq)]
 pub enum AiEvent {
     Delta(String),
+    /// The AI used one of the tools of Rune: its name, and what it gave it.
+    Step(String, serde_json::Value),
     Done,
     Error(String),
+}
+
+/// The tools of Rune for the app's own AI (see mcp.rs). With them it can do
+/// anything in the app: read and search the notes, make, change, move and
+/// remove pages, and work with the calendar. What it changes is written
+/// down in `journal`, so that the app can say what was done and take it back.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Tools {
+    pub journal: std::path::PathBuf,
+}
+
+/// The model that answers now, for a quiet line beside a box to ask in: how
+/// hard it thinks (dots lit, of four) and its name. Nothing when no AI tool
+/// is known.
+pub fn chosen_label() -> Option<(u8, String)> {
+    let prefs = Prefs::load();
+    let installed = local::installed_cached().unwrap_or_default();
+    let provider = pick_provider(&prefs, &installed)?;
+    let model = prefs.model(provider).to_string();
+    let label = model_choices(provider).into_iter().find(|(id, _)| *id == model).map(|(_, label)| label)?;
+    let label = label.strip_prefix("Default · ").map(str::to_string).unwrap_or(label);
+    Some((effort_dots(&prefs.effort), label))
+}
+
+/// The first line of a reply that is a plan for a large job (see `PLAN_RULE`).
+pub const PLAN_MARK: &str = "@plan";
+
+/// The words that tell the AI that the person said yes to its plan.
+pub const PLAN_OK: &str = "The plan is approved.";
+
+/// For a run with the tools: a large job is shown as a plan first.
+pub const PLAN_RULE: &str = "A large job needs the person's yes first. If the request will make or change more than six pages or events, do not change anything yet: reply with a first line that is exactly `@plan`, then one or two sentences on what you will build, then the steps as a list (one line each, seven lines at most, plain words, no ids). When the request says that the plan is approved, do the work at once with the tools and do not ask again.";
+
+/// If a reply is a plan for a large job: what it will build, in a sentence
+/// or two, and its steps.
+pub fn split_plan(reply: &str) -> Option<(String, Vec<String>)> {
+    let mut lines = reply.lines().map(str::trim).skip_while(|l| l.is_empty());
+    if lines.next()?.trim_matches('`') != PLAN_MARK {
+        return None;
+    }
+    let mut about: Vec<&str> = Vec::new();
+    let mut steps: Vec<String> = Vec::new();
+    for line in lines.filter(|l| !l.is_empty()) {
+        let item = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")).or_else(|| {
+            let (number, rest) = line.split_once(". ")?;
+            number.chars().all(|c| c.is_ascii_digit()).then_some(rest)
+        });
+        match item {
+            Some(step) => steps.push(step.trim().trim_start_matches("[ ] ").to_string()),
+            None => about.push(line),
+        }
+    }
+    Some((about.join(" "), steps))
+}
+
+/// A request with the person's yes to the plan that the AI gave for it.
+pub fn approved(request: &str, plan: &str) -> String {
+    format!("{}\n\n{PLAN_OK} Do it now with the tools, and do not ask again. The plan:\n{}", request.trim(), plan.trim())
+}
+
+/// The name of the tools as the AI tool sees them ("mcp__rune__read_page").
+pub const TOOLS_NAME: &str = "rune";
+
+/// Can the AI that Settings picks use the tools of Rune? Claude Code and
+/// Codex both can. (Not known yet, in the first moments: no, and the AI
+/// answers from the page alone that one time.)
+pub fn takes_tools() -> bool {
+    if PRETEND_NONE.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    if CANNED.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+        return true;
+    }
+    match local::installed_cached() {
+        Some(found) => pick_provider(&Prefs::load(), &found).is_some(),
+        None => false,
+    }
+}
+
+/// One use of a tool, in plain words ("Made the page “Fitness”"). `title`
+/// gives the name of a page for its id.
+pub fn step_label(tool: &str, input: &serde_json::Value, title: impl Fn(&str) -> Option<String>) -> String {
+    let tool = tool.rsplit("__").next().unwrap_or(tool);
+    let text = |key: &str| input.get(key).and_then(serde_json::Value::as_str).unwrap_or("").trim().to_string();
+    let page = || {
+        let id = text("page_id");
+        let id = id.trim_end_matches('/').rsplit('/').next().unwrap_or("").to_string();
+        match title(&id).map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
+            Some(t) => format!("“{t}”"),
+            None => "a page".to_string(),
+        }
+    };
+    match tool {
+        "search_pages" => format!("Looked in the notes for “{}”", text("query")),
+        "list_pages" => "Looked at the list of pages".into(),
+        "read_page" => format!("Read {}", page()),
+        "create_page" => format!("Made the page “{}”", text("title")),
+        "append_to_page" => format!("Added to {}", page()),
+        "update_page" if input.get("parent_id").is_some() => format!("Moved {}", page()),
+        "update_page" if input.get("title").is_some() => format!("Named {} “{}”", page(), text("title")),
+        "replace_page_content" | "update_page" => format!("Changed {}", page()),
+        "trash_page" => format!("Moved {} to the Trash", page()),
+        "restore_page" => format!("Took {} out of the Trash", page()),
+        "list_events" => "Looked at the calendar".into(),
+        "create_event" => format!("Added “{}” to the calendar", text("title")),
+        "update_event" => "Changed an event in the calendar".into(),
+        "delete_event" => "Removed an event from the calendar".into(),
+        "add_table_row" => format!("Added a row to {}", page()),
+        "update_table_row" => format!("Changed a row of {}", page()),
+        "set_todo" if input.get("done").and_then(serde_json::Value::as_bool) == Some(true) => format!("Ticked “{}” in {}", text("text"), page()),
+        "set_todo" => format!("Changed a to-do in {}", page()),
+        other => format!("Used {other}"),
+    }
 }
 
 /// A model with no tools sometimes writes out pretend tool calls and then
@@ -407,6 +590,30 @@ to-do items (- [ ] task), block quotes, fenced code blocks and plain paragraphs;
 use **bold**, _italic_, `code` and [links](https://example.com). Do not add a preamble or closing \
 remarks; return only the content to insert into the page.";
 
+/// For a run with the tools of Rune (see `Tools`).
+const AGENT_PROMPT: &str = "You are the assistant inside Rune, a notes app with pages and a calendar, on the person's Mac. \
+You have the tools of Rune. With them you can do anything in Rune that the person asks: search and read the notes, \
+make, change, name, move and remove pages, and add, change and remove calendar events. Do the work yourself, with the tools. \
+Never tell the person to do a step that you can do, and never say that you cannot see or change the notes: look, and do it. \
+You have no other tools: you cannot read files, run commands or browse the web, and you see nothing of this Mac but Rune. \
+Never invent what is in the notes: look it up with the tools. A page that you remove goes to the Trash. \
+Do what the request asks for and no more. When the work is done, say in one or two plain sentences what you did, \
+with the names of the pages and events, and with no ids and no links. \
+When you reply with content for a page, use Markdown: headings (#, ##, ###), bulleted lists, numbered lists, \
+to-do items (- [ ] task), block quotes, fenced code blocks and plain paragraphs; inside text you may \
+use **bold**, _italic_, `code` and [links](https://example.com). No preamble and no closing remarks.";
+
+/// Added to the instructions of the box that asks all the notes, for a
+/// run with the tools of Rune.
+pub const ASK_NOTES_TOOLS: &str = "You also have the tools of Rune. With them you can do anything in Rune that the person asks: \
+search and read more of the notes, make, change, name, move and remove pages, and add, change and remove calendar events. \
+When the request asks you to do something, do it yourself with the tools; then say in one or two plain sentences what you did, \
+with the names of the pages and events, with no ids and no links, and with no Sources list. \
+When it is a question that the pages below do not answer, look in the other notes with the tools before you say that the notes \
+do not hold the answer. Never tell the person to do a step that you can do. A page that you remove goes to the Trash. \
+You have no other tools: you cannot read files, run commands or browse the web. \
+A large job needs the person's yes first. If the request will make or change more than six pages or events, do not change anything yet: reply with a first line that is exactly `@plan`, then one or two sentences on what you will build, then the steps as a list (one line each, seven lines at most, plain words, no ids). When the request says that the plan is approved, do the work at once with the tools and do not ask again.";
+
 const MAX_CONTEXT_CHARS: usize = 24_000;
 
 /// The first line of a reply that is the whole page after a change (see the
@@ -421,11 +628,79 @@ pub fn split_revision(reply: &str) -> Option<String> {
     (first.trim().trim_matches('`') == REVISE_MARK).then(|| body.trim_start_matches(['\r', '\n']).to_string())
 }
 
+/// In a reply that changes the page, the line that starts a sub-page: the
+/// mark, then the name of the sub-page. The lines after it are that page.
+pub const PAGE_MARK: &str = "@page ";
+/// No more sub-pages than this are made from one reply.
+pub const MOST_PAGES: usize = 12;
+
+/// A reply that changes the page, split into the page itself and the
+/// sub-pages it asks for (the name and the Markdown of each).
+pub fn split_pages(body: &str) -> (String, Vec<(String, String)>) {
+    let mut main = String::new();
+    let mut pages: Vec<(String, String)> = Vec::new();
+    let mut in_code = false;
+    for line in body.lines() {
+        let t = line.trim();
+        if t.starts_with("```") {
+            in_code = !in_code;
+        }
+        let name = (!in_code).then(|| t.trim_matches('`').strip_prefix(PAGE_MARK)).flatten().map(|n| n.trim().trim_matches(['"', '“', '”', '*', '#', ' ']).to_string());
+        if let Some(name) = name.filter(|n| !n.is_empty()) {
+            pages.push((name, String::new()));
+            continue;
+        }
+        let into = match pages.last_mut() {
+            Some((_, text)) => text,
+            None => &mut main,
+        };
+        into.push_str(line);
+        into.push('\n');
+    }
+    pages.truncate(MOST_PAGES);
+    (main, pages)
+}
+
+/// Put links in place of the names of sub-pages: `[[Workout A]]` becomes a
+/// link to the page made for "Workout A". A name with no page stays as it is.
+pub fn link_pages(text: &str, made: &[(String, String)]) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("[[") {
+        let Some(len) = rest[start + 2..].find("]]") else { break };
+        let name = rest[start + 2..start + 2 + len].trim();
+        out.push_str(&rest[..start]);
+        match made.iter().find(|(n, _)| n.trim().eq_ignore_ascii_case(name)) {
+            Some((n, id)) => out.push_str(&format!("[{n}](notion2://page/{id})")),
+            None => out.push_str(&rest[start..start + len + 4]),
+        }
+        rest = &rest[start + len + 4..];
+    }
+    out.push_str(rest);
+    out
+}
+
 fn clip(s: &str) -> &str {
     match s.char_indices().nth(MAX_CONTEXT_CHARS) {
         Some((i, _)) => &s[..i],
         None => s,
     }
+}
+
+/// A request on a page, for a run with the tools of Rune: the page with
+/// its name and id, the time now, the request, and how to reply.
+pub fn build_agent_messages(page_id: &str, title: &str, page_md: &str, prompt: &str, now: &str) -> Vec<ChatMessage> {
+    let ChatMessage { content: plain, .. } = build_messages(&AiAction::Ask, page_md, "", prompt).pop().unwrap_or_else(|| ChatMessage::user(""));
+    let (before, how) = plain.split_once("\n\nHow to reply.").unwrap_or((plain.as_str(), ""));
+    let before = before.replacen("Here is the page I'm working on:", &format!("Here is the page I'm working on. Its name is \"{}\" and its id is {page_id}.", title.trim()), 1);
+    let task = format!(
+        "{before}\n\nHow to reply.{how} \
+         That is for this page and its sub-pages only: do not use the tools to change this page. \
+         For everything else that the request asks for (another page, a new page that is not a sub-page of this page, \
+         a move, a new name, the Trash, the calendar, something to find in the other notes), use the tools, \
+         and then say shortly what you did. {PLAN_RULE}\n\nNow it is {now} (local time)."
+    );
+    vec![ChatMessage::system(AGENT_PROMPT), ChatMessage::user(task)]
 }
 
 pub fn build_messages(action: &AiAction, page_md: &str, block_text: &str, prompt: &str) -> Vec<ChatMessage> {
@@ -438,6 +713,12 @@ pub fn build_messages(action: &AiAction, page_md: &str, block_text: &str, prompt
              line that is exactly `{REVISE_MARK}`, and after it the whole page as it must be after the \
              change, in the same Markdown: keep every part that does not change word for word, and \
              keep lines such as `[Image](notion2://block/...)` and links to other pages as they are. \
+             You can also make sub-pages of this page, when the request asks for pages of their own \
+             (sub-pages, a page for each part): after the whole page, write a line that is exactly \
+             `{PAGE_MARK}` followed by the name of the sub-page, and under it that sub-page in Markdown; \
+             do this for each sub-page. Link each sub-page from the page: a line that is only \
+             `[[the name]]`, or `[[the name]]` inside a sentence. Do the work yourself: never tell \
+             the person to make or link the pages. \
              If the request is a question, or asks for something new that changes nothing that is \
              there, reply with only the answer or the new content, and no `{REVISE_MARK}` line.",
             prompt.trim()
@@ -520,6 +801,56 @@ pub fn active_label(prefs: &Prefs) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_large_job_is_a_plan_first() {
+        let reply = "@plan\nEight weeks from 3 km to 10 km, three runs a week.\n\n- New page: 10K Training\n- 8 week pages, Week 1 to Week 8\n1. 24 runs in the calendar\n";
+        let (about, steps) = split_plan(reply).unwrap();
+        assert_eq!(about, "Eight weeks from 3 km to 10 km, three runs a week.");
+        assert_eq!(steps, vec!["New page: 10K Training", "8 week pages, Week 1 to Week 8", "24 runs in the calendar"]);
+        assert_eq!(split_plan("Here is the answer.\n- one"), None);
+        assert_eq!(split_plan("@replace\n# Page"), None);
+        // The yes goes with the request and the plan, and the rule is in what a run with the tools is told.
+        let yes = approved("build it [[reply: x]]", "- New page: A");
+        assert!(yes.starts_with("build it") && yes.contains(PLAN_OK) && yes.ends_with("- New page: A"));
+        let msgs = build_agent_messages("abc", "Plan", "# Plan", "build me a journal", "2026-11-10 17:30, Tuesday");
+        assert!(msgs[1].content.contains(PLAN_MARK) && msgs[1].content.contains("more than six pages or events"));
+        assert!(ASK_NOTES_TOOLS.contains(PLAN_MARK));
+    }
+
+    #[test]
+    fn a_run_with_tools_is_told_the_page_the_time_and_what_the_tools_are_for() {
+        let msgs = build_agent_messages("abc123", "Workout Plan", "# Workout Plan\n\n- Squats", "add a run on Monday at 7 [[reply: ok]]", "2026-11-10 17:30, Tuesday");
+        assert!(msgs[0].content.contains("tools of Rune") && !msgs[0].content.contains("cannot read files, run commands, browse the web or use any tools"));
+        let user = &msgs[1].content;
+        assert!(user.contains("Its name is \"Workout Plan\" and its id is abc123."), "{user}");
+        assert!(user.contains("Now it is 2026-11-10 17:30, Tuesday (local time)."));
+        assert!(user.contains("use the tools") && user.contains(REVISE_MARK) && user.contains(PAGE_MARK.trim()));
+        // The stand-in AI of a test reads its answer from the request alone.
+        assert_eq!(user.split("\n\nHow to reply.").count(), 2);
+        // A step in plain words, with the name of the page.
+        let title = |id: &str| (id == "abc123").then(|| "Workout Plan".to_string());
+        assert_eq!(step_label("mcp__rune__read_page", &serde_json::json!({ "page_id": "notion2://page/abc123" }), title), "Read “Workout Plan”");
+        assert_eq!(step_label("mcp__rune__create_page", &serde_json::json!({ "title": "Fitness" }), title), "Made the page “Fitness”");
+        assert_eq!(step_label("mcp__rune__trash_page", &serde_json::json!({ "page_id": "zzz" }), title), "Moved a page to the Trash");
+    }
+
+    #[test]
+    fn a_reply_can_ask_for_sub_pages() {
+        let body = "# Plan\n\n1. [[Workout A]]\n2. [[workout b]]\n\n```\n@page not this, it is code\n```\n@page Workout A\nTen squats.\n\n`@page \"Workout B\"`\nFive push-ups.\n";
+        let (main, pages) = split_pages(body);
+        assert!(main.contains("[[Workout A]]") && main.contains("@page not this") && !main.contains("Ten squats"), "{main}");
+        assert_eq!(pages, vec![("Workout A".to_string(), "Ten squats.\n\n".to_string()), ("Workout B".to_string(), "Five push-ups.\n".to_string())]);
+        // The names become links to the pages that were made (in any letter case); a name with no page stays.
+        let made = vec![("Workout A".to_string(), "p1".to_string()), ("Workout B".to_string(), "p2".to_string())];
+        let linked = link_pages("1. [[Workout A]]\n2. [[workout b]] and [[Other]] and [[open", &made);
+        assert_eq!(linked, "1. [Workout A](notion2://page/p1)\n2. [Workout B](notion2://page/p2) and [[Other]] and [[open");
+        // A reply with no sub-pages is the page alone.
+        assert_eq!(split_pages("One\nTwo"), ("One\nTwo\n".to_string(), Vec::new()));
+        // Never more than a few.
+        let many: String = (0..40).map(|i| format!("@page P{i}\nx\n")).collect();
+        assert_eq!(split_pages(&many).1.len(), MOST_PAGES);
+    }
+
     use super::*;
 
     #[test]

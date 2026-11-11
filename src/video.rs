@@ -77,6 +77,10 @@ pub fn youtube(url: &str) -> Option<Video> {
 /// The video to show under a line: when the line is only a YouTube link (the
 /// address itself, or words that are all that one link). A link inside a
 /// sentence stays a link.
+/// What a line of text keeps (in the place where a drawing keeps its
+/// scene) when the person put the picture of its video away.
+pub const HIDDEN: &str = "no-video";
+
 pub fn in_block(kind: BlockKind, text: &str) -> Option<Video> {
     if !matches!(kind, BlockKind::Text | BlockKind::Bulleted | BlockKind::Numbered | BlockKind::Todo) || !text.contains("youtu") {
         return None;

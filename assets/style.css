@@ -621,10 +621,16 @@ button {
 .app:not(.pinned) .work-card {
   margin-left: 6px;
 }
+/* The page is zoomed here (View → Zoom In / Out). A zoomed box that is as
+   wide and as high as the card fills the card: `zoom` changes how big the
+   things inside are drawn, not what a percentage of the card is. (It is not
+   a transform: making the box bigger or smaller by the zoom, as this did
+   before, pushed the page out of the card's right and bottom edges when
+   zoomed out, and left it in the top left corner when zoomed in.) */
 .card-zoom {
   zoom: var(--zoom, 1);
-  width: calc(100% / var(--zoom, 1));
-  height: calc(100% / var(--zoom, 1));
+  width: 100%;
+  height: 100%;
   display: flex;
   flex-direction: column;
 }
@@ -809,7 +815,7 @@ body[data-resizing="rows"] * {
 
 .tiles {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: 8px;
   margin-bottom: 8px;
   flex-shrink: 0;
@@ -3377,22 +3383,132 @@ body[data-resizing] .sash:active::after {
   background: var(--icon-red, var(--danger));
 }
 
+/* The event's panel: one column of quiet rows. Each row is a 16 px icon and
+   the value as words to click; no box around a control, one hairline between
+   the groups (when / repeat, reminder, colour / link / notes). Its rows
+   scroll and its foot stays. Menus are lifted out of the scrolling part by
+   bridge.js (anchorMenu), so nothing clips them. */
 .cal-editor {
+  --ed-ground: var(--float-bg);
   width: 300px;
   flex-shrink: 0;
+  position: relative;
   border-left: 1px solid var(--sep);
-  padding: 14px 16px;
+  padding: 12px 8px 8px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  overflow-y: auto;
+  min-height: 0;
   animation: pop-in 180ms var(--ease-out);
   transform-origin: 100% 0;
 }
-.ed-head {
+.ed-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+.ed-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 2;
+}
+.ed-shade {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+.ed-title {
+  display: block;
+  flex-shrink: 0;
+  width: 100%;
+  margin: 0;
+  padding: 3px 44px 10px 12px;
+  resize: none;
+  overflow: hidden;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: -0.005em;
+  field-sizing: content;
+}
+.ed-title::placeholder {
+  color: var(--placeholder);
+}
+.ed-title-plain {
+  margin: 0;
+  padding: 3px 44px 10px 12px;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+  flex-shrink: 0;
+}
+.ed-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
+  flex-shrink: 0;
+  width: 100%;
+  min-height: 36px;
+  margin: 0;
+  padding: 0 12px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  cursor: default;
+}
+button.ed-row:hover {
+  background: var(--hover);
+}
+button.ed-row.open {
+  background: var(--active);
+}
+.ed-row:focus-visible,
+.ed-chip:focus-visible,
+.ed-small-btn:focus-visible,
+.ed-tints .tint:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.ed-ico {
+  display: inline-flex;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  color: var(--text-3);
+}
+.ed-val {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ed-chev {
+  display: inline-flex;
+  flex-shrink: 0;
+  margin-left: -6px;
+  color: var(--text-3);
+}
+.ed-label {
+  color: var(--text-2);
+}
+.ed-grow {
+  flex: 1;
+  min-width: 0;
+}
+.ed-dim {
+  color: var(--text-2);
 }
 .ed-swatch {
   width: 10px;
@@ -3401,87 +3517,448 @@ body[data-resizing] .sash:active::after {
   background: var(--c);
   flex-shrink: 0;
 }
-.ed-kicker {
-  flex: 1;
-  font-size: 12px;
-  color: var(--text-2);
+.ed-row .ed-swatch {
+  margin-right: -4px;
 }
-.ed-title {
+.ed-sep {
+  flex-shrink: 0;
+  height: 1px;
+  margin: 6px 12px;
+  background: var(--sep);
+}
+/* When: the day and the times as words to click, on one line. */
+.ed-when {
+  gap: 0;
+}
+.ed-when > .ed-ico {
+  margin-right: 6px;
+}
+.ed-pick {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+}
+.ed-pick-row {
+  display: flex;
+  flex-shrink: 0;
+  width: 100%;
+}
+.ed-chip {
+  padding: 4px 6px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  white-space: nowrap;
+  cursor: default;
+}
+.ed-chip:hover {
+  background: var(--hover);
+}
+.ed-chip.open {
+  background: var(--active);
+}
+.ed-mid,
+.ed-dash {
+  color: var(--text-3);
+}
+.ed-mid {
+  padding: 0 3px;
+}
+.ed-dash {
+  padding: 0 1px;
+}
+.ed-next {
+  margin-left: 6px;
+  font-size: 12.5px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+.ed-note {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 0 12px 6px 40px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-3);
+}
+.ed-note .link-btn {
+  padding: 0;
+  color: var(--text-2);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--text) 30%, transparent);
+  text-underline-offset: 2px;
+}
+/* Colour: nine dots on one line; the chosen one has a ring in the colour of
+   the text (not blue: a colour is not a call to act). */
+.ed-tints {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ed-tints .tint {
+  width: 16px;
+  height: 16px;
+  border: none;
+}
+.ed-tints .tint.on {
+  box-shadow: 0 0 0 2px var(--ed-ground), 0 0 0 3.5px color-mix(in srgb, var(--text) 85%, transparent);
+}
+/* The link to join the call: a row of its own, with no box until it is in use. */
+.ed-link-row:focus-within {
+  background: var(--fill-4);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 22%, transparent);
+}
+.ed-link {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: none;
+  outline: none;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  text-overflow: ellipsis;
+}
+.ed-link::placeholder {
+  color: var(--text-3);
+}
+.ed-small-btn {
+  flex-shrink: 0;
+  padding: 3px 10px;
+  border: none;
+  border-radius: 6px;
+  background: var(--fill-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: default;
+}
+.ed-small-btn:hover {
+  background: color-mix(in srgb, var(--text) 18%, transparent);
+}
+/* Notes: no box; they take the room that is left. */
+.ed-notes-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  flex: 1 0 auto;
+  min-height: 96px;
+  padding: 9px 6px 8px 12px;
+}
+.ed-notes-row > .ed-ico {
+  margin-top: 2px;
+}
+.ed-notes {
+  flex: 1;
+  align-self: stretch;
+  min-width: 0;
+  min-height: 80px;
+  margin: 0;
+  padding: 0;
+  resize: none;
   border: none;
   outline: none;
   background: transparent;
   color: var(--text);
   font: inherit;
-  font-size: 20px;
-  font-weight: 700;
-  padding: 2px 0;
+  font-size: 14px;
+  line-height: 1.55;
 }
-.ed-title::placeholder {
-  color: var(--placeholder);
-}
-.ed-grid {
-  display: grid;
-  grid-template-columns: 52px 1fr;
-  gap: 8px 10px;
-  align-items: center;
-  font-size: 13px;
-  color: var(--text-2);
-}
-.ed-grid .text-input {
-  padding: 5px 8px;
-  font-size: 13px;
-  min-width: 0;
-}
-.ed-times {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.ed-times .text-input {
-  flex: 1;
-  min-width: 0;
-  width: 0;
-}
-.ed-grid input[type="date"],
-.ed-grid input[type="time"] {
-  min-width: 0;
-  width: 100%;
-}
-.ed-to {
-  font-size: 12px;
+.ed-notes::placeholder {
   color: var(--text-3);
 }
-.ed-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+.ed-notes-mic {
+  margin-top: -2px;
 }
-.ed-label {
-  font-size: 13px;
-  color: var(--text-2);
+.ed-still.ed-notes-row {
+  flex: 0 0 auto;
+  min-height: 0;
 }
-.ed-notes {
-  min-height: 110px;
-  resize: vertical;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg);
-  color: var(--text);
-  font: inherit;
-  font-size: 13.5px;
-  padding: 8px 10px;
-  outline: none;
+.ed-plain-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  line-height: 1.55;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
 }
-.ed-notes:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
-}
-.ed-actions {
+/* The foot: the notes page, and the bin. It stays when the rows scroll. */
+.ed-foot {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  flex-shrink: 0;
+  margin-top: 4px;
+  padding: 8px 4px 0;
+  border-top: 1px solid var(--sep);
+}
+.ed-foot .ghost-btn {
+  padding: 5px 8px;
+  font-size: 13.5px;
+}
+.ed-foot .ghost-btn .ico {
+  color: var(--text-3);
+}
+.icon-btn.ed-trash {
+  color: var(--text-3);
+}
+.icon-btn.ed-trash:hover {
+  color: var(--danger);
+}
+.icon-btn.ed-trash.open {
+  background: var(--active);
+  color: var(--text);
+}
+.ed-lock {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 10px 12px 2px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-3);
+}
+.ed-lock .ico {
+  margin-top: 1px;
+}
+/* The panel's menus, as the model menu of the Ask AI box: a plain panel of
+   rows, the chosen row in grey, no blue and no check mark. */
+.ed-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 50;
+  min-width: 200px;
+  max-width: 272px;
+  padding: 6px;
+  border: 1px solid var(--float-edge);
+  border-radius: 12px;
+  background: var(--popover);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 10%, transparent), 0 22px 60px -12px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.2);
+  color: var(--text);
+  font-size: 13px;
+  cursor: default;
+  animation: pop-in 150ms var(--ease-out);
+  transform-origin: 0 0;
+}
+.ed-menu.anchored {
+  position: fixed;
+  z-index: 60;
+}
+.ed-menu-label {
+  padding: 6px 10px 4px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+.ed-menu-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 12px;
+  width: 100%;
+  height: 30px;
+  margin: 0;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: default;
+}
+.ed-menu-row:hover,
+.ed-menu-row:focus-visible {
+  background: var(--hover);
+  outline: none;
+}
+.ed-menu-row:focus-visible {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 28%, transparent);
+}
+.ed-menu-row.on {
+  background: var(--active);
+}
+.ed-menu-row.on > span:first-child {
+  font-weight: 600;
+}
+.ed-menu-row.danger {
+  color: var(--danger);
+}
+.ed-menu-aside {
+  font-size: 12px;
+  color: var(--text-3);
+}
+.ed-menu-list {
+  max-height: 240px;
+  overflow-y: auto;
+}
+.ed-times-menu {
+  width: 210px;
+}
+.ed-menu-field {
+  display: block;
+  width: 100%;
+  height: 30px;
+  margin: 0 0 6px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 8px;
+  outline: none;
+  background: var(--fill-4);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+.ed-menu-field::placeholder {
+  color: var(--text-3);
+}
+.ed-menu-field:focus {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 22%, transparent);
+}
+.ed-menu-field.wrong {
+  box-shadow: inset 0 0 0 1px var(--danger);
+}
+/* Rune's own day picker. */
+.ed-days {
+  width: 252px;
+  max-width: none;
+  padding: 10px 10px 8px;
+}
+.ed-days-head {
+  display: flex;
+  align-items: center;
+  padding: 0 0 6px 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.ed-days-head span {
+  flex: 1;
+}
+.ed-days-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  justify-items: center;
+  row-gap: 2px;
+}
+.ed-days-grid .wd {
+  height: 22px;
+  line-height: 22px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-3);
+}
+.ed-days-grid button {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 15px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: default;
+}
+.ed-days-grid button:hover {
+  background: var(--hover);
+}
+.ed-days-grid button.other {
+  color: var(--text-3);
+}
+.ed-days-grid button.today {
+  color: var(--icon-red, var(--danger));
+  font-weight: 700;
+}
+.ed-days-grid button.on {
+  background: var(--fill-2);
+  font-weight: 700;
+}
+.ed-days-grid button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ed-menu {
+    animation: none;
+  }
+}
+
+/* The space an event is in, when the calendar shows every space: the
+   space's letter in its colour, quiet, at the end of the event. */
+.ev-space {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  background: var(--s-soft);
+  color: var(--s);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0;
+}
+.cal-event .ev-space {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+}
+.cal-event.has-space .ev-title {
+  padding-right: 16px;
+}
+.cal-chip .ev-space,
+.up-row .ev-space {
+  margin-left: auto;
+  align-self: center;
+}
+/* Which spaces the calendar shows: one quiet button with their badges. */
+.cal-spaces-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 6px 0 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  cursor: default;
+}
+.cal-spaces-btn:hover,
+.cal-spaces-btn.open {
+  background: var(--hover);
+}
+.cal-spaces-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.cal-spaces-badges {
+  display: inline-flex;
+}
+.cal-spaces-badges .space-badge,
+.ed-space-badge {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  font-size: 9.5px;
+}
+.cal-spaces-badges .space-badge + .space-badge {
+  margin-left: -4px;
+  box-shadow: 0 0 0 1.5px var(--card);
 }
 
 .select.small {
@@ -4273,27 +4750,6 @@ body[data-dragging="seg"] .tab.seg-source {
   margin-right: 3px;
   vertical-align: -1px;
 }
-.ed-until {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-.ed-until .text-input {
-  padding: 4px 6px;
-  font-size: 13px;
-  min-width: 0;
-}
-.ed-repeat-note {
-  margin: -4px 0 0;
-}
-.ed-delete-choice {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: -4px;
-}
-
 /* ---------- a pane folded to a rail (as in Aven) ---------- */
 .split-cell.railed {
   flex: 0 0 28px;
@@ -4548,49 +5004,117 @@ body[data-dragging="seg"] .tab.seg-source {
 .mic-btn:hover {
   color: var(--accent);
 }
-/* The app's own listener is typing into the box beside it. */
-.mic-btn.hearing {
-  color: var(--accent);
-  background: var(--accent-soft);
-  animation: mic-hearing 1.4s ease-in-out infinite;
+/* The app's own listener is typing into the box beside it: the button is a
+   round of ink, the microphone gives way to three bars that move, and a
+   soft ring goes out from it. No colour: the ink of the text. */
+.mic-btn.hearing,
+.ai-round.mic-btn.hearing {
+  position: relative;
+  color: var(--bg);
+  background: var(--text);
+  border-radius: 50%;
+  animation: mic-ring 1600ms ease-out infinite;
 }
-@keyframes mic-hearing {
+.mic-btn.hearing > * {
+  opacity: 0;
+}
+.mic-btn.hearing::before,
+.mic-btn.hearing::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 2.5px;
+  height: 12px;
+  margin: -6px 0 0 -1.25px;
+  border-radius: 2px;
+  pointer-events: none;
+}
+/* The bar in the middle. */
+.mic-btn.hearing::before {
+  background: currentColor;
+  animation: mic-bar 900ms ease-in-out infinite;
+}
+/* The bars at its sides (two shadows of one bar that is not drawn). */
+.mic-btn.hearing::after {
+  box-shadow:
+    -5px 0 0 currentColor,
+    5px 0 0 currentColor;
+  animation: mic-bar 900ms ease-in-out -450ms infinite;
+}
+@keyframes mic-bar {
+  0%,
+  100% {
+    transform: scaleY(0.35);
+  }
   50% {
-    opacity: 0.55;
+    transform: scaleY(1);
+  }
+}
+@keyframes mic-ring {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--text) 38%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 6px color-mix(in srgb, var(--text) 0%, transparent);
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .mic-btn.hearing {
+  .mic-btn.hearing,
+  .ai-round.mic-btn.hearing,
+  .mic-btn.hearing::before,
+  .mic-btn.hearing::after {
     animation: none;
   }
 }
-.ed-notes-wrap {
-  position: relative;
-  display: flex;
-}
-.ed-notes-wrap .ed-notes {
-  flex: 1;
-  padding-right: 30px;
-}
-.ed-notes-mic {
-  position: absolute;
-  top: 5px;
-  right: 5px;
-}
-
 /* ---------- Ask your notes ---------- */
+/* Glass: the window behind it is dimmed and a little blurred, and the box is
+   a clear tint over that with a blur of its own, one hairline and no colour.
+   (The dim and the blur are a layer of their own behind the box, not on the
+   box's parent: a blur on the parent would leave the box nothing to blur.) */
+.modal-backdrop.ask-back {
+  background: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+.modal-backdrop.ask-back::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background: rgba(15, 15, 15, 0.38);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+}
 .modal.ask-notes {
-  width: min(680px, 92vw);
+  width: min(640px, 92vw);
+  background: color-mix(in srgb, var(--float-bg) 65%, transparent);
+  -webkit-backdrop-filter: blur(30px) saturate(1.5);
+  backdrop-filter: blur(30px) saturate(1.5);
+  border: 1px solid color-mix(in srgb, var(--text) 11%, transparent);
+  border-radius: 16px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 24px 60px -24px rgba(0, 0, 0, 0.6);
+  transition: border-color 200ms ease-out;
+}
+/* While it listens, its edge is a little lighter. */
+.modal.ask-notes:has(.mic-btn.hearing) {
+  border-color: color-mix(in srgb, var(--text) 30%, transparent);
+}
+@media (prefers-reduced-transparency: reduce) {
+  .modal.ask-notes {
+    background: var(--popover);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
 }
 .ask-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 12px 12px 12px 16px;
-}
-.ask-icon {
-  display: inline-flex;
-  color: var(--text-3);
+  gap: 6px;
+  min-height: 54px;
+  padding: 0 10px 0 18px;
 }
 .ask-input {
   flex: 1;
@@ -4600,8 +5124,113 @@ body[data-dragging="seg"] .tab.seg-source {
   background: transparent;
   color: var(--text);
   font: inherit;
-  font-size: 16px;
-  padding: 6px 2px;
+  font-size: 15.5px;
+  line-height: 24px;
+  padding: 15px 2px;
+}
+.ask-row .ai-round {
+  width: 30px;
+  height: 30px;
+}
+/* The send button is there once there are words to send. */
+.ask-row .ai-send:disabled {
+  display: none;
+}
+/* The model that answers, in quiet words. */
+.ask-model {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  font-size: 12px;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ask-model .ai-pips {
+  gap: 2px;
+}
+.ask-model .ai-pips i {
+  width: 3px;
+  height: 3px;
+}
+.modal.ask-notes .ask-foot {
+  padding: 0 16px 12px 18px;
+  font-size: 12px;
+  gap: 12px;
+}
+.ask-keys {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+.ask-key {
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid color-mix(in srgb, var(--text) 14%, transparent);
+  font-size: 11px;
+  color: var(--text-2);
+}
+.ask-key:not(:first-child) {
+  margin-left: 7px;
+}
+/* The line that says that it listens: in place of the foot, while it does. */
+.ask-listening {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  padding: 0 16px 12px 18px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.modal.ask-notes:has(.mic-btn.hearing) .ask-listening {
+  display: flex;
+}
+.modal.ask-notes:has(.mic-btn.hearing) .ask-foot {
+  display: none;
+}
+.ask-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text);
+  animation: ask-dot 1200ms ease-in-out infinite;
+}
+@keyframes ask-dot {
+  50% {
+    opacity: 0.3;
+  }
+}
+.ask-clock {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-3);
+}
+.ask-stop-hint {
+  margin-left: auto;
+  color: var(--text-3);
+}
+.ask-looked {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-3);
+  margin-bottom: 8px;
+}
+.modal.ask-notes .ask-body {
+  border-top-color: color-mix(in srgb, var(--text) 9%, transparent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .ask-dot {
+    animation: none;
+  }
 }
 .ask-input::placeholder {
   color: var(--placeholder);
@@ -6309,25 +6938,6 @@ button.due-chip:focus-visible {
   height: 10px;
   border-radius: 3px;
 }
-/* The panel of an event that comes from the Mac's calendars: read only. */
-.ed-title-plain {
-  margin: 0;
-  font-size: 20px;
-  font-weight: 700;
-  line-height: 1.25;
-  overflow-wrap: anywhere;
-}
-.ed-plain {
-  font-size: 13px;
-  color: var(--text-2);
-  overflow-wrap: anywhere;
-}
-.ed-plain.quiet {
-  margin-top: 4px;
-  font-size: 12px;
-  color: var(--text-3);
-}
-
 /* ---------- the calendar: an event that is dragged ---------- */
 .cal-event[data-event] {
   -webkit-user-select: none;
@@ -6555,22 +7165,43 @@ body.ev-dragging .cal-event {
 /* The list of a space comes in from the side its dot is on. (Its lines
    move, not the list: so nothing shows past the edge of the sidebar.) */
 .side-scroll.from-next > * {
-  animation: space-from-next 240ms cubic-bezier(0.22, 1, 0.36, 1);
+  animation: space-from-next 340ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
 }
 .side-scroll.from-prev > * {
-  animation: space-from-prev 240ms cubic-bezier(0.22, 1, 0.36, 1);
+  animation: space-from-prev 340ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+/* The lines come in one a little after the other, from the top. */
+.side-scroll.from-next > *:nth-child(2),
+.side-scroll.from-prev > *:nth-child(2) {
+  animation-delay: 14ms;
+}
+.side-scroll.from-next > *:nth-child(3),
+.side-scroll.from-prev > *:nth-child(3) {
+  animation-delay: 28ms;
+}
+.side-scroll.from-next > *:nth-child(4),
+.side-scroll.from-prev > *:nth-child(4) {
+  animation-delay: 42ms;
+}
+.side-scroll.from-next > *:nth-child(n + 5),
+.side-scroll.from-prev > *:nth-child(n + 5) {
+  animation-delay: 56ms;
 }
 @keyframes space-from-next {
   from {
-    transform: translateX(28px);
+    transform: translateX(36px);
     opacity: 0;
   }
 }
 @keyframes space-from-prev {
   from {
-    transform: translateX(-28px);
+    transform: translateX(-36px);
     opacity: 0;
   }
+}
+/* The name of the space comes in softly with its list. */
+.ws-label {
+  animation: fade-in 260ms var(--ease-out);
 }
 @media (prefers-reduced-motion: reduce) {
   .side-scroll.from-next > *,
@@ -6583,41 +7214,6 @@ body.ev-dragging .cal-event {
   }
 }
 
-/* ---------- the event panel: the link to join the call, in a field of its own ---------- */
-.ed-link-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 32px;
-  padding: 0 4px 0 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg);
-}
-.ed-link-row:focus-within {
-  border-color: color-mix(in srgb, var(--text) 35%, transparent);
-}
-.ed-link-icon {
-  display: inline-flex;
-  color: var(--text-3);
-  flex-shrink: 0;
-}
-.ed-link {
-  flex: 1;
-  min-width: 0;
-  height: 100%;
-  border: none;
-  outline: none;
-  background: none;
-  color: var(--text);
-  font: inherit;
-  font-size: 13.5px;
-  text-overflow: ellipsis;
-}
-.ed-link::placeholder {
-  color: var(--text-3);
-}
-
 /* ---------- the question on a meeting's notes: the page of the last time ---------- */
 .place-before {
   color: var(--text-3);
@@ -6628,4 +7224,750 @@ body.ev-dragging .cal-event {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ---------- the video player: moved by its bar, sized by a corner ---------- */
+.player-bar {
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.player-bar button {
+  cursor: default;
+}
+.player-dock.moving .player-bar {
+  cursor: grabbing;
+}
+.player-dock.moving,
+.player-dock.sizing {
+  animation: none;
+  transition: none;
+}
+/* A corner to pull on. It lies a little outside the frame of the player,
+   because the player itself is a view over the page and takes the pointer. */
+.player-grip {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  z-index: 2;
+}
+.player-grip[data-corner="nw"] {
+  left: -5px;
+  top: -5px;
+  cursor: nwse-resize;
+}
+.player-grip[data-corner="ne"] {
+  right: -5px;
+  top: -5px;
+  cursor: nesw-resize;
+}
+.player-grip[data-corner="sw"] {
+  left: -5px;
+  bottom: -5px;
+  cursor: nesw-resize;
+}
+.player-grip[data-corner="se"] {
+  right: -5px;
+  bottom: -5px;
+  cursor: nwse-resize;
+}
+
+/* ---------- the picture of a video under its link can be put away ---------- */
+/* A small picture: it says "there is a video here" and does not take the page. */
+.video-card {
+  position: relative;
+  width: min(100%, 240px);
+  margin: 4px 0 8px;
+}
+.video-card > .video-embed {
+  width: 100%;
+  margin: 0;
+  border-radius: 8px;
+}
+.video-card .video-play {
+  width: 38px;
+  height: 38px;
+  margin: -19px 0 0 -19px;
+}
+.video-card .video-play svg {
+  width: 15px;
+  height: 15px;
+}
+.kind-bulleted > .video-card,
+.kind-numbered > .video-card,
+.kind-todo > .video-card {
+  margin-left: 26px;
+  width: min(calc(100% - 26px), 240px);
+}
+.video-hide {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.55);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  opacity: 0;
+  cursor: default;
+  transition: opacity 120ms;
+}
+.video-card:hover .video-hide,
+.video-hide:focus-visible {
+  opacity: 1;
+}
+.video-hide:hover {
+  background: rgba(0, 0, 0, 0.78);
+}
+
+/* ---------- the meeting pad (src/pad.rs, src/ui/pad.rs) ----------
+   A card of its own at a corner of the screen while a meeting is on. In its
+   own window the card fills the window (the window is made as big as the
+   card, and its glass is the window's); a test run draws it in the app's
+   window, at the corner. */
+.padwin {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  font-size: 13px;
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.pad-inline {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 150;
+}
+.pad-inline .padwin {
+  position: static;
+}
+.pad-inline .pad-card {
+  box-shadow: inset 0 0 0 1px var(--float-edge), var(--shadow);
+}
+.pad-card {
+  display: flex;
+  flex-direction: column;
+  width: 328px;
+  border-radius: 13px;
+  background: var(--float-bg);
+  box-shadow: inset 0 0 0 1px var(--float-edge);
+  overflow: hidden;
+}
+.pad-card p {
+  margin: 0;
+}
+/* On glass, a button with the page's own solid colour would be a dark slab. */
+.pad-card .secondary-btn {
+  background: var(--fill-4);
+}
+.pad-card .secondary-btn:hover:not(:disabled) {
+  background: var(--active);
+}
+.pad-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 8px 8px 12px;
+}
+.pad-icon .page-ico {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: var(--c-soft, var(--fill-3));
+}
+.pad-title {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.pad-title b {
+  font-weight: 600;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.pad-title span {
+  font-size: 12px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+/* the question at the start */
+.pad-ask {
+  padding: 2px 14px 0;
+}
+.pad-q {
+  font-weight: 600;
+}
+.pad-sub {
+  margin-top: 2px;
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+.pad-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+  padding: 12px;
+}
+/* the notepad (what is typed in it is pad.js's) */
+.pad-notes {
+  position: relative;
+  margin: 0 6px;
+  padding: 8px 10px 8px 26px;
+  min-height: 128px;
+  max-height: 190px;
+  overflow-y: auto;
+  border-radius: 9px;
+  background: var(--fill-4);
+  list-style: disc;
+  font-size: 13.5px;
+  line-height: 1.55;
+  outline: none;
+  cursor: text;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.pad-notes li {
+  padding-left: 2px;
+}
+.pad-notes li::marker {
+  color: var(--text-3);
+}
+.pad-notes.is-empty::after {
+  content: attr(data-placeholder);
+  position: absolute;
+  left: 28px;
+  top: 8px;
+  color: var(--text-3);
+  pointer-events: none;
+}
+.pad-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 8px 8px 8px 14px;
+}
+.pad-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1.5px var(--text-3);
+  flex-shrink: 0;
+}
+.pad-clock {
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+.pad-latest {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+.pad-latest.pad-problem {
+  color: var(--text-2);
+}
+/* the small form */
+.pad-card.is-small {
+  flex-direction: row;
+  align-items: center;
+  width: max-content;
+  max-width: 328px;
+  height: 32px;
+  border-radius: 16px;
+  padding-right: 4px;
+}
+.pad-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  height: 100%;
+  padding: 0 8px 0 12px;
+  border-radius: 16px;
+  outline: none;
+}
+.pad-pill:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--accent-soft);
+}
+.pad-pill-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-weight: 500;
+}
+.pad-card.is-small .icon-btn {
+  border-radius: 50%;
+}
+/* the question at the end */
+.pad-end {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 2px 12px 12px 14px;
+}
+.pad-status,
+.pad-told {
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+.pad-label {
+  margin-top: 2px;
+  font-weight: 600;
+}
+/* The page to keep the notes in: Rune's own list (as the model menu of the
+   Ask AI box), never the system's. Closed, a quiet field with the page's
+   icon and name; open, plain rows over the field, and the card grows. */
+.pad-pick {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--fill-4);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: default;
+  transition: background-color 120ms ease;
+}
+.pad-pick:hover,
+.pad-pick[aria-expanded="true"] {
+  background: var(--active);
+}
+.pad-pick-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.pad-chev {
+  display: inline-flex;
+  color: var(--text-3);
+}
+.pad-list {
+  max-height: 268px;
+  overflow: hidden auto;
+  scrollbar-width: none;
+  padding: 6px;
+  border-radius: 12px;
+  background: var(--fill-4);
+  box-shadow: inset 0 0 0 1px var(--float-edge);
+  animation: reveal 160ms var(--ease-out);
+}
+.pad-list::-webkit-scrollbar {
+  display: none;
+}
+.pad-place {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 30px;
+  margin: 0;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+  cursor: default;
+}
+.pad-place:hover,
+.pad-place:focus-visible {
+  background: var(--hover);
+  outline: none;
+}
+.pad-place.active {
+  background: var(--active);
+  font-weight: 600;
+}
+.pad-place.quiet {
+  color: var(--text-2);
+}
+.pad-place .page-ico {
+  flex-shrink: 0;
+}
+.pad-place-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pad-list-sep {
+  height: 1px;
+  margin: 6px 4px;
+  background: var(--sep);
+}
+.pad-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pad-before {
+  color: var(--text-3);
+  white-space: nowrap;
+}
+.pad-same {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pad-grow {
+  flex: 1;
+}
+.pad-kept {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px;
+}
+.pad-ok {
+  display: inline-flex;
+  color: var(--ok);
+}
+/* The player while Rune writes down what the video says: the time beside its dot. */
+.player-clock {
+  margin: 0 4px 0 2px;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pad-list {
+    animation: none;
+  }
+}
+
+/* ---------- the list of the last space, as it slides out (a picture of it) ---------- */
+.side-ghost {
+  position: absolute;
+  z-index: 1;
+  overflow: hidden;
+  pointer-events: none;
+}
+.side-ghost > .side-scroll {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+/* ---------- Ask AI: a small button at the foot of a pane that opens into a bar ---------- */
+/* Flat, like a menu: one ground, one hairline. It lies over the page and
+   takes no room in it. At rest it is a round button; open, a bar to type in;
+   with an answer, a small card that grows upward from the bar. Its place is
+   the foot of the pane, in the middle (no transform: its menu's shade must
+   cover the window). */
+.ai-dock {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 14px;
+  margin: 0 auto;
+  z-index: 46;
+  width: 32px;
+  min-height: 32px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  /* Glass (the look picked on the mock canvas): a clear tint over the page
+     with a blur of its own, one hairline, a line of light at its top edge
+     and a soft shadow under it. It is outside the part that scrolls. */
+  border: 1px solid color-mix(in srgb, var(--text) 16%, transparent);
+  border-radius: 22px;
+  background: color-mix(in srgb, var(--float-bg) 62%, transparent);
+  -webkit-backdrop-filter: blur(24px) saturate(1.4);
+  backdrop-filter: blur(24px) saturate(1.4);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 12px 32px -12px rgba(0, 0, 0, 0.55);
+  transition:
+    width 380ms cubic-bezier(0.22, 1, 0.36, 1),
+    min-height 380ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-radius 240ms ease-out,
+    border-color 180ms ease-out;
+}
+@media (prefers-reduced-transparency: reduce) {
+  .ai-dock {
+    background: var(--popover);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+.ai-dock.open {
+  width: min(480px, calc(100% - 32px));
+  min-height: 44px;
+}
+.ai-dock.open:focus-within {
+  border-color: color-mix(in srgb, var(--text) 26%, transparent);
+}
+/* With an answer it lies over more of the page: a stronger tint, so that
+   its words read well. */
+.ai-dock.answer {
+  background: color-mix(in srgb, var(--float-bg) 86%, transparent);
+  border-radius: 14px;
+}
+.ai-dock-btn {
+  align-self: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--icon-muted);
+  display: grid;
+  place-items: center;
+  cursor: default;
+  transition:
+    color 150ms ease-out,
+    transform 150ms ease-out;
+}
+.ai-dock-btn:hover {
+  color: var(--text);
+}
+.ai-dock-btn:active {
+  transform: scale(0.92);
+}
+.ai-dock-btn:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--text) 40%, transparent);
+  outline-offset: 1px;
+}
+.ai-dock .ai-panel {
+  position: static;
+  margin: 0;
+  border: none;
+  background: none;
+  box-shadow: none;
+  display: block;
+  animation: none;
+  min-width: 0;
+}
+/* What is in it comes in while the bar opens, and is cut at its edge. */
+.ai-dock .ai-panel-in {
+  overflow: hidden;
+  min-height: 0;
+  border-radius: inherit;
+  animation: ai-dock-in 220ms ease-out 90ms backwards;
+}
+@keyframes ai-dock-in {
+  from {
+    opacity: 0;
+  }
+}
+/* The card grows from the bar: the height of its one row goes from none to all. */
+.ai-dock.answer .ai-panel {
+  display: grid;
+  grid-template-rows: 1fr;
+  animation: ai-card-grow 300ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes ai-card-grow {
+  from {
+    grid-template-rows: 0fr;
+  }
+}
+.ai-dock .ai-compose {
+  min-height: 0;
+  gap: 4px;
+  padding-right: 7px;
+}
+.ai-dock .ai-input {
+  padding: 0 4px 0 16px;
+  font-size: 14px;
+  white-space: nowrap;
+}
+.ai-dock .ai-round {
+  width: 28px;
+  height: 28px;
+}
+.ai-dock .ai-model {
+  font-size: 12px;
+  padding: 0 6px;
+}
+.ai-dock .ai-model-name {
+  max-width: 120px;
+}
+.ai-dock .ai-caption {
+  padding: 10px 14px 0;
+}
+.ai-dock .ai-output {
+  max-height: min(30vh, 220px);
+  padding: 4px 14px 4px;
+  font-size: 13.5px;
+  line-height: 1.55;
+}
+.ai-dock .ai-status,
+.ai-dock .ai-actions {
+  padding: 0 10px 10px 14px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+.ai-dock .ai-actions button {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12.5px;
+}
+.ai-dock .ai-writing {
+  font-size: 13px;
+}
+.ai-dock .ai-error {
+  font-size: 13px;
+  padding: 8px 14px 10px;
+}
+/* While it works: a line of light goes along its upper edge. */
+.ai-dock:has(.ai-panel.live)::before {
+  content: "";
+  position: absolute;
+  left: 18px;
+  right: 18px;
+  top: -1px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--text) 60%, transparent), transparent) no-repeat;
+  background-size: 36% 100%;
+  animation: ai-sheen 1500ms linear infinite;
+  pointer-events: none;
+}
+@keyframes ai-sheen {
+  from {
+    background-position: -60% 0;
+  }
+  to {
+    background-position: 160% 0;
+  }
+}
+/* Its menu opens upward: the bar is at the foot. */
+.ai-dock .ai-menu {
+  top: auto;
+  bottom: calc(100% + 8px);
+  right: 0;
+  max-width: 100%;
+  max-height: min(56vh, 400px);
+  transform-origin: calc(100% - 70px) calc(100% + 14px);
+}
+.ai-plan {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px 14px 2px;
+  font-size: 13px;
+  color: var(--text);
+  max-height: min(30vh, 200px);
+  overflow-y: auto;
+}
+.ai-plan-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-shrink: 0;
+}
+.ai-plan-row .ico {
+  color: var(--text-3);
+  flex-shrink: 0;
+}
+.ai-plan-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* In the box that asks all the notes, the rows have no padding of their own. */
+.ask-body .ai-plan {
+  padding: 2px 0 8px;
+}
+.modal.ask-notes .primary-btn {
+  background: var(--text);
+  border-color: transparent;
+  color: var(--bg);
+}
+/* What the AI did with the tools of Rune: the same rows, each with a check. */
+.ai-did .ai-plan-row .ico {
+  color: var(--ok);
+}
+.ai-did .ai-more {
+  color: var(--text-3);
+  padding-left: 22px;
+}
+/* What the AI did a moment ago, above the button. */
+.ai-done {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 56px;
+  margin: 0 auto;
+  width: max-content;
+  max-width: calc(100% - 32px);
+  box-sizing: border-box;
+  z-index: 46;
+  height: 34px;
+  padding: 0 5px 0 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid color-mix(in srgb, var(--text) 16%, transparent);
+  border-radius: 17px;
+  background: color-mix(in srgb, var(--float-bg) 78%, transparent);
+  -webkit-backdrop-filter: blur(24px) saturate(1.4);
+  backdrop-filter: blur(24px) saturate(1.4);
+  font-size: 12.5px;
+  white-space: nowrap;
+  animation: ai-done-in 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes ai-done-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+.ai-done .ico {
+  color: var(--ok);
+  flex-shrink: 0;
+}
+.ai-done span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ai-done button {
+  flex-shrink: 0;
+  border-radius: 12px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ai-dock,
+  .ai-dock-btn {
+    transition: none;
+  }
+  .ai-dock .ai-panel,
+  .ai-dock .ai-panel-in,
+  .ai-dock.answer .ai-panel,
+  .ai-dock:has(.ai-panel.live)::before,
+  .ai-done {
+    animation: none;
+  }
 }

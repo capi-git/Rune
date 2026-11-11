@@ -6,6 +6,7 @@
 mod ai;
 mod aven;
 mod backup;
+mod chart;
 mod dictation;
 mod repeat;
 mod transfer;
@@ -24,6 +25,7 @@ mod mcp;
 mod meeting;
 mod model;
 mod notify;
+mod pad;
 mod player;
 mod quickadd;
 mod slots;
@@ -42,6 +44,7 @@ use dioxus::desktop::{Config, LogicalPosition, LogicalSize, WindowBuilder};
 
 const CSS: &str = include_str!("../assets/style.css");
 const ICON_CSS: &str = include_str!("../assets/icons.css");
+const TABLE_CSS: &str = include_str!("../assets/tables.css");
 
 thread_local! {
     /// One menu bar for the whole app, shared by every window.
@@ -138,11 +141,40 @@ pub fn window_config() -> Config {
         .with_background_color((0, 0, 0, 0))
         // The page template names no text encoding; without this, symbols in
         // the styles (…, ⌘) come out garbled.
-        .with_custom_head(format!("<meta charset=\"utf-8\"><style>{CSS}\n{ICON_CSS}</style>"))
+        .with_custom_head(format!("<meta charset=\"utf-8\"><style>{CSS}\n{ICON_CSS}\n{TABLE_CSS}</style>"))
         .with_menu(MENU.with(|m| m.clone()))
         .with_disable_drag_drop_handler(true)
         .with_custom_protocol(drawing::SCHEME, drawing::serve)
         .with_custom_protocol(files::SCHEME, files::serve)
+}
+
+/// Settings for the window of the meeting pad (see pad.rs): a small
+/// see-through window with no frame, over the other windows. It is made
+/// out of view and without the keyboard; the pad shows it once it knows how
+/// big it is. Its class is changed to a panel right after tao has made it,
+/// before the web view goes in (the only moment that is safe: see
+/// `pad::make_panel`).
+pub fn pad_window_config() -> Config {
+    let window = WindowBuilder::new()
+        .with_title("Rune meeting pad")
+        .with_inner_size(LogicalSize::new(328.0, 150.0))
+        .with_decorations(false)
+        .with_transparent(true)
+        .with_resizable(false)
+        .with_always_on_top(true)
+        .with_has_shadow(true)
+        .with_focusable(false)
+        .with_focused(false)
+        .with_visible(false);
+    Config::new()
+        .with_window(window)
+        .with_background_color((0, 0, 0, 0))
+        .with_custom_head(format!("<meta charset=\"utf-8\"><style>{CSS}\n{ICON_CSS}</style>"))
+        // (No menu of its own: the app's menu bar stays as the first window set it.)
+        .with_disable_drag_drop_handler(true)
+        .with_on_window(|window, _dom| {
+            pad::make_panel(&window);
+        })
 }
 
 /// Menu bar modelled on the desktop app's (File, Edit, View, History, Window).

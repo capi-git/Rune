@@ -7,7 +7,7 @@
 //! the prompt on stdin and streams the reply back. Dropping the receiver kills
 //! the process.
 
-use super::{AiEvent, ChatMessage, Provider};
+use super::{AiEvent, ChatMessage, Provider, Tools};
 use futures_channel::mpsc::UnboundedSender;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -236,12 +236,23 @@ pub async fn installed_async(refresh: bool) -> Vec<Installed> {
 
 /// Flags that make Claude Code a plain text generator: no tools, no MCP
 /// servers, hooks, plugins or CLAUDE.md, nothing saved.
-pub fn claude_args(system: &str, model: &str, effort: &str, optional: bool) -> Vec<String> {
+pub fn claude_args(system: &str, model: &str, effort: &str, optional: bool, tools: Option<&Tools>) -> Vec<String> {
     let mut args: Vec<String> = ["-p", "--output-format", "stream-json", "--verbose", "--tools", "", "--permission-mode", "dontAsk"]
         .map(String::from)
         .to_vec();
     if optional {
-        args.extend(["--include-partial-messages", "--safe-mode", "--no-session-persistence"].map(String::from));
+        args.extend(["--include-partial-messages", "--no-session-persistence"].map(String::from));
+    }
+    match tools {
+        // The tools of Rune, and no other: none of Claude Code's own tools
+        // (--tools ""), none of the person's own connectors (--strict-mcp-config).
+        // Safe mode would switch these tools off with the person's own, so
+        // this run reads none of the person's settings in its place.
+        Some(tools) => args.extend(
+            ["--setting-sources", "", "--mcp-config", &tools_config(tools), "--allowedTools", &format!("mcp__{}", super::TOOLS_NAME)].map(String::from),
+        ),
+        None if optional => args.push("--safe-mode".into()),
+        None => {}
     }
     args.extend(["--strict-mcp-config".into(), "--disable-slash-commands".into()]);
     if !system.trim().is_empty() {
@@ -257,14 +268,40 @@ pub fn claude_args(system: &str, model: &str, effort: &str, optional: bool) -> V
     args
 }
 
+/// How Claude Code starts the tools of Rune: this program as a connector
+/// (`--mcp`), on the same notes, with the file for the record of changes.
+pub fn tools_config(tools: &Tools) -> String {
+    // (A test names the program: the program of a test is not the app.)
+    let program = std::env::var("NOTION2_TOOLS_PROGRAM")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "notion2".into()));
+    let mut env = serde_json::Map::new();
+    env.insert(crate::mcp::JOURNAL_ENV.into(), Value::String(tools.journal.display().to_string()));
+    if let Some(db) = std::env::var_os("NOTION2_DB").filter(|d| !d.is_empty()) {
+        env.insert("NOTION2_DB".into(), Value::String(db.to_string_lossy().into_owned()));
+    }
+    serde_json::json!({ "mcpServers": { super::TOOLS_NAME: { "command": program, "args": ["--mcp"], "env": env } } }).to_string()
+}
+
 /// Codex runs in a read-only sandbox in an empty folder, prints JSON events
 /// and keeps no session files. The prompt is read from stdin ("-").
-pub fn codex_args(dir: &Path, model: &str, effort: &str, optional: bool) -> Vec<String> {
+pub fn codex_args(dir: &Path, model: &str, effort: &str, optional: bool, tools: Option<&Tools>) -> Vec<String> {
     let mut args: Vec<String> = ["exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only", "--color", "never"]
         .map(String::from)
         .to_vec();
     if optional {
         args.push("--ephemeral".into());
+    }
+    // The tools of Rune: this program as a connector for this run only.
+    if let Some(tools) = tools {
+        let config: Value = serde_json::from_str(&tools_config(tools)).unwrap_or_default();
+        let server = &config["mcpServers"][super::TOOLS_NAME];
+        let env = server["env"].as_object().map(|e| e.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",")).unwrap_or_default();
+        let name = super::TOOLS_NAME;
+        for setting in [format!("mcp_servers.{name}.command={}", server["command"]), format!("mcp_servers.{name}.args={}", server["args"]), format!("mcp_servers.{name}.env={{{env}}}")] {
+            args.extend(["-c".into(), setting]);
+        }
     }
     args.extend(["-C".into(), dir.display().to_string()]);
     if !model.trim().is_empty() {
@@ -280,13 +317,16 @@ pub fn codex_args(dir: &Path, model: &str, effort: &str, optional: bool) -> Vec<
 }
 
 /// Codex has no system-prompt flag, so the instructions lead the prompt.
-pub fn codex_prompt(system: &str, user: &str) -> String {
+pub fn codex_prompt(system: &str, user: &str, tools: bool) -> String {
     if system.trim().is_empty() {
         return user.to_string();
     }
-    format!(
-        "{system}\n\nAnswer directly from the text below. Do not run commands, read files or browse.\n\n---\n\n{user}"
-    )
+    let rule = if tools {
+        "The tools of Rune are the tools named rune. Use only those. Do not run commands, read files or browse."
+    } else {
+        "Answer directly from the text below. Do not run commands, read files or browse."
+    };
+    format!("{system}\n\n{rule}\n\n---\n\n{user}")
 }
 
 /// Environment variables a parent Claude Code session sets that would make
@@ -311,6 +351,8 @@ fn strip_from_env(name: &str) -> bool {
 #[derive(Debug, PartialEq)]
 pub enum Line {
     Delta(String),
+    /// The AI used tools: the name of each, and what it gave it.
+    Steps(Vec<(String, Value)>),
     /// The tool reported a failure.
     Fail(String),
     /// The tool finished its turn successfully.
@@ -348,6 +390,20 @@ impl ClaudeParser {
                     }
                     _ => Line::Ignore,
                 }
+            }
+            // A whole message that uses tools: its steps.
+            Some("assistant") if v["message"]["content"].as_array().is_some_and(|b| b.iter().any(|b| b["type"] == "tool_use")) => {
+                let steps = v["message"]["content"]
+                    .as_array()
+                    .map(|blocks| {
+                        blocks
+                            .iter()
+                            .filter(|b| b["type"] == "tool_use")
+                            .filter_map(|b| Some((b["name"].as_str()?.to_string(), b["input"].clone())))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                Line::Steps(steps)
             }
             // A whole message: used only when partial messages aren't streamed.
             Some("assistant") if !self.streamed_current => {
@@ -431,6 +487,15 @@ impl CodexParser {
         match v["type"].as_str() {
             Some("item.started" | "item.updated" | "item.completed") => {
                 let item = &v["item"];
+                // A use of a tool of Rune is a step (said one time, as it starts).
+                if item["type"] == "mcp_tool_call" {
+                    return match (v["type"].as_str(), item["tool"].as_str()) {
+                        (Some("item.started"), Some(tool)) => {
+                            Line::Steps(vec![(format!("mcp__{}__{tool}", item["server"].as_str().unwrap_or(super::TOOLS_NAME)), item["arguments"].clone())])
+                        }
+                        _ => Line::Ignore,
+                    };
+                }
                 if item["type"] != "agent_message" {
                     return Line::Ignore;
                 }
@@ -581,7 +646,7 @@ enum Attempt {
 }
 
 /// Run one request through an installed tool, streaming its reply into `tx`.
-pub async fn run(provider: Provider, model: &str, effort: &str, messages: &[ChatMessage], tx: &UnboundedSender<AiEvent>) -> Result<(), String> {
+pub async fn run(provider: Provider, model: &str, effort: &str, messages: &[ChatMessage], tools: Option<&Tools>, tx: &UnboundedSender<AiEvent>) -> Result<(), String> {
     let path = {
         let (otx, orx) = futures_channel::oneshot::channel();
         super::runtime().spawn_blocking(move || {
@@ -601,7 +666,7 @@ pub async fn run(provider: Provider, model: &str, effort: &str, messages: &[Chat
 
     let mut optional = true;
     loop {
-        match attempt(provider, &path, model, effort, &system, &user, optional, tx).await {
+        match attempt(provider, &path, model, effort, &system, &user, optional, tools, tx).await {
             Attempt::Done | Attempt::Stopped => return Ok(()),
             Attempt::Failed(e) => return Err(e),
             Attempt::UnknownFlag(flag) => {
@@ -630,6 +695,7 @@ async fn attempt(
     system: &str,
     user: &str,
     optional: bool,
+    tools: Option<&Tools>,
     tx: &UnboundedSender<AiEvent>,
 ) -> Attempt {
     let dir = match TempDir::new() {
@@ -637,8 +703,8 @@ async fn attempt(
         Err(e) => return Attempt::Failed(e),
     };
     let (args, input, mut parser) = match provider {
-        Provider::ClaudeCode => (claude_args(system, model, effort, optional), user.to_string(), Parser::Claude(ClaudeParser::default())),
-        _ => (codex_args(&dir.0, model, effort, optional), codex_prompt(system, user), Parser::Codex(CodexParser::default())),
+        Provider::ClaudeCode => (claude_args(system, model, effort, optional, tools), user.to_string(), Parser::Claude(ClaudeParser::default())),
+        _ => (codex_args(&dir.0, model, effort, optional, tools), codex_prompt(system, user, tools.is_some()), Parser::Codex(CodexParser::default())),
     };
 
     let mut cmd = tokio::process::Command::new(path);
@@ -700,6 +766,14 @@ async fn attempt(
                             emitted = true;
                             if tx.unbounded_send(AiEvent::Delta(text)).is_err() {
                                 return Attempt::Stopped; // the child is killed when dropped
+                            }
+                        }
+                        Line::Steps(steps) => {
+                            emitted = true;
+                            for (name, input) in steps {
+                                if tx.unbounded_send(AiEvent::Step(name, input)).is_err() {
+                                    return Attempt::Stopped;
+                                }
                             }
                         }
                         Line::Fail(e) => failure = Some(e),
@@ -873,25 +947,49 @@ mod tests {
 
     #[test]
     fn command_lines() {
-        let a = claude_args("Be brief.", "", "", true);
+        let a = claude_args("Be brief.", "", "", true, None);
         let tools = a.iter().position(|x| x == "--tools").unwrap();
         assert_eq!(a[tools + 1], "");
         assert!(a.contains(&"--safe-mode".to_string()) && a.contains(&"--no-session-persistence".to_string()));
         assert!(a.windows(2).any(|w| w[0] == "--system-prompt" && w[1] == "Be brief."));
         assert!(!a.contains(&"--model".to_string()) && !a.contains(&"--effort".to_string()));
-        let b = claude_args("", "sonnet", "high", false);
+        let b = claude_args("", "sonnet", "high", false, None);
+        // With the tools of Rune: this program as the one connector, its tools allowed, no safe mode (it would switch them off).
+        let tools = Tools { journal: PathBuf::from("/tmp/run.jsonl") };
+        let t = claude_args("Be brief.", "", "", true, Some(&tools));
+        assert!(!t.contains(&"--safe-mode".to_string()) && t.contains(&"--strict-mcp-config".to_string()));
+        assert!(t.windows(2).any(|w| w[0] == "--tools" && w[1].is_empty()) && t.windows(2).any(|w| w[0] == "--setting-sources" && w[1].is_empty()));
+        assert!(t.windows(2).any(|w| w[0] == "--allowedTools" && w[1] == "mcp__rune"));
+        let config: Value = serde_json::from_str(&t[t.iter().position(|x| x == "--mcp-config").unwrap() + 1]).unwrap();
+        assert_eq!(config["mcpServers"]["rune"]["args"][0], "--mcp");
+        assert_eq!(config["mcpServers"]["rune"]["env"]["NOTION2_AI_JOURNAL"], "/tmp/run.jsonl");
+        // A use of a tool in the answer of Claude Code is a step.
+        let mut parser = ClaudeParser::default();
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"mcp__rune__create_page","input":{"title":"Fitness"}}]}}"#;
+        assert!(matches!(parser.line(line), Line::Steps(steps) if steps.len() == 1 && steps[0].0 == "mcp__rune__create_page" && steps[0].1["title"] == "Fitness"));
         assert!(b.windows(2).any(|w| w[0] == "--effort" && w[1] == "high"));
         assert!(!b.contains(&"--safe-mode".to_string()) && b.contains(&"--tools".to_string()));
         assert!(b.windows(2).any(|w| w[0] == "--model" && w[1] == "sonnet"));
 
-        let c = codex_args(Path::new("/tmp/x"), "", "", true);
+        let c = codex_args(Path::new("/tmp/x"), "", "", true, None);
+        // Codex with the tools of Rune: the connector is set for this run, and a use of a tool is a step.
+        let ct = codex_args(Path::new("/tmp/x"), "", "", true, Some(&tools));
+        assert!(ct.windows(2).any(|w| w[0] == "-c" && w[1].starts_with("mcp_servers.rune.command=\"")));
+        assert!(ct.windows(2).any(|w| w[0] == "-c" && w[1] == "mcp_servers.rune.args=[\"--mcp\"]"));
+        assert!(ct.windows(2).any(|w| w[0] == "-c" && w[1].starts_with("mcp_servers.rune.env={") && w[1].contains("NOTION2_AI_JOURNAL=\"/tmp/run.jsonl\"")), "{ct:?}");
+        assert_eq!(ct.last().map(String::as_str), Some("-"));
+        let mut cp = CodexParser::default();
+        let started = r#"{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"rune","tool":"create_page","arguments":{"title":"Fitness"},"status":"in_progress"}}"#;
+        assert!(matches!(cp.line(started), Line::Steps(steps) if steps[0].0 == "mcp__rune__create_page" && steps[0].1["title"] == "Fitness"));
+        assert!(matches!(cp.line(&started.replace("item.started", "item.completed")), Line::Ignore));
+        assert!(codex_prompt("Be brief.", "Hello", true).contains("tools named rune") && codex_prompt("Be brief.", "Hello", false).contains("Answer directly"));
         assert!(!c.iter().any(|x| x.contains("reasoning_effort")));
-        let d = codex_args(Path::new("/tmp/x"), "", "max", true);
+        let d = codex_args(Path::new("/tmp/x"), "", "max", true, None);
         assert!(d.windows(2).any(|w| w[0] == "-c" && w[1] == "model_reasoning_effort=\"high\"") && d.last().map(String::as_str) == Some("-"));
         assert!(c.windows(2).any(|w| w[0] == "--sandbox" && w[1] == "read-only"));
         assert_eq!(c.last().map(String::as_str), Some("-"));
         assert!(c.contains(&"--ephemeral".to_string()));
-        assert!(codex_prompt("SYS", "Hello").starts_with("SYS") && codex_prompt("SYS", "Hello").ends_with("Hello"));
+        assert!(codex_prompt("SYS", "Hello", false).starts_with("SYS") && codex_prompt("SYS", "Hello", false).ends_with("Hello"));
     }
 
     /// Sends one tiny prompt through every installed tool, exactly as the app
@@ -924,6 +1022,106 @@ mod tests {
             assert_eq!(events.last(), Some(&AiEvent::Done));
             assert!(text.to_lowercase().contains("pong"), "{text}");
         }
+    }
+
+    /// The real tool, asked for pages of their own: its reply must be one
+    /// that the app can turn into a changed page with linked sub-pages.
+    #[test]
+    #[ignore = "calls the installed AI tools"]
+    fn live_sub_pages() {
+        use super::super::{build_messages, clean_reply, link_pages, split_pages, split_revision, AiAction};
+        let Some(tool) = installed(true).into_iter().next() else { panic!("no AI tool found") };
+        let page = "# Workout Plan\n\n## Overview\n\nA three day plan.\n\n## Workout Details\n\n### Workout A: Full body\n\n- 20 burpees\n- 15 pull-ups\n- 40 jump squats\n\n### Workout B: Upper body\n\n- 25 diamond push-ups\n- 12 chin-ups\n\n### Workout C: Legs\n\n- 30 pistol squats\n- 50 lunges\n\n## Workouts\n\nTo finish setting this up, turn each workout under Workout Details into its own subpage, then link it in the Workouts list below.\n";
+        let asked = "This is too hard. Make it easier, keep it to calisthenics, and make this page the main page with a sub-page for each workout, linked from the Workouts list.";
+        let prefs = super::super::Prefs { provider: Some(tool.provider), ..Default::default() };
+        let started = Instant::now();
+        let rx = super::super::start(prefs, build_messages(&AiAction::Ask, page, "", asked));
+        let events: Vec<AiEvent> = super::super::runtime().block_on(futures_util::StreamExt::collect(rx));
+        let text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                AiEvent::Delta(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        eprintln!("{:?} in {:.1}s:\n{text}", tool.provider, started.elapsed().as_secs_f32());
+        assert_eq!(events.last(), Some(&AiEvent::Done));
+        let body = split_revision(&clean_reply(&text).0).expect("the reply changes the page");
+        let (main, pages) = split_pages(&body);
+        assert_eq!(pages.len(), 3, "one sub-page for each workout: {:?}", pages.iter().map(|(n, _)| n).collect::<Vec<_>>());
+        assert!(pages.iter().all(|(_, text)| text.trim().len() > 20), "each sub-page has its workout");
+        let made: Vec<(String, String)> = pages.iter().enumerate().map(|(i, (n, _))| (n.clone(), format!("p{i}"))).collect();
+        let linked = link_pages(&main, &made);
+        let found = made.iter().filter(|(_, id)| linked.contains(&format!("notion2://page/{id}"))).count();
+        eprintln!("linked in the page: {found} of {}\n{linked}", made.len());
+        assert_eq!(found, 3, "the page links to each sub-page by its name");
+        assert!(!main.contains("turn each workout"), "the page no longer tells the person to do it");
+    }
+
+    /// The real tool with the tools of Rune, on notes of its own: it must
+    /// do the work itself, and the record must say what it did.
+    /// Build the app first (`cargo build`): its program serves the tools.
+    #[test]
+    #[ignore = "calls the installed AI tools"]
+    fn live_agent_tools() {
+        use super::super::{build_agent_messages, start_with, Tools};
+        let dir = std::env::temp_dir().join(format!("n2-live-agent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("ws.db");
+        let journal = dir.join("run.jsonl");
+        let program = std::env::current_dir().unwrap().join("target/debug/notion2");
+        assert!(program.exists(), "build the app first: {}", program.display());
+        std::env::set_var("NOTION2_DB", &db);
+        std::env::set_var("NOTION2_TOOLS_PROGRAM", &program);
+        // The notes: a page the person is on, and two pages about running.
+        let store = crate::store::Store::open(db.clone()).unwrap();
+        let mut server = crate::mcp::Server::new(store);
+        let id_of = |v: serde_json::Value| serde_json::from_str::<Value>(v["content"][0]["text"].as_str().unwrap()).unwrap()["id"].as_str().unwrap().to_string();
+        let here = id_of(server.tool("create_page", &serde_json::json!({ "title": "Workout Plan", "markdown": "Three days a week." })));
+        server.tool("create_page", &serde_json::json!({ "title": "Run log March", "markdown": "5 km on Monday." }));
+        server.tool("create_page", &serde_json::json!({ "title": "Run log April", "markdown": "8 km on Friday." }));
+        drop(server);
+
+        let asked = "Make a new page named Fitness at the top level, and move the two run log pages into it. Then add a run to my calendar for tomorrow at 7 in the morning.";
+        let messages = build_agent_messages(&here, "Workout Plan", "# Workout Plan\n\nThree days a week.", asked, "2026-11-10 17:30, Tuesday");
+        let prefs = super::super::Prefs { provider: Some(Provider::ClaudeCode), ..Default::default() };
+        let started = Instant::now();
+        let rx = start_with(prefs, messages, Some(Tools { journal: journal.clone() }));
+        let events: Vec<AiEvent> = super::super::runtime().block_on(futures_util::StreamExt::collect(rx));
+        let steps: Vec<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                AiEvent::Step(name, input) => Some(super::super::step_label(name, input, |_| None)),
+                _ => None,
+            })
+            .collect();
+        let text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                AiEvent::Delta(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        let changes = crate::mcp::read_journal(&journal);
+        let said = crate::mcp::describe(&changes);
+        eprintln!("in {:.1}s\nsteps: {steps:#?}\nrecord: {said:#?}\ncount: {}\nanswer: {text}", started.elapsed().as_secs_f32(), crate::mcp::count_line(&changes));
+        assert_eq!(events.last(), Some(&AiEvent::Done), "{events:?}");
+        assert!(said.iter().any(|l| l == "Made the page “Fitness”"), "{said:?}");
+        assert_eq!(said.iter().filter(|l| l.starts_with("Moved the page “Run log")).count(), 2, "{said:?}");
+        assert!(said.iter().any(|l| l.starts_with("Added “") && l.ends_with("to the calendar")), "{said:?}");
+        let store = crate::store::Store::open(db.clone()).unwrap();
+        let (pages, _) = store.load().unwrap();
+        let fitness = pages.values().find(|p| p.title == "Fitness").expect("the page Fitness").id.clone();
+        assert_eq!(pages.values().filter(|p| p.parent_id.as_deref() == Some(fitness.as_str())).count(), 2);
+        let event = store.load_events().unwrap().pop().expect("an event");
+        assert_eq!(crate::when::iso(event.start, false), "2026-11-11T07:00", "{event:?}");
+        // All of it can be taken back.
+        crate::mcp::undo_changes(&store, &changes).unwrap();
+        let (pages, _) = store.load().unwrap();
+        assert!(pages[&fitness].trashed && pages.values().filter(|p| p.title.starts_with("Run log")).all(|p| p.parent_id.is_none()));
+        assert!(store.load_events().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

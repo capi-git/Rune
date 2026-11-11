@@ -10,9 +10,11 @@ use crate::markdown;
 use crate::model::*;
 use crate::state::{ancestors, children_of, descendants};
 use crate::store::{Loaded, Store};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
+use std::path::{Path, PathBuf};
 
 /// Protocol versions this server speaks, newest first.
 const SUPPORTED_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
@@ -25,6 +27,16 @@ Page content is Markdown: # / ## / ### headings, paragraphs, - bullets, 1. numbe
 A line that is exactly [Title](notion2://page/<id>) is a link to another page; sub-pages appear in their parent this way. \
 A to-do can end with the day it is due, as 📅 2026-11-12 (the sign, then the date): it then shows in that day of the calendar. Keep that ending when you rewrite a to-do; leave it out to take the day away. \
 A picture or a drawing shows in read_page as a line [Image](notion2://block/<id>) or [Drawing](notion2://block/<id>): keep that line as it is to keep the picture or drawing in its place when you replace a page (one that you leave out is kept at the end of the page, never lost). \
+Tables are Markdown pipe tables. A table's columns can have kinds, given on a comment line right under it, one part for each column: \
+<!-- columns: date count | choice | number km sum | time sum | pace average | checkbox checked --> \
+(kinds: text, number, date, time, pace, checkbox, choice; then an optional unit, and an optional total shown at the foot: count, sum, average, highest, lowest, checked). \
+A pace column is worked out from the first number and the first time column of its row: leave its cells empty. Keep the comment line when you rewrite a table. \
+To add a row to a table (a log), use add_table_row; to change one, update_table_row; to tick a to-do or set its day, set_todo: none of them write the page again. \
+A chart is a code block of the language chart holding JSON, for example \
+```chart {\"shape\": \"bars\", \"from\": \"Run log\", \"x\": \"Date\", \"by\": \"week\", \"y\": \"km\", \"add\": \"sum\", \"goal\": 20, \"title\": \"Distance per week\"} ``` \
+(each on its own line). shape: bars, line, ring or days; from: the title or id of the page whose first table it draws, or left out for the table above it on the same page; \
+x: the column along the bottom, usually a date; by: row, day, week or month; y: the column of amounts; add: sum, average, highest, lowest or count; goal and title are optional. \
+A ring draws one amount (add over all rows) against the goal; days draws which days of the last four weeks have a row. The chart follows its table by itself. \
 Changes are saved immediately. trash_page is reversible with restore_page; no page is ever deleted permanently (delete_event does remove an event for good).";
 
 /// What a change gets as its answer when this connector is older than the
@@ -43,6 +55,11 @@ pub fn run_stdio() -> i32 {
     };
     eprintln!("[notion2 mcp] serving {}", path.display());
     let mut server = Server::new(store);
+    // Started by the app for its own AI: every change is written down, so
+    // that the app can say what was done and take it back.
+    if let Some(journal) = std::env::var_os(JOURNAL_ENV).filter(|p| !p.is_empty()) {
+        server = server.with_journal(PathBuf::from(journal));
+    }
     match server.serve(io::stdin().lock(), io::stdout().lock()) {
         Ok(()) => 0,
         Err(e) => {
@@ -54,13 +71,210 @@ pub fn run_stdio() -> i32 {
 
 pub struct Server {
     store: Store,
+    /// Where each change is written down (see `Change`), when the app's own
+    /// AI uses the tools.
+    journal: Option<PathBuf>,
 }
 
 type ToolResult = Result<String, String>;
 
+/// The environment variable that names the file for the record of changes.
+pub const JOURNAL_ENV: &str = "NOTION2_AI_JOURNAL";
+
+/// One thing a tool changed, with what was there before it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Change {
+    /// A page that was not there before.
+    PageMade { id: Id, title: String },
+    /// A page as it was (its name, place, Trash state…) before the change.
+    PageWas { page: Page, title: String, what: String },
+    /// What was on a page before the change.
+    BlocksWere { id: Id, title: String, blocks: Vec<Block> },
+    /// An event that was not there before.
+    EventMade { id: Id, title: String },
+    /// An event as it was before it was changed or removed.
+    EventWas { event: Event, gone: bool },
+}
+
+/// The pages, what is on them, and the events, at one moment.
+struct Snap {
+    pages: HashMap<Id, Page>,
+    blocks: HashMap<Id, Vec<Block>>,
+    events: HashMap<Id, Event>,
+}
+
+fn changes_between(before: &Snap, after: &Snap) -> Vec<Change> {
+    let mut out = Vec::new();
+    let mut ids: Vec<&Id> = after.pages.keys().collect();
+    ids.sort_by(|a, b| after.pages[*a].created_at.cmp(&after.pages[*b].created_at).then(a.cmp(b)));
+    // The new pages first, then what changed on the pages that were there.
+    for id in ids.iter().filter(|id| !before.pages.contains_key(**id)) {
+        out.push(Change::PageMade { id: (*id).clone(), title: after.pages[*id].title.clone() });
+    }
+    for id in ids {
+        let now = &after.pages[id];
+        let Some(was) = before.pages.get(id) else { continue };
+        // A page's time of change moves with every save: that alone is no change of the page.
+        let same = Page { updated_at: was.updated_at, ..now.clone() } == *was;
+        if !same {
+            let what = if !was.trashed && now.trashed {
+                "trashed"
+            } else if was.trashed && !now.trashed {
+                "restored"
+            } else if was.parent_id != now.parent_id {
+                "moved"
+            } else if was.title != now.title {
+                "renamed"
+            } else {
+                "changed"
+            };
+            out.push(Change::PageWas { page: was.clone(), title: now.title.clone(), what: what.into() });
+        }
+        let empty = Vec::new();
+        let (old, new) = (before.blocks.get(id).unwrap_or(&empty), after.blocks.get(id).unwrap_or(&empty));
+        if old != new {
+            out.push(Change::BlocksWere { id: id.clone(), title: now.title.clone(), blocks: old.clone() });
+        }
+    }
+    let mut ids: Vec<&Id> = after.events.keys().chain(before.events.keys()).collect();
+    ids.sort();
+    ids.dedup();
+    for id in ids {
+        match (before.events.get(id), after.events.get(id)) {
+            (None, Some(now)) => out.push(Change::EventMade { id: id.clone(), title: now.title.clone() }),
+            (Some(was), None) => out.push(Change::EventWas { event: was.clone(), gone: true }),
+            (Some(was), Some(now)) if was != now => out.push(Change::EventWas { event: was.clone(), gone: false }),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The record of an AI run, as the tools wrote it (nothing when there is none).
+pub fn read_journal(path: &Path) -> Vec<Change> {
+    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
+    text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
+}
+
+/// Take back what a run changed, the last change first. A page that the run
+/// made goes to the Trash (never away for good).
+pub fn undo_changes(store: &Store, changes: &[Change]) -> rusqlite::Result<()> {
+    for change in changes.iter().rev() {
+        match change {
+            Change::PageMade { id, .. } => {
+                let (pages, _) = store.load()?;
+                if let Some(page) = pages.get(id) {
+                    store.save_page(&Page { trashed: true, ..page.clone() })?;
+                }
+            }
+            Change::PageWas { page, .. } => store.save_page(page)?,
+            Change::BlocksWere { id, blocks, .. } => store.save_blocks_at(id, blocks, now_ms())?,
+            Change::EventMade { id, .. } => store.delete_event(id)?,
+            Change::EventWas { event, .. } => store.save_event(event)?,
+        }
+    }
+    Ok(())
+}
+
+/// What a run did, in plain words, short: a line for each thing, and one
+/// line for many things of one kind ("Made 8 pages, “Week 1” to “Week 8”").
+pub fn describe(changes: &[Change]) -> Vec<String> {
+    let each = describe_each(changes);
+    let name_of = |line: &str| line.split('“').nth(1).and_then(|r| r.split('”').next()).unwrap_or("").to_string();
+    let mut out: Vec<String> = Vec::new();
+    // (the start of the lines of one kind, how many make a group, the one line for them)
+    let kinds: [(&str, usize, &dyn Fn(&[&String]) -> String); 3] = [
+        ("Made the page", 4, &|l| format!("Made {} pages, “{}” to “{}”", l.len(), name_of(l[0]), name_of(l[l.len() - 1]))),
+        ("Changed the page", 4, &|l| format!("Changed {} pages", l.len())),
+        ("Added “", 3, &|l| format!("Added {} events to the calendar", l.len())),
+    ];
+    let mut grouped: Vec<&str> = Vec::new();
+    for line in &each {
+        match kinds.iter().find(|(start, _, _)| line.starts_with(start)) {
+            Some((start, least, one)) => {
+                let all: Vec<&String> = each.iter().filter(|l| l.starts_with(start)).collect();
+                if all.len() <= *least {
+                    out.push(line.clone());
+                } else if !grouped.contains(start) {
+                    grouped.push(start);
+                    out.push(one(&all));
+                }
+            }
+            None => out.push(line.clone()),
+        }
+    }
+    out
+}
+
+/// What a run did, a line for each thing.
+pub fn describe_each(changes: &[Change]) -> Vec<String> {
+    let name = |t: &str| if t.trim().is_empty() { "Untitled".to_string() } else { t.trim().to_string() };
+    let made: Vec<&Id> = changes.iter().filter_map(|c| if let Change::PageMade { id, .. } = c { Some(id) } else { None }).collect();
+    let mut seen: Vec<String> = Vec::new();
+    let mut out = Vec::new();
+    for change in changes {
+        let line = match change {
+            Change::PageMade { title, .. } => format!("Made the page “{}”", name(title)),
+            // What is on a page that the run made itself is part of "made".
+            Change::BlocksWere { id, .. } if made.contains(&id) => continue,
+            Change::PageWas { page, .. } if made.contains(&&page.id) => continue,
+            Change::BlocksWere { title, .. } => format!("Changed the page “{}”", name(title)),
+            Change::PageWas { page, title, what } => match what.as_str() {
+                "trashed" => format!("Moved “{}” to the Trash", name(title)),
+                "restored" => format!("Took “{}” out of the Trash", name(title)),
+                "moved" => format!("Moved the page “{}”", name(title)),
+                "renamed" => format!("Named “{}” “{}”", name(&page.title), name(title)),
+                _ => format!("Changed the page “{}”", name(title)),
+            },
+            Change::EventMade { title, .. } => format!("Added “{}” to the calendar", name(title)),
+            Change::EventWas { event, gone: true } => format!("Removed “{}” from the calendar", name(&event.title)),
+            Change::EventWas { event, gone: false } => format!("Changed “{}” in the calendar", name(&event.title)),
+        };
+        if !seen.contains(&line) {
+            seen.push(line.clone());
+            out.push(line);
+        }
+    }
+    out
+}
+
+/// What a run did, in one short line ("2 pages made · 1 event added").
+pub fn count_line(changes: &[Change]) -> String {
+    let lines = describe_each(changes);
+    let count = |start: &str| lines.iter().filter(|l| l.starts_with(start)).count();
+    let pages_made = count("Made the page");
+    let events_made = count("Added");
+    let events_other = lines.iter().filter(|l| l.ends_with("the calendar") && !l.starts_with("Added")).count();
+    let pages_other = lines.len() - pages_made - events_made - events_other;
+    let part = |n: usize, one: &str, many: &str, did: &str| (n > 0).then(|| format!("{n} {} {did}", if n == 1 { one } else { many }));
+    [
+        part(pages_made, "page", "pages", "made"),
+        part(pages_other, "page", "pages", "changed"),
+        part(events_made, "event", "events", "added"),
+        part(events_other, "event", "events", "changed"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" · ")
+}
+
 impl Server {
     pub fn new(store: Store) -> Server {
-        Server { store }
+        Server { store, journal: None }
+    }
+
+    /// Write every change down in this file (see `Change`).
+    pub fn with_journal(mut self, path: PathBuf) -> Server {
+        self.journal = Some(path);
+        self
+    }
+
+    fn snap(&self) -> Option<Snap> {
+        let (pages, blocks) = self.store.load().ok()?;
+        let events = self.store.load_events().ok()?.into_iter().map(|e| (e.id.clone(), e)).collect();
+        Some(Snap { pages, blocks, events })
     }
 
     /// Read newline-delimited messages until EOF, answering each request.
@@ -141,6 +355,32 @@ impl Server {
         if !reads && self.store.from_newer_program() {
             return Ok(json!({ "content": [{ "type": "text", "text": OLDER_THAN_THE_NOTES }], "isError": true }));
         }
+        // For the app's own AI: what is there before a change, to write down what the change was.
+        let before = if reads || self.journal.is_none() { None } else { self.snap() };
+        let outcome = self.run_tool(name, args)?;
+        if let (Some(before), Some(path)) = (before, self.journal.as_ref()) {
+            if let Some(after) = self.snap() {
+                let lines: String = changes_between(&before, &after).iter().filter_map(|c| serde_json::to_string(c).ok()).map(|l| l + "\n").collect();
+                if !lines.is_empty() {
+                    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                        let _ = file.write_all(lines.as_bytes());
+                    }
+                }
+            }
+        }
+        let (text, is_error) = match outcome {
+            Ok(text) => (text, false),
+            Err(message) => (message, true),
+        };
+        Ok(json!({ "content": [{ "type": "text", "text": text }], "isError": is_error }))
+    }
+
+    /// One tool, by its name, for the app's own stand-in AI (a test run).
+    pub fn tool(&mut self, name: &str, args: &Value) -> Value {
+        self.call_tool(&json!({ "name": name, "arguments": args })).unwrap_or_else(|(_, message)| json!({ "content": [{ "type": "text", "text": message }], "isError": true }))
+    }
+
+    fn run_tool(&mut self, name: &str, args: &Value) -> Result<ToolResult, (i64, String)> {
         let outcome = match name {
             "search_pages" => self.search_pages(args),
             "list_pages" => self.list_pages(args),
@@ -155,13 +395,12 @@ impl Server {
             "create_event" => self.create_event(args),
             "update_event" => self.update_event(args),
             "delete_event" => self.delete_event(args),
+            "add_table_row" => self.add_table_row(args),
+            "update_table_row" => self.update_table_row(args),
+            "set_todo" => self.set_todo(args),
             _ => return Err((-32602, format!("Unknown tool: {name}"))),
         };
-        let (text, is_error) = match outcome {
-            Ok(text) => (text, false),
-            Err(message) => (message, true),
-        };
-        Ok(json!({ "content": [{ "type": "text", "text": text }], "isError": is_error }))
+        Ok(outcome)
     }
 
     // ----- data access ----------------------------------------------------
@@ -346,6 +585,104 @@ impl Server {
         Ok(pretty(&json!({ "page_id": id, "appended_blocks": count, "total_blocks": total })))
     }
 
+    /// A row at the end of a table of a page, its cells given by the names
+    /// of their columns. A date column left out gets today.
+    fn add_table_row(&self, args: &Value) -> ToolResult {
+        let id = required_page_id(args, "page_id")?;
+        let values = named_cells(args, "values")?;
+        let (pages, blocks) = self.load()?;
+        live_page(&pages, &id)?;
+        let mut page_blocks = blocks.get(&id).cloned().unwrap_or_default();
+        let at = table_in(&page_blocks, args.get("table"))?;
+        let mut table = crate::table::Table::parse(&page_blocks[at].data);
+        let today = crate::when::today();
+        // Today goes in the date column; a date among the values takes its place.
+        let row = table.add_day_row(today, today).ok_or("The table is full: a table holds at most 200 rows.")?;
+        let unknown = table.put_named(row, &values, today);
+        if !unknown.is_empty() && unknown.len() == values.len() {
+            return Err(format!("The table has no column {}. Its columns: {}.", quoted_names(&unknown), headings(&table)));
+        }
+        let cells = row_text(&table, row);
+        page_blocks[at].data = table.to_data();
+        page_blocks[at].text = table.plain_text();
+        self.save_blocks(&id, &page_blocks)?;
+        Ok(pretty(&json!({ "page_id": id, "row": row, "cells": cells, "columns_not_found": unknown })))
+    }
+
+    /// Change cells of one row of a table, found by its number under the
+    /// header or by the text of one of its cells.
+    fn update_table_row(&self, args: &Value) -> ToolResult {
+        let id = required_page_id(args, "page_id")?;
+        let values = named_cells(args, "values")?;
+        let (pages, blocks) = self.load()?;
+        live_page(&pages, &id)?;
+        let mut page_blocks = blocks.get(&id).cloned().unwrap_or_default();
+        let at = table_in(&page_blocks, args.get("table"))?;
+        let mut table = crate::table::Table::parse(&page_blocks[at].data);
+        let today = crate::when::today();
+        let row = match (arg_u64(args, "row")?, args.get("match").and_then(Value::as_object)) {
+            (Some(n), _) if n >= 1 && (n as usize) < table.rows.len() => n as usize,
+            (Some(n), _) => return Err(format!("The table has no row {n}: it has {} rows under its header.", table.rows.len() - 1)),
+            (None, Some(m)) => {
+                let (name, text) = m.iter().next().ok_or("match is empty: give one column and the text of its cell.")?;
+                let text = text.as_str().map(str::to_string).unwrap_or_else(|| text.to_string());
+                let c = table.find_column(name).ok_or_else(|| format!("The table has no column “{name}”. Its columns: {}.", headings(&table)))?;
+                table.find_row(c, &text, today).ok_or_else(|| format!("No row has “{text}” in the column “{name}”."))?
+            }
+            (None, None) => return Err("Say which row: row (its number under the header, from 1) or match ({\"Column\": \"text\"}).".into()),
+        };
+        let unknown = table.put_named(row, &values, today);
+        if !unknown.is_empty() && unknown.len() == values.len() {
+            return Err(format!("The table has no column {}. Its columns: {}.", quoted_names(&unknown), headings(&table)));
+        }
+        let cells = row_text(&table, row);
+        page_blocks[at].data = table.to_data();
+        page_blocks[at].text = table.plain_text();
+        self.save_blocks(&id, &page_blocks)?;
+        Ok(pretty(&json!({ "page_id": id, "row": row, "cells": cells, "columns_not_found": unknown })))
+    }
+
+    /// Tick or clear a to-do, or set or take away its day, found by words of
+    /// its text.
+    fn set_todo(&self, args: &Value) -> ToolResult {
+        let id = required_page_id(args, "page_id")?;
+        let words = required_str(args, "text")?.trim().to_lowercase();
+        let done = args.get("done").and_then(Value::as_bool);
+        let due = match arg_str(args, "due").map(str::trim) {
+            None => None,
+            Some("") => Some(None),
+            Some(day) => Some(Some(crate::when::parse_date(day).ok_or_else(|| format!("due must be a day as 2026-11-12, or empty to take the day away; not “{day}”."))?)),
+        };
+        if done.is_none() && due.is_none() {
+            return Err("Say what to change: done (true or false), due (a day as 2026-11-12, or empty), or both.".into());
+        }
+        let (pages, blocks) = self.load()?;
+        live_page(&pages, &id)?;
+        let mut page_blocks = blocks.get(&id).cloned().unwrap_or_default();
+        let todos: Vec<usize> = (0..page_blocks.len()).filter(|&i| page_blocks[i].kind == BlockKind::Todo).collect();
+        let i = todos
+            .iter()
+            .copied()
+            .find(|&i| page_blocks[i].plain_text().trim().to_lowercase() == words)
+            .or_else(|| todos.iter().copied().find(|&i| page_blocks[i].plain_text().to_lowercase().contains(&words)))
+            .ok_or_else(|| format!("No to-do of this page has the words “{words}”."))?;
+        if let Some(done) = done {
+            page_blocks[i].checked = done;
+        }
+        if let Some(due) = due {
+            page_blocks[i].due = due;
+        }
+        let todo = &page_blocks[i];
+        let answer = json!({
+            "page_id": id,
+            "todo": todo.plain_text(),
+            "done": todo.checked,
+            "due": todo.due.map(|d| d.format("%Y-%m-%d").to_string()),
+        });
+        self.save_blocks(&id, &page_blocks)?;
+        Ok(pretty(&answer))
+    }
+
     fn replace_page_content(&self, args: &Value) -> ToolResult {
         let id = required_page_id(args, "page_id")?;
         let markdown = required_str(args, "markdown")?;
@@ -453,9 +790,12 @@ impl Server {
     /// event (for words like "Every week on Tuesday").
     fn event_json(&self, e: &crate::model::Event, first: chrono::NaiveDate) -> Value {
         let end_shown = if e.all_day { e.end - 1 } else { e.end };
+        // The calendar is one for every space; each event says which it is in.
+        let space = self.store.load_spaces().ok().and_then(|all| all.into_iter().find(|s| s.id == e.space_id)).map(|s| s.display_name().to_string());
         json!({
             "id": e.id,
             "title": e.display_title(),
+            "space": space,
             "start": crate::when::iso(e.start, e.all_day),
             "end": crate::when::iso(end_shown, e.all_day),
             "all_day": e.all_day,
@@ -785,6 +1125,54 @@ fn tool_definitions() -> Value {
             "annotations": write(false)
         },
         {
+            "name": "add_table_row",
+            "title": "Add a row to a table",
+            "description": "Add a row at the end of a table in a page (a log), without writing the page again. Give the cells by the names of their columns, for example {\"Date\": \"today\", \"km\": \"6\", \"Time\": \"34 min\"}. A date column left out gets today; days, times and ticks are written the table's way; a pace column is worked out by itself. With more than one table, say which with table (its number in the page, from 1, or a word of its header).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "page_id": page_id,
+                    "values": { "type": "object", "description": "The cells: column name → text.", "additionalProperties": { "type": ["string", "number", "boolean"] } },
+                    "table": { "type": ["integer", "string"], "description": "Which table of the page (default the first): its number from 1, or a word of its header." }
+                },
+                "required": ["page_id", "values"]
+            },
+            "annotations": write(false)
+        },
+        {
+            "name": "update_table_row",
+            "title": "Change a row of a table",
+            "description": "Change cells of one row of a table in a page, without writing the page again. Find the row by row (its number under the header, from 1) or by match (one cell, as {\"Date\": \"2026-12-01\"}), and give the new cells in values by the names of their columns.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "page_id": page_id,
+                    "values": { "type": "object", "description": "The new cells: column name → text.", "additionalProperties": { "type": ["string", "number", "boolean"] } },
+                    "row": { "type": "integer", "minimum": 1, "description": "The row's number under the header, from 1." },
+                    "match": { "type": "object", "description": "One column and the text of its cell in the row, as {\"Date\": \"2026-12-01\"}." },
+                    "table": { "type": ["integer", "string"], "description": "Which table of the page (default the first): its number from 1, or a word of its header." }
+                },
+                "required": ["page_id", "values"]
+            },
+            "annotations": write(true)
+        },
+        {
+            "name": "set_todo",
+            "title": "Tick a to-do or set its day",
+            "description": "Tick or clear a to-do of a page, or set or take away the day it is due, without writing the page again. The to-do is found by words of its text.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "page_id": page_id,
+                    "text": { "type": "string", "description": "Words of the to-do's text." },
+                    "done": { "type": "boolean", "description": "true to tick it, false to clear it." },
+                    "due": { "type": "string", "description": "The day it is due, as 2026-11-12; empty to take the day away." }
+                },
+                "required": ["page_id", "text"]
+            },
+            "annotations": write(true)
+        },
+        {
             "name": "replace_page_content",
             "title": "Replace a page's content",
             "description": "Replace everything in a page's body with new Markdown (optionally renaming it). Read the page first and keep its [Title](notion2://page/<id>) link lines to keep links to sub-pages; sub-pages themselves are never removed.",
@@ -841,7 +1229,7 @@ fn tool_definitions() -> Value {
         {
             "name": "list_events",
             "title": "List calendar events",
-            "description": "Events in the Rune calendar between two dates (default: the next 30 days). Times are local to this Mac, written like 2026-11-10T14:00; all-day events use plain dates.",
+            "description": "Events in the Rune calendar between two dates (default: the next 30 days), from every space; each event names its space. Times are local to this Mac, written like 2026-11-10T14:00; all-day events use plain dates.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -855,7 +1243,7 @@ fn tool_definitions() -> Value {
         {
             "name": "create_event",
             "title": "Add a calendar event",
-            "description": "Add an event to the calendar. Give start as 2026-11-10T14:00 for a timed event (an hour long unless end is given) or 2026-11-10 for an all-day event.",
+            "description": "Add an event to the calendar, in the space that is open in Rune. Give start as 2026-11-10T14:00 for a timed event (an hour long unless end is given) or 2026-11-10 for an all-day event.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -922,6 +1310,69 @@ fn db_error(e: rusqlite::Error) -> String {
 
 fn not_found(id: &str) -> String {
     format!("No page with id {id}. Use search_pages or list_pages to find page ids.")
+}
+
+/// The cells a tool was given, as (column, text) pairs.
+fn named_cells(args: &Value, key: &str) -> Result<Vec<(String, String)>, String> {
+    let values = args.get(key).and_then(Value::as_object).ok_or_else(|| format!("{key} must be an object of column name → text."))?;
+    if values.is_empty() {
+        return Err(format!("{key} is empty: give at least one cell."));
+    }
+    Ok(values
+        .iter()
+        .map(|(k, v)| {
+            let text = match v {
+                Value::String(s) => s.clone(),
+                Value::Bool(true) => "x".to_string(),
+                Value::Bool(false) | Value::Null => String::new(),
+                other => other.to_string(),
+            };
+            (k.clone(), text)
+        })
+        .collect())
+}
+
+/// The index of the table a tool means: the one with this number (from 1),
+/// the first whose header has this word, or the first.
+fn table_in(blocks: &[Block], which: Option<&Value>) -> Result<usize, String> {
+    let tables: Vec<usize> = (0..blocks.len()).filter(|&i| blocks[i].kind == BlockKind::Table).collect();
+    if tables.is_empty() {
+        return Err("This page has no table. Add one with append_to_page (a Markdown pipe table, with a columns line for its kinds).".into());
+    }
+    match which {
+        Some(Value::Number(n)) => {
+            let n = n.as_u64().unwrap_or(0) as usize;
+            tables.get(n.wrapping_sub(1)).copied().ok_or_else(|| format!("The page has {} tables; there is no table {n}.", tables.len()))
+        }
+        Some(Value::String(word)) if !word.trim().is_empty() => {
+            if let Ok(n) = word.trim().parse::<usize>() {
+                return table_in(blocks, Some(&json!(n)));
+            }
+            tables
+                .iter()
+                .copied()
+                .find(|&i| crate::table::Table::parse(&blocks[i].data).find_column(word).is_some())
+                .ok_or_else(|| format!("No table of this page has a column “{word}”."))
+        }
+        _ => Ok(tables[0]),
+    }
+}
+
+/// One row of a table as column → what it shows.
+fn row_text(table: &crate::table::Table, row: usize) -> Value {
+    let mut out = serde_json::Map::new();
+    for c in 0..table.columns() {
+        out.insert(table.heading(c), json!(table.shown(row, c)));
+    }
+    Value::Object(out)
+}
+
+fn headings(table: &crate::table::Table) -> String {
+    (0..table.columns()).map(|c| table.heading(c)).collect::<Vec<_>>().join(", ")
+}
+
+fn quoted_names(names: &[String]) -> String {
+    names.iter().map(|n| format!("“{n}”")).collect::<Vec<_>>().join(", ")
 }
 
 fn pretty(v: &Value) -> String {
@@ -1120,6 +1571,7 @@ pub(crate) fn render_body(pages: &HashMap<Id, Page>, blocks: &[Block]) -> String
             BlockKind::Drawing => as_text(b, format!("[Drawing]({BLOCK_PREFIX}{})", b.id)),
             BlockKind::Image => as_text(b, format!("[Image]({BLOCK_PREFIX}{})", b.id)),
             BlockKind::Table => as_text(b, crate::table::Table::parse(&b.data).to_markdown("")),
+            BlockKind::Chart => as_text(b, crate::chart::Chart::parse(&b.data).to_markdown()),
             _ => b.clone(),
         })
         .collect();
@@ -1249,6 +1701,104 @@ mod tests {
     }
 
     #[test]
+    fn rows_of_a_log_and_to_dos_change_without_the_page_written_again() {
+        let mut s = server();
+        let md = "Runs of the week.\n\n| Date | km | Time | Pace |\n| --- | --- | --- | --- |\n| 2026-11-10 | 3 | 19:30 |  |\n<!-- columns: date | number km sum | time sum | pace average -->\n\n- [ ] Easy run, 4.5 km\n- [ ] Long run, 6 km";
+        let (made, _) = call(&mut s, "create_page", json!({ "title": "Run log", "markdown": md }));
+        let log = json_of(&made)["id"].as_str().unwrap().to_string();
+        // A row: today in the date column, a time in the table's way, the pace worked out.
+        let (added, err) = call(&mut s, "add_table_row", json!({ "page_id": log, "values": { "km": 6, "time": "34 minutes", "Feel": "Good" } }));
+        assert!(!err, "{added}");
+        let added = json_of(&added);
+        assert_eq!(added["row"], 2);
+        assert_eq!(added["cells"]["km"], "6");
+        assert_eq!(added["cells"]["Time"], "34:00");
+        assert_eq!(added["cells"]["Pace"], "5:40");
+        assert_eq!(added["cells"]["Date"], crate::table::format_day(crate::when::today(), crate::when::today()));
+        assert_eq!(added["columns_not_found"], json!(["Feel"]));
+        // A row found by its day, then by its number.
+        let (changed, err) = call(&mut s, "update_table_row", json!({ "page_id": log, "match": { "Date": "2026-11-10" }, "values": { "km": "3.5" } }));
+        assert!(!err, "{changed}");
+        assert_eq!(json_of(&changed)["cells"]["Pace"], "5:34");
+        let (_, err) = call(&mut s, "update_table_row", json!({ "page_id": log, "row": 9, "values": { "km": "1" } }));
+        assert!(err);
+        let (wrong, err) = call(&mut s, "add_table_row", json!({ "page_id": log, "values": { "Weight": "70" } }));
+        assert!(err && wrong.contains("Its columns: Date, km, Time, Pace"), "{wrong}");
+        // A to-do ticked and given a day.
+        let (todo, err) = call(&mut s, "set_todo", json!({ "page_id": log, "text": "easy run", "done": true, "due": "2026-12-01" }));
+        assert!(!err, "{todo}");
+        assert_eq!(json_of(&todo)["todo"], "Easy run, 4.5 km");
+        let (page, _) = call(&mut s, "read_page", json!({ "page_id": log }));
+        assert!(page.contains("- [x] Easy run, 4.5 km 📅 2026-12-01"), "{page}");
+        assert!(page.contains("| 2026-11-10 | 3.5 | 19:30 |  |"), "{page}");
+        assert!(page.contains("<!-- columns: date | number km sum | time sum | pace average -->"), "{page}");
+        // A page with no table says so.
+        let (made, _) = call(&mut s, "create_page", json!({ "title": "Empty" }));
+        let empty = json_of(&made)["id"].as_str().unwrap().to_string();
+        let (no, err) = call(&mut s, "add_table_row", json!({ "page_id": empty, "values": { "a": "b" } }));
+        assert!(err && no.contains("no table"), "{no}");
+        // A chart written as a chart code block is a chart, and read back the same way.
+        let (_, err) = call(&mut s, "append_to_page", json!({ "page_id": log, "markdown": "```chart\n{\"shape\": \"line\", \"y\": \"Pace\", \"by\": \"row\", \"add\": \"average\"}\n```" }));
+        assert!(!err);
+        let (page, _) = call(&mut s, "read_page", json!({ "page_id": log }));
+        assert!(page.contains("```chart\n{\"shape\":\"line\",\"by\":\"row\",\"y\":\"Pace\",\"add\":\"average\"}\n```"), "{page}");
+    }
+
+    #[test]
+    fn what_an_ai_run_changes_is_written_down_and_can_be_taken_back() {
+        let dir = std::env::temp_dir().join(format!("n2-journal-{}", now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let journal = dir.join("run.jsonl");
+        // Before the run: one page with a line, and one event.
+        let mut s = server();
+        let (made, _) = call(&mut s, "create_page", json!({ "title": "Plan", "markdown": "Old line" }));
+        let plan = json_of(&made)["id"].as_str().unwrap().to_string();
+        let (made, _) = call(&mut s, "create_event", json!({ "title": "Run", "start": "2026-11-12T07:00" }));
+        let run = json_of(&made)["created"]["id"].as_str().unwrap().to_string();
+        assert!(read_journal(&journal).is_empty(), "nothing is written down with no file named");
+        // The run: a new page, a change of the old page, a new name, a new event, a removed event. A read writes nothing.
+        let mut s = Server::new(s.store).with_journal(journal.clone());
+        call(&mut s, "read_page", json!({ "page_id": plan }));
+        assert!(read_journal(&journal).is_empty());
+        let (made, failed) = call(&mut s, "create_page", json!({ "title": "Workout A", "parent_id": plan, "markdown": "Ten squats" }));
+        assert!(!failed, "{made}");
+        let child = json_of(&made)["id"].as_str().unwrap().to_string();
+        call(&mut s, "replace_page_content", json!({ "page_id": plan, "markdown": "New line" }));
+        call(&mut s, "update_page", json!({ "page_id": plan, "title": "Workout Plan" }));
+        call(&mut s, "create_event", json!({ "title": "Stretch", "start": "2026-11-13T08:00" }));
+        call(&mut s, "delete_event", json!({ "event_id": run }));
+        let changes = read_journal(&journal);
+        let said = describe(&changes);
+        assert_eq!(
+            said,
+            vec![
+                "Made the page “Workout A”",
+                "Changed the page “Plan”",
+                "Named “Plan” “Workout Plan”",
+                "Added “Stretch” to the calendar",
+                "Removed “Run” from the calendar",
+            ],
+            "{changes:?}"
+        );
+        assert_eq!(count_line(&changes), "1 page made · 2 pages changed · 1 event added · 1 event changed");
+        // Many things of one kind are one line.
+        let many: Vec<Change> = (1..=8).map(|i| Change::PageMade { id: format!("w{i}"), title: format!("Week {i}") }).collect();
+        assert_eq!(describe(&many), vec!["Made 8 pages, “Week 1” to “Week 8”"]);
+        assert_eq!(count_line(&many), "8 pages made");
+        let runs: Vec<Change> = (1..=5).map(|i| Change::EventMade { id: format!("e{i}"), title: format!("Run {i}") }).chain(many.iter().take(2).cloned()).collect();
+        assert_eq!(describe(&runs), vec!["Added 5 events to the calendar", "Made the page “Week 1”", "Made the page “Week 2”"]);
+        // Taken back: the old page as it was, the new page in the Trash, the events as before.
+        undo_changes(&s.store, &changes).unwrap();
+        let (pages, blocks) = s.store.load().unwrap();
+        assert_eq!(pages[&plan].title, "Plan");
+        assert_eq!(blocks[&plan].iter().map(|b| b.text.as_str()).collect::<Vec<_>>(), vec!["Old line"]);
+        assert!(pages[&child].trashed, "a page that the run made goes to the Trash");
+        let events: Vec<String> = s.store.load_events().unwrap().into_iter().map(|e| e.title).collect();
+        assert_eq!(events, vec!["Run"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn an_older_connector_reads_but_does_not_change_newer_notes() {
         let mut s = server();
         let (made, failed) = call(&mut s, "create_page", json!({ "title": "Before" }));
@@ -1300,6 +1850,27 @@ mod tests {
         assert!(err && text.contains("page_id"));
         let (text, err) = call(&mut s, "read_page", json!({ "page_id": "missing" }));
         assert!(err && text.contains("No page"));
+    }
+
+    #[test]
+    fn events_of_every_space_say_their_space() {
+        let mut s = server();
+        let home = Space::new("Home", "blue", 0.0);
+        let side = Space::new("Side project", "green", 1.0);
+        s.store.save_space(&home).unwrap();
+        s.store.save_space(&side).unwrap();
+        s.store.set_setting("space", &home.id).unwrap();
+        let (text, err) = call(&mut s, "create_event", json!({ "title": "Dentist", "start": "2026-11-12T09:00" }));
+        assert!(!err, "{text}");
+        assert_eq!(json_of(&text)["created"]["space"], "Home", "a new event is in the space that is open");
+        let at = |t: &str| crate::when::parse_iso(t).unwrap().0;
+        s.store.save_event(&Event::new(side.id.clone(), "Launch", at("2026-11-12T15:00"), at("2026-11-12T16:00"), false)).unwrap();
+        let (text, err) = call(&mut s, "list_events", json!({ "from": "2026-11-12", "to": "2026-11-12" }));
+        assert!(!err, "{text}");
+        let listed = json_of(&text);
+        assert_eq!(listed["count"], 2, "the list has the events of every space");
+        let spaces: Vec<&str> = listed["events"].as_array().unwrap().iter().map(|e| e["space"].as_str().unwrap_or("")).collect();
+        assert_eq!(spaces, ["Home", "Side project"]);
     }
 
     #[test]

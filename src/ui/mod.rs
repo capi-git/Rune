@@ -2,12 +2,15 @@
 //! page editor, menus and modals.
 
 mod calendar;
+mod charts;
 mod chrome;
 mod graph;
 pub mod icons;
 mod modals;
+pub mod pad;
 mod page;
 mod sidebar;
+mod tables;
 
 use crate::state::{AppState, Bridge, Look, Modal, Route, Tab, Theme};
 use crate::sync;
@@ -41,6 +44,15 @@ pub fn window_is_dark() -> bool {
 /// Colours for the glass, from the Transparency and Tint settings.
 fn glass_vars(look: &Look) -> String {
     crate::glass::css_vars(look.glass, parse_hex(&look.tint))
+}
+
+/// The class that gives a page the colours of a theme.
+fn theme_class(theme: Theme) -> &'static str {
+    match theme {
+        Theme::System => "theme-system",
+        Theme::Light => "theme-light",
+        Theme::Dark => "theme-dark",
+    }
 }
 
 fn parse_hex(s: &str) -> Option<(f64, f64, f64)> {
@@ -160,7 +172,7 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
     if primary && std::env::var_os("NOTION2_SELFTEST").is_none() {
         let _ = dioxus::desktop::use_global_shortcut(crate::state::AI_SHORTCUT, move |key| {
             let on = crate::store::setting("voice_anywhere").as_deref() != Some("off");
-            if on && key == dioxus::desktop::HotKeyState::Pressed {
+            if on && key == dioxus::desktop::HotKeyState::Pressed && crate::ai::shown() {
                 let window = dioxus::desktop::window();
                 window.set_visible(true);
                 window.set_focus();
@@ -169,6 +181,23 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
         });
     }
 
+    // Once, as the first window opens: where speech is turned into text for
+    // this Mac's language, and whether the app runs from a temporary place.
+    use_hook(move || {
+        if !primary {
+            return;
+        }
+        crate::listen::learn_where_speech_goes();
+        // Opened straight from Downloads, macOS runs a copy from a place
+        // that changes each time: updates and the AI connector need the real one.
+        let moved = std::env::current_exe().is_ok_and(|p| p.to_string_lossy().contains("/AppTranslocation/"));
+        if moved && std::env::var_os("NOTION2_SELFTEST").is_none() {
+            spawn(async move {
+                crate::ai::sleep_ms(1500).await;
+                state.notice("Rune runs from a temporary place. Quit it, move Rune into your Applications folder, and open it again. Your notes are safe.");
+            });
+        }
+    });
     // Updates (first window only; never during a self-test): look for a
     // newer build soon after opening, then now and then.
     use_future(move || async move {
@@ -195,12 +224,51 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
                 watch = crate::meeting::Watch::default();
                 continue;
             }
-            let (input, output) = crate::meeting::poll().await;
-            match watch.step(input, output) {
-                Some(crate::meeting::Change::Started) => state.meeting_started(),
+            let heard = crate::meeting::poll().await;
+            match watch.step(&heard) {
+                Some(crate::meeting::Change::Started(app)) => state.meeting_started(app),
                 Some(crate::meeting::Change::Ended) => state.meeting_ended(crate::model::now_ms() - crate::meeting::END_LAG_MS),
                 None => {}
             }
+        }
+    });
+
+    // The meeting pad (first window only; see pad.rs). What is clicked in the
+    // pad's window arrives here; what the pad shows is worked out here and
+    // handed to its window, which is opened when there is something to show
+    // and closed when there is not, or when this window goes.
+    use_future(move || async move {
+        if !primary {
+            return;
+        }
+        let mut asked = crate::pad::owner();
+        while let Some(command) = asked.next().await {
+            state.pad_command(command);
+        }
+    });
+    use_effect(move || {
+        if !primary {
+            return;
+        }
+        let view = state.pad_view();
+        // (A test run draws the pad in this window: see below.)
+        if crate::pad::inline() {
+            return;
+        }
+        match view {
+            Some(mut view) => {
+                view.theme = theme_class(state.ui.read().theme).to_string();
+                view.glass = glass_vars(&state.look.read());
+                if crate::pad::show(view) {
+                    pad::open_window();
+                }
+            }
+            None => crate::pad::close(),
+        }
+    });
+    use_drop(move || {
+        if primary {
+            crate::pad::close();
         }
     });
 
@@ -249,8 +317,10 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
         let real = std::env::var_os("NOTION2_REAL_LISTENER").is_some();
         let dictation = std::env::var_os("NOTION2_REAL_DICTATION").is_some();
         let video = std::env::var_os("NOTION2_REAL_VIDEO").is_some();
+        let real_pad = std::env::var_os("NOTION2_REAL_PAD").is_some();
+        let pad_try = std::env::var_os("NOTION2_PAD_TRY").is_some();
         let script = format!(
-            "window.__n2_only = {}; window.__n2_real_listener = {real}; window.__n2_real_dictation = {dictation}; window.__n2_real_video = {video};\n{SELFTEST_JS}",
+            "window.__n2_only = {}; window.__n2_real_listener = {real}; window.__n2_real_dictation = {dictation}; window.__n2_real_video = {video}; window.__n2_real_pad = {real_pad}; window.__n2_pad_try = {pad_try};\n{SELFTEST_JS}",
             serde_json::to_string(&only).unwrap_or_default()
         );
         let mut test = document::eval(&script);
@@ -347,11 +417,7 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
     });
 
     let ui = state.ui.read();
-    let theme = match ui.theme {
-        Theme::System => "theme-system",
-        Theme::Light => "theme-light",
-        Theme::Dark => "theme-dark",
-    };
+    let theme = theme_class(ui.theme);
     let zoom = ui.zoom;
     let pinned = ui.sidebar_open;
     let width = ui.sidebar_width;
@@ -395,6 +461,14 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
                 div { class: "backdrop", onclick: move |_| state.command("escape") }
             }
             PlayerDock {}
+            // A test run draws the meeting pad here, not in a window of its own.
+            if primary && crate::pad::inline() {
+                if let Some(view) = state.pad_view() {
+                    div { class: "pad-inline", id: "pad-inline",
+                        pad::PadCard { view, on: move |command| state.pad_command(command), page: move |_| {} }
+                    }
+                }
+            }
             match modal {
                 Some(Modal::QuickFind) => rsx! { modals::QuickFind {} },
                 Some(Modal::Trash) => rsx! { modals::TrashModal {} },
@@ -443,8 +517,10 @@ fn LayoutView(node: Layout, tab: Tab) -> Element {
                         PlaceBar { page: page.clone() }
                     }
                     div { class: "scroller",
-                        PaneBody { route, duplicate }
+                        PaneBody { route: route.clone(), duplicate }
                     }
+                    // The AI: a small button at the foot that opens into a bar.
+                    page::AiDock { route, duplicate }
                 }
             }
         }
@@ -507,19 +583,31 @@ fn LayoutView(node: Layout, tab: Tab) -> Element {
 #[component]
 fn ListenBar(page: String) -> Element {
     let state = use_context::<AppState>();
-    let asking = state.listen_offer.read().as_deref() == Some(page.as_str());
+    // While the meeting's pad asks on the screen, the page does not. (When
+    // the pad has become its small form, or the notepad, the page asks as
+    // before: the person may never have seen the pad's question.)
+    let padded = state.pad.read().as_ref().is_some_and(|p| p.page == page && p.form == crate::pad::Form::Ask);
+    let asking = !padded && state.listen_offer.read().as_deref() == Some(page.as_str());
     let listening = state.listening.read().clone().filter(|l| l.page == page);
     let (p1, p2) = (page.clone(), page.clone());
     if let Some(l) = listening {
         let clock = format!("{}:{:02}", l.seconds / 60, l.seconds % 60);
-        let hears = if l.others { "you and the others" } else { "your microphone" };
+        let hears = if l.video {
+            "the video (only what the Mac plays)"
+        } else if l.others {
+            "you and the others"
+        } else {
+            "your microphone"
+        };
+        // With no AI tool nothing is said of notes that an AI would write.
+        let stop = if crate::ai::has_ai() { "Stop and write the notes" } else { "Stop" };
         return rsx! {
             div { class: "listen-bar on", role: "status",
                 span { class: "listen-dot" }
                 span { class: "listen-what", if l.stopping { "Finishing…" } else { "Listening" } }
                 span { class: "listen-time", "{clock}" }
                 span { class: "listen-latest", title: "It hears {hears}. {l.words} words so far.", "{l.latest}" }
-                button { class: "secondary-btn small", id: "listen-stop", disabled: l.stopping, onclick: move |_| state.stop_listening(), "Stop and write the notes" }
+                button { class: "secondary-btn small", id: "listen-stop", disabled: l.stopping, onclick: move |_| state.stop_listening(), "{stop}" }
             }
         };
     }
@@ -527,8 +615,8 @@ fn ListenBar(page: String) -> Element {
         return rsx! {
             div { class: "listen-bar", role: "group", "aria-label": "Listen to this meeting",
                 span { class: "listen-ask", Icon { name: "mic", size: 15 } }
-                span { class: "listen-what", "Listen to this meeting and write the notes?" }
-                span { class: "listen-latest", "Tell the others first. The sound stays on this Mac." }
+                span { class: "listen-what", if crate::ai::has_ai() { "Listen to this meeting and write the notes?" } else { "Listen to this meeting and keep the transcript?" } }
+                span { class: "listen-latest", "{crate::listen::where_speech_goes()}" }
                 button { class: "primary-btn small", id: "listen-start", onclick: move |_| state.start_listening(&p1), "Listen" }
                 button { class: "ghost-btn small", id: "listen-no", onclick: move |_| {
                         if state.listen_offer.peek().as_deref() == Some(p2.as_str()) {
@@ -570,7 +658,9 @@ fn PaneRail(tab: Tab, pane: String) -> Element {
 #[component]
 fn PlaceBar(page: String) -> Element {
     let state = use_context::<AppState>();
-    if !state.asks_place(&page) {
+    // While the meeting's pad asks this on the screen, the page does not.
+    let padded = state.pad.read().as_ref().is_some_and(|p| p.page == page && matches!(p.form, crate::pad::Form::End | crate::pad::Form::Kept));
+    if padded || !state.asks_place(&page) {
         return rsx! {};
     }
     let here = state.pages.read().get(&page).and_then(|p| p.parent_id.clone()).unwrap_or_default();
@@ -630,10 +720,57 @@ fn PlayerDock() -> Element {
     let Some(playing) = state.player.read().clone() else { return rsx! {} };
     let watch = crate::video::watch_url(&playing.video);
     let watch2 = watch.clone();
+    // Where the person put it, and how wide (bridge.js moves and sizes it).
+    let dock = state.player_dock.read().clone();
+    // Notes of the video: the option is there while a video plays and the
+    // app can listen and listens to nothing else. With no AI tool it is the
+    // words alone, and says so.
+    let listening = state.listening.read().clone();
+    let hears = listening.clone().filter(|l| l.video);
+    let can_note = listening.is_none() && playing.problem.is_none() && crate::listen::available();
+    let has_ai = crate::ai::has_ai();
     rsx! {
-        section { class: "player-dock", id: "player-dock", "aria-label": "Video player", "data-video": "{playing.video.id}", "data-ready": "{playing.ready}",
-            div { class: "player-bar",
+        section {
+            class: "player-dock",
+            id: "player-dock",
+            "aria-label": "Video player",
+            "data-video": "{playing.video.id}",
+            "data-ready": "{playing.ready}",
+            "data-h": "{dock.h}",
+            "data-v": "{dock.v}",
+            "data-x": "{dock.x}",
+            "data-y": "{dock.y}",
+            "data-w": "{dock.w}",
+            style: "{dock.style()}",
+            for corner in ["nw", "ne", "sw", "se"] {
+                span { key: "{corner}", class: "player-grip", "data-corner": "{corner}", "aria-hidden": "true" }
+            }
+            div { class: "player-bar", title: "Drag to move. Drag a corner for another size. Double-click for large or small.",
                 span { class: "player-title", "Video" }
+                if let Some(l) = hears {
+                    span { class: "listen-dot", title: "Rune hears the video (only what the Mac plays, not the microphone)." }
+                    span { class: "player-clock", "{crate::pad::clock(l.seconds)}" }
+                    button {
+                        class: "secondary-btn small",
+                        id: "player-notes-stop",
+                        title: if has_ai { "Stop and write the notes under the video's line" } else { "Stop. The words are under the video's line." },
+                        disabled: l.stopping,
+                        onclick: move |_| state.stop_listening(),
+                        "Stop"
+                    }
+                } else if can_note {
+                    button {
+                        class: "ghost-btn small",
+                        id: "player-notes",
+                        title: if has_ai {
+                            "Write down what the video says and make notes of it, under the video's line. Rune hears only what the Mac plays, not the microphone."
+                        } else {
+                            "Write down what the video says, under the video's line. Rune hears only what the Mac plays, not the microphone."
+                        },
+                        onclick: move |_| state.take_video_notes(),
+                        if has_ai { "Take notes" } else { "Write it down" }
+                    }
+                }
                 button {
                     class: "ghost-btn small",
                     id: "player-browser",

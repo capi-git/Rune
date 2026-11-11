@@ -200,8 +200,10 @@ pub fn apply(e: &mut Event, before: &Event, after: &Event) {
     let shift = (when::date_of(after.start) - when::date_of(before.start)).num_days();
     let first = when::add_days(when::date_of(e.start), shift);
     e.title = after.title.clone();
+    e.space_id = after.space_id.clone();
     e.color = after.color.clone();
     e.notes = after.notes.clone();
+    e.join = after.join.clone();
     e.page_id = after.page_id.clone();
     e.remind = after.remind;
     e.all_day = after.all_day;
@@ -357,10 +359,14 @@ mod tests {
         let before = at(&e, d(2026, 11, 10));
         let mut after = before.clone();
         after.title = "Team standup".into();
+        after.join = "https://zoom.us/j/8123456789".into();
         after.start = when::at(d(2026, 11, 11), NaiveTime::from_hms_opt(14, 30, 0).unwrap());
         after.end = after.start + 30 * when::MINUTE;
         apply(&mut e, &before, &after);
         assert_eq!(e.title, "Team standup");
+        // The link to join the call is the series', as its name is.
+        assert_eq!(e.join, "https://zoom.us/j/8123456789");
+        assert_eq!(at(&e, d(2026, 11, 25)).join_url().as_deref(), Some("https://zoom.us/j/8123456789"));
         assert_eq!(when::date_of(e.start), d(2026, 11, 4));
         assert_eq!(when::time_label(e.start), "2:30 PM");
         assert_eq!(e.end - e.start, 30 * when::MINUTE);

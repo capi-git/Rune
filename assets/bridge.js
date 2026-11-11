@@ -792,6 +792,14 @@ document.addEventListener(
       send({ t: 'shortcut', name: 'quick_find' });
       return;
     }
+    // While the app listens for a box, Escape stops the listening and no more.
+    if (e.key === 'Escape' && hearBox) {
+      e.preventDefault();
+      e.stopPropagation();
+      hearEnd();
+      send({ t: 'shortcut', name: 'dictate_stop' });
+      return;
+    }
     if (e.key === 'Escape' && !(isBlock(t) && t.dataset.menu === '1')) {
       if (peeking()) setPeek(false);
       if (ctxFor) closeCtx();
@@ -1374,7 +1382,7 @@ const anchorMenu = (menu) => {
   menu.classList.add('anchored');
   const w = menu.offsetWidth;
   const h = menu.offsetHeight;
-  const alignRight = menu.classList.contains('sidebar-menu') || menu.classList.contains('due-menu');
+  const alignRight = menu.classList.contains('sidebar-menu') || menu.classList.contains('due-menu') || menu.classList.contains('ed-menu-right');
   let left = alignRight ? a.right - w : a.left;
   let top = a.bottom + 4;
   if (top + h > innerHeight - 8) top = Math.max(8, a.top - h - 4); // no room below: open upwards
@@ -1383,6 +1391,41 @@ const anchorMenu = (menu) => {
   menu.style.top = top - cb.top + 'px';
   menu.style.right = 'auto';
 };
+
+// ----- the event panel's menus: the chosen row takes the keyboard -------------
+// (the day picker moves its own focus: it knows the days). Arrows, Home and
+// End move along the rows; Up from the first row goes to a box to type in.
+
+function focusEdMenu(menu) {
+  if (!menu.classList.contains('ed-menu') || menu.classList.contains('ed-days')) return;
+  window.__edFocus = null; // a late return of the keyboard to the panel gives way (calendar.rs, focus_button)
+  const rows = [...menu.querySelectorAll('.ed-menu-row')];
+  const row = rows.find((r) => r.classList.contains('on')) || rows[0];
+  if (row) row.focus();
+}
+
+document.addEventListener('keydown', (e) => {
+  const menu = e.target.closest && e.target.closest('.ed-menu');
+  if (!menu || menu.classList.contains('ed-days')) return;
+  const inField = e.target.tagName === 'INPUT';
+  if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key) || (inField && e.key !== 'ArrowDown')) return;
+  const rows = [...menu.querySelectorAll('.ed-menu-row')];
+  if (!rows.length) return;
+  const at = rows.indexOf(document.activeElement);
+  const field = menu.querySelector('.ed-menu-field');
+  if (e.key === 'ArrowUp' && at <= 0 && field) {
+    field.focus();
+    e.preventDefault();
+    return;
+  }
+  let i = at;
+  if (e.key === 'ArrowDown') i = at < 0 ? 0 : Math.min(rows.length - 1, at + 1);
+  else if (e.key === 'ArrowUp') i = Math.max(0, at - 1);
+  else if (e.key === 'Home') i = 0;
+  else i = rows.length - 1;
+  rows[i].focus();
+  e.preventDefault();
+});
 
 // ----- little pops when a to-do is ticked or a page is starred ----------------
 
@@ -2462,9 +2505,8 @@ document.addEventListener(
 );
 
 // ----- the AI box: a click outside puts it away while nothing is typed in it ----------
-// On the click, not on the press: the box is in the page, so the page moves up
-// when it goes, and what the pointer was on would no longer be under it when
-// the button is let go.
+// On the click, not on the press: a press on a line of the page must do its
+// own work first.
 document.addEventListener('click', (e) => {
   const box = document.getElementById('ai-input');
   if (!box || box.value.trim() || (e.target.closest && e.target.closest('.ai-panel'))) return;
@@ -2511,8 +2553,20 @@ document.addEventListener('click', (e) => {
 // they are heard (after what the box already held).
 let hearBox = null;
 let hearBase = '';
+// How long it listens, for a small clock (an element with data-hear-clock).
+let hearClock = 0;
+const hearTime = (since) => {
+  const s = Math.max(0, Math.floor((Date.now() - since) / 1000));
+  const text = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  document.querySelectorAll('[data-hear-clock]').forEach((c) => (c.textContent = text));
+};
 const hearEnd = () => {
   if (!hearBox) return;
+  clearInterval(hearClock);
+  if (hearBox.dataset.hint !== undefined) {
+    hearBox.placeholder = hearBox.dataset.hint;
+    delete hearBox.dataset.hint;
+  }
   hearBox = null;
   document.querySelectorAll('.mic-btn.hearing').forEach((b) => b.classList.remove('hearing'));
   delete document.body.dataset.dictating;
@@ -2530,6 +2584,15 @@ window.__n2.hearStart = () => {
   if (!box || document.activeElement !== box) return hearLost();
   hearBox = box;
   hearBase = box.value || '';
+  const since = Date.now();
+  clearInterval(hearClock);
+  hearTime(since);
+  hearClock = setInterval(() => hearTime(since), 500);
+  // While it listens, the box says so where its hint is.
+  if (box.placeholder !== undefined && box.dataset.hint === undefined) {
+    box.dataset.hint = box.placeholder;
+    box.placeholder = 'Listening…';
+  }
   const mic = document.querySelector(`[data-dictate="${id}"]`);
   if (mic) mic.classList.add('hearing');
 };
@@ -2741,6 +2804,7 @@ function closeFind() {
 
 document.addEventListener('input', (e) => {
   if (e.target && e.target.id === 'find-input') runFind(false);
+  if (e.target && e.target.matches && e.target.matches('textarea.ed-title')) autosize(e.target);
 });
 document.addEventListener('click', (e) => {
   const b = e.target.closest && e.target.closest('[data-find]');
@@ -2768,7 +2832,7 @@ function queueSizeAll() {
   sizeQueued = true;
   requestAnimationFrame(() => {
     sizeQueued = false;
-    document.querySelectorAll('textarea.title-input').forEach(autosize);
+    document.querySelectorAll('textarea.title-input, textarea.ed-title').forEach(autosize);
   });
 }
 
@@ -2780,9 +2844,10 @@ new MutationObserver((mutations) => {
     m.addedNodes.forEach((n) => {
       initWithin(n);
       if (n.nodeType !== 1) return;
-      if (n.tagName === 'TEXTAREA' || (n.querySelector && n.querySelector('textarea.title-input'))) queueSizeAll();
-      const menus = n.matches && n.matches('.sidebar-menu, .tab-menu, .due-menu') ? [n] : n.querySelectorAll ? n.querySelectorAll('.sidebar-menu, .tab-menu, .due-menu') : [];
+      if (n.tagName === 'TEXTAREA' || (n.querySelector && n.querySelector('textarea.title-input, textarea.ed-title'))) queueSizeAll();
+      const menus = n.matches && n.matches('.sidebar-menu, .tab-menu, .due-menu, .ed-menu') ? [n] : n.querySelectorAll ? n.querySelectorAll('.sidebar-menu, .tab-menu, .due-menu, .ed-menu') : [];
       menus.forEach(anchorMenu);
+      menus.forEach(focusEdMenu);
       if ((n.matches && n.matches('.page-outline, .outline-item')) || (n.querySelector && n.querySelector('.page-outline'))) queueOutline();
       (n.matches && n.matches('.graph[data-graph]') ? [n] : n.querySelectorAll ? [...n.querySelectorAll('.graph[data-graph]')] : []).forEach(startGraph);
       const pickers = n.matches && n.matches('.ai-menu') ? [n] : n.querySelectorAll ? n.querySelectorAll('.ai-menu') : [];
@@ -3524,39 +3589,274 @@ window.__n2_player = () => {
 };
 addEventListener('resize', () => requestAnimationFrame(window.__n2_player));
 
-// ----- the sidebar: two fingers moved sideways go to another space ----------
-// One space for each move of the fingers. After a move the trackpad keeps
-// sending smaller and smaller steps (the glide): those are not a new move.
+// The player is moved by its bar and gets another size by a corner. While
+// that goes on the page moves the dock and the player follows it; at the end
+// Rust is told the place (so far from the two nearest edges of the window)
+// and the width, keeps them, and draws the dock there.
 (() => {
-  let sum = 0;
+  const EDGE = 8;
+  const LEAST = 260;
+  let drag = null;
+  const follow = () => window.__n2_player && window.__n2_player();
+  const tell = (dock, w) => {
+    const r = dock.getBoundingClientRect();
+    const h = r.left + r.width / 2 < innerWidth / 2 ? 'left' : 'right';
+    const v = r.top + r.height / 2 < innerHeight / 2 ? 'top' : 'bottom';
+    send({ t: 'player_dock', h, v, x: Math.round(h === 'left' ? r.left : innerWidth - r.right), y: Math.round(v === 'top' ? r.top : innerHeight - r.bottom), w: Math.round(w || r.width) });
+  };
+  const end = (keep) => {
+    const d = drag;
+    if (!d) return;
+    drag = null;
+    d.dock.classList.remove('moving', 'sizing');
+    if (!d.moved) return;
+    if (keep) {
+      tell(d.dock);
+      eatNextClick();
+    } else {
+      d.dock.style.cssText = d.was;
+    }
+    follow();
+  };
+  document.addEventListener(
+    'mousedown',
+    (e) => {
+      if (e.button !== 0 || !(e.target instanceof Element)) return;
+      const dock = e.target.closest('#player-dock');
+      if (!dock) return;
+      const grip = e.target.closest('.player-grip');
+      if (!grip && (!e.target.closest('.player-bar') || e.target.closest('button'))) return;
+      drag = { dock, corner: grip ? grip.dataset.corner : '', x: e.clientX, y: e.clientY, r: dock.getBoundingClientRect(), was: dock.style.cssText, moved: false, raf: 0 };
+      e.preventDefault();
+    },
+    true,
+  );
+  window.addEventListener('mousemove', (e) => {
+    const d = drag;
+    if (!d) return;
+    // The button came up somewhere the page did not see: it is over.
+    if (!(e.buttons & 1)) return end(false);
+    const dx = e.clientX - d.x;
+    const dy = e.clientY - d.y;
+    if (!d.moved) {
+      if (Math.abs(dx) + Math.abs(dy) < 3) return;
+      d.moved = true;
+      d.dock.classList.add(d.corner ? 'sizing' : 'moving');
+      Object.assign(d.dock.style, { left: d.r.left + 'px', top: d.r.top + 'px', right: 'auto', bottom: 'auto', width: d.r.width + 'px' });
+    }
+    if (!d.corner) {
+      d.dock.style.left = Math.max(EDGE, Math.min(d.r.left + dx, innerWidth - d.r.width - EDGE)) + 'px';
+      d.dock.style.top = Math.max(EDGE, Math.min(d.r.top + dy, innerHeight - d.r.height - EDGE)) + 'px';
+    } else {
+      // The corner across from the one that is pulled stays where it is;
+      // the frame keeps its shape (16 to 9), so the height comes with the width.
+      const east = d.corner.includes('e');
+      const south = d.corner.includes('s');
+      const across = east ? dx : -dx;
+      const down = (south ? dy : -dy) * (16 / 9);
+      const more = Math.abs(across) >= Math.abs(down) ? across : down;
+      const rest = d.r.height - (d.r.width * 9) / 16; // the bar and the room round the frame
+      const roomAcross = east ? innerWidth - EDGE - d.r.left : d.r.right - EDGE;
+      const roomDown = south ? innerHeight - EDGE - d.r.top : d.r.bottom - EDGE;
+      const most = Math.max(LEAST, Math.min(roomAcross, ((roomDown - rest) * 16) / 9));
+      const w = Math.max(LEAST, Math.min(d.r.width + more, most));
+      const high = rest + (w * 9) / 16;
+      d.dock.style.width = w + 'px';
+      d.dock.style.left = (east ? d.r.left : d.r.right - w) + 'px';
+      d.dock.style.top = (south ? d.r.top : d.r.bottom - high) + 'px';
+    }
+    if (!d.raf) {
+      d.raf = requestAnimationFrame(() => {
+        d.raf = 0;
+        follow();
+      });
+    }
+  });
+  window.addEventListener('mouseup', () => end(true));
+  // Two clicks on the bar: large, or small again.
+  document.addEventListener('dblclick', (e) => {
+    if (!(e.target instanceof Element) || e.target.closest('button')) return;
+    const bar = e.target.closest('#player-dock .player-bar');
+    if (!bar) return;
+    const dock = bar.closest('#player-dock');
+    const now = dock.getBoundingClientRect().width;
+    const large = Math.round(Math.min(860, innerWidth - 80, ((innerHeight - 110) * 16) / 9));
+    send({ t: 'player_dock', h: dock.dataset.h, v: dock.dataset.v, x: Number(dock.dataset.x), y: Number(dock.dataset.y), w: now < large - 40 ? large : 440 });
+  });
+})();
+
+// ----- input methods (Japanese, Chinese, Korean…): Return that confirms a word ----
+// While a word is being put together, Return, Escape and the arrows belong to
+// the input method. In the one-line fields of the app (a name, the search,
+// a quick note, a new event) they must not reach the app, which would save
+// or send what is typed too early. (The editor of a page has its own guard.)
+window.addEventListener(
+  'keydown',
+  (e) => {
+    if (!(e.isComposing || e.keyCode === 229)) return;
+    if (!(e.target instanceof Element) || !e.target.matches('input, textarea')) return;
+    if (['Enter', 'Escape', 'ArrowDown', 'ArrowUp', 'Tab'].includes(e.key)) e.stopPropagation();
+  },
+  true,
+);
+
+// ----- the sidebar: the list of the last space slides out as the new one comes in --
+// Rust puts a new list in place of the old one when the space changes. A
+// picture of the old list (a copy, which takes no pointer) stays for a moment
+// and slides away to the side the new one does not come from.
+(() => {
+  let top = 0; // how far the list was scrolled (a list that is taken out no longer says)
+  document.addEventListener(
+    'scroll',
+    (e) => {
+      if (e.target instanceof Element && e.target.classList.contains('side-scroll') && e.target.isConnected && !e.target.closest('.side-ghost')) top = e.target.scrollTop;
+    },
+    true,
+  );
+  const slideOut = (side, gone, came) => {
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    side.querySelectorAll('.side-ghost').forEach((g) => g.remove());
+    const box = document.createElement('div');
+    box.className = 'side-ghost';
+    box.setAttribute('aria-hidden', 'true');
+    Object.assign(box.style, { left: came.offsetLeft + 'px', top: came.offsetTop + 'px', width: came.offsetWidth + 'px', height: came.offsetHeight + 'px' });
+    const copy = gone.cloneNode(true);
+    copy.querySelectorAll('.popover').forEach((m) => m.remove());
+    copy.classList.remove('from-next', 'from-prev');
+    // The copy starts where the fingers left the list (it may lean already).
+    const from = { transform: copy.style.transform || 'translateX(0)', opacity: copy.style.opacity || '1' };
+    copy.style.transition = 'none';
+    box.appendChild(copy);
+    side.insertBefore(box, came);
+    copy.scrollTop = top;
+    top = 0;
+    const away = came.classList.contains('from-prev') ? 46 : -46;
+    const move = copy.animate([from, { transform: `translateX(${away}px)`, opacity: '0' }], { duration: 210, easing: 'cubic-bezier(0.4, 0, 0.7, 1)', fill: 'forwards' });
+    const done = () => box.remove();
+    move.onfinish = done;
+    move.oncancel = done;
+    setTimeout(done, 400);
+  };
+  new MutationObserver((records) => {
+    let gone = null;
+    let side = null;
+    for (const rec of records) {
+      for (const n of rec.removedNodes) {
+        if (n.nodeType === 1 && n.classList.contains('side-scroll') && rec.target instanceof Element && rec.target.classList.contains('sidebar')) {
+          gone = n;
+          side = rec.target;
+        }
+      }
+    }
+    if (!gone || !side || !side.isConnected) return;
+    const came = [...side.children].find((c) => c.classList.contains('side-scroll'));
+    if (came && came.dataset.space !== gone.dataset.space) slideOut(side, gone, came);
+  }).observe(document.documentElement, { childList: true, subtree: true });
+})();
+
+// ----- the sidebar: two fingers moved sideways go to another space ----------
+// One space for each move of the fingers, and a light move is enough. The
+// list leans with the fingers, so the move is felt before the space changes;
+// if the fingers stop short, or there is no space on that side, it goes back.
+// After a move the trackpad keeps sending steps (the rest of the move, then
+// the glide): those are not a new move. A pause is, or a step the other way.
+(() => {
+  const NEED = 30; // how far the fingers go, in all, before the space changes
+  let across = 0; // this move so far, sideways
+  let down = 0; // and up or down
+  let upDown = false; // this move is for the list itself
   let last = 0;
-  let before = 0;
-  let done = 0; // when this move of the fingers changed the space (0: it has not)
-  window.addEventListener(
+  let done = 0; // when this move changed the space (0: it has not)
+  let dir = 0; // which way that move went
+  let rest = 0;
+  const list = () => document.querySelector('.sidebar .side-scroll');
+  const still = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // On the sidebar: by what is under the pointer, or by where the pointer is
+  // (the sidebar that floats lies over the page).
+  const onSidebar = (e) => {
+    if (e.target instanceof Element && e.target.closest('.sidebar')) return true;
+    const side = document.querySelector('.sidebar');
+    if (!side || (side.classList.contains('floating') && document.body.dataset.peek !== '1')) return false;
+    const r = side.getBoundingClientRect();
+    return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+  };
+  const lean = () => {
+    const el = list();
+    if (!el || still()) return;
+    const part = Math.max(-1, Math.min(1, across / NEED));
+    el.style.transition = 'none';
+    el.style.transform = `translateX(${(-part * 24).toFixed(1)}px)`;
+    el.style.opacity = (1 - Math.abs(part) * 0.4).toFixed(2);
+  };
+  const settle = () => {
+    const el = list();
+    if (!el || (!el.style.transform && !el.style.opacity)) return;
+    el.style.transition = 'transform 280ms cubic-bezier(0.22, 1, 0.36, 1), opacity 200ms ease-out';
+    el.style.transform = '';
+    el.style.opacity = '';
+    setTimeout(() => {
+      if (el.isConnected) el.style.transition = '';
+    }, 300);
+  };
+  const fresh = () => {
+    across = 0;
+    down = 0;
+    upDown = false;
+    done = 0;
+  };
+  document.addEventListener(
     'wheel',
     (e) => {
-      if (e.ctrlKey || !(e.target instanceof Element) || !e.target.closest('.sidebar')) return;
-      const now = performance.now();
-      const across = Math.abs(e.deltaX);
-      // A pause, or a push much stronger than the glide: a new move.
-      if (now - last > 160 || (done && now - done > 320 && across > before + 14)) {
-        sum = 0;
-        done = 0;
-      }
+      if (e.ctrlKey || !onSidebar(e)) return;
+      // (The time the trackpad made the step, not the time the page got to it.)
+      const now = e.timeStamp || performance.now();
+      const step = Math.abs(e.deltaX);
+      const gap = now - last;
       last = now;
-      before = across;
-      if (done) return;
-      if (across <= Math.abs(e.deltaY) * 1.2) {
-        if (Math.abs(e.deltaY) > across) sum = 0;
+      if (done) {
+        // One space for one move. The move and its glide come as steps with
+        // no pause between them, in one direction. A new move is a pause, or
+        // a clear step the other way. (Steps that get larger again are not a
+        // sign: the fingers do that in the middle of one move.)
+        const back = e.deltaX !== 0 && Math.sign(e.deltaX) === -dir && step >= 3;
+        if (now - done < 220 || (gap <= 80 && !back)) return;
+        fresh();
+      } else if (gap > 250) {
+        fresh(); // a long pause before the space changed: start again
+      }
+      if (upDown) return;
+      across += e.deltaX;
+      down += e.deltaY;
+      // Up and down is the list itself: this move is not for the spaces.
+      if (Math.abs(down) >= 24 && Math.abs(down) > Math.abs(across)) {
+        upDown = true;
+        settle();
         return;
       }
-      sum += e.deltaX;
-      if (Math.abs(sum) < 70) return;
+      // Not clearly sideways yet.
+      if (Math.abs(across) < 3 || Math.abs(across) < Math.abs(down) * 1.2) return;
+      lean();
+      clearTimeout(rest);
+      if (Math.abs(across) < NEED) {
+        // The fingers stopped short: the list goes back.
+        rest = setTimeout(() => {
+          fresh();
+          settle();
+        }, 170);
+        return;
+      }
       done = now;
-      send({ t: 'shortcut', name: sum > 0 ? 'space_next' : 'space_prev' });
-      sum = 0;
+      dir = Math.sign(across);
+      const el = list();
+      const space = el && el.dataset.space;
+      send({ t: 'shortcut', name: across > 0 ? 'space_next' : 'space_prev' });
+      // No space on that side: the same list is still there, and goes back.
+      rest = setTimeout(() => {
+        const same = list();
+        if (same && same.dataset.space === space) settle();
+      }, 160);
     },
-    { passive: true },
+    { passive: true, capture: true },
   );
 })();
 

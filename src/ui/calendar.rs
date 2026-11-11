@@ -6,7 +6,7 @@
 //! (double-click a day for an all-day one); click an event to edit it.
 
 use super::icons::{Icon, ICON_COLORS};
-use crate::model::Event;
+use crate::model::{Event, Space};
 use crate::repeat;
 use crate::state::{AppState, CalView, OpenTodo, Route};
 use crate::when::{self, HOUR, MINUTE};
@@ -105,9 +105,13 @@ pub fn CalendarView() -> Element {
         (Some(a), Some(b)) => (when::midnight(*a), when::midnight(when::next_day(*b))),
         _ => (0, 0),
     };
+    // One calendar for every space (each event marked with its space),
+    // unless the person chose to see only the space in front.
+    let every_space = cal.all_spaces;
+    let many_spaces = state.spaces.read().len() > 1;
     // The open to-dos that have a day: they show on that day.
-    let due: Vec<OpenTodo> = state.open_todos().into_iter().filter(|t| t.due.is_some()).collect();
-    let mut events: Vec<Event> = repeat::expand(state.events.read().values().filter(|e| e.space_id == space), from, to);
+    let due: Vec<OpenTodo> = state.open_todos_of(every_space).into_iter().filter(|t| t.due.is_some()).collect();
+    let mut events: Vec<Event> = repeat::expand(state.events.read().values().filter(|e| every_space || e.space_id == space), from, to);
     // With the events of the Mac's calendars, when the person has them on.
     events.extend(state.mac_events(&space, from, to));
     // Redraw once a minute so the "now" line keeps up.
@@ -148,7 +152,7 @@ pub fn CalendarView() -> Element {
         .selected
         .as_ref()
         .and_then(|id| repeat::find(&state.events.read(), id).or_else(|| state.mac_event(id)))
-        .filter(|e| e.space_id == space);
+        .filter(|e| every_space || e.space_id == space);
     let view = cal.view;
     // The day view: the event whose notes show. The one that was clicked,
     // when it is on this day; else the one that is on now, the next one,
@@ -183,6 +187,9 @@ pub fn CalendarView() -> Element {
                         button { class: "icon-btn", title: "Next", onclick: move |_| state.cal_step(1), Icon { name: "chevron-right", size: 16 } }
                     }
                     div { class: "cal-spacer" }
+                    if many_spaces {
+                        SpacesShown {}
+                    }
                     div { class: "segmented small",
                         button { class: if view == CalView::Day { "on" } else { "" }, onclick: move |_| state.cal_set_view(CalView::Day), "Day" }
                         button { class: if view == CalView::Week { "on" } else { "" }, onclick: move |_| state.cal_set_view(CalView::Week), "Week" }
@@ -394,6 +401,7 @@ fn DayNotes(event: Event) -> Element {
 fn EventChip(event: Event, selected: bool) -> Element {
     let state = use_context::<AppState>();
     let id = event.id.clone();
+    let mark = space_mark(&state, &event);
     let time = if event.all_day { String::new() } else { when::time_label(event.start) };
     let class = format!(
         "cal-chip{}{}",
@@ -418,6 +426,9 @@ fn EventChip(event: Event, selected: bool) -> Element {
             span { class: "chip-title", "{event.display_title()}" }
             if event.repeat.is_some() {
                 span { class: "repeat-mark", title: "Repeats", Icon { name: "repeat", size: 11 } }
+            }
+            if let Some(sp) = mark {
+                SpaceMark { space: sp }
             }
         }
     }
@@ -658,9 +669,11 @@ fn TimedEvent(event: Event, selected: bool, top: f64, height: f64, left: f64, wi
     let state = use_context::<AppState>();
     let id = event.id.clone();
     let range = format!("{} – {}", when::time_label(event.start), when::time_label(event.end));
+    let mark = space_mark(&state, &event);
+    let class = format!("cal-event{}{}", if selected { " on" } else { "" }, if mark.is_some() { " has-space" } else { "" });
     rsx! {
         div {
-            class: if selected { "cal-event on" } else { "cal-event" },
+            class: "{class}",
             // For the drag (see the page script): which event this is.
             "data-event": "{event.id}",
             style: "top: {top}px; height: {height}px; left: calc({left}% + 2px); width: calc({width}% - 4px); {color_vars(&event.color)}",
@@ -677,6 +690,107 @@ fn TimedEvent(event: Event, selected: bool, top: f64, height: f64, left: f64, wi
             }
             if height >= 34.0 {
                 div { class: "ev-time", "{range}" }
+            }
+            if let Some(sp) = mark {
+                SpaceMark { space: sp }
+            }
+        }
+    }
+}
+
+/// The space an event belongs to, for the small mark beside it: only when
+/// the calendar shows every space and there is more than one. The Mac's own
+/// events have none (their panel names their calendar).
+pub(crate) fn space_mark(state: &AppState, e: &Event) -> Option<Space> {
+    if e.id.starts_with(crate::maccal::PREFIX) || !state.cal.read().all_spaces {
+        return None;
+    }
+    let spaces = state.spaces.read();
+    if spaces.len() < 2 {
+        return None;
+    }
+    spaces.iter().find(|s| s.id == e.space_id).cloned()
+}
+
+/// The letter of a space in its colour, quiet: which space an event is in.
+#[component]
+pub(crate) fn SpaceMark(space: Space) -> Element {
+    let name = space.display_name().to_string();
+    rsx! {
+        span {
+            class: "ev-space",
+            style: "--s: var(--icon-{space.color}, var(--accent)); --s-soft: var(--icon-{space.color}-soft, var(--accent-soft));",
+            title: "{name}",
+            "aria-label": "In {name}",
+            "{space.initial()}"
+        }
+    }
+}
+
+/// Which spaces the calendar shows: all of them (each event marked with its
+/// space) or only the one in front. One quiet button in the toolbar, shown
+/// when there is more than one space; Rune's own menu; kept as a setting.
+#[component]
+fn SpacesShown() -> Element {
+    let state = use_context::<AppState>();
+    let all = state.cal.read().all_spaces;
+    let spaces = state.spaces.read().clone();
+    let here = state.ui.read().space.clone();
+    let here_space = spaces.iter().find(|s| s.id == here).cloned();
+    let here_name = here_space.as_ref().map(|s| s.display_name().to_string()).unwrap_or_else(|| "this space".into());
+    // The badges on the button: every space's (three at most), or this one's.
+    let badges: Vec<Space> = if all { spaces.iter().take(3).cloned().collect() } else { here_space.into_iter().collect() };
+    let said = if all { "All spaces".to_string() } else { format!("Only {here_name}") };
+    let mut open = use_signal(|| false);
+    let rows = vec![
+        ("all".to_string(), "All spaces".to_string(), String::new(), all, false),
+        ("here".to_string(), format!("Only {here_name}"), String::new(), !all, false),
+    ];
+    rsx! {
+        div { class: "ed-pick cal-spaces",
+            button {
+                class: if open() { "cal-spaces-btn open" } else { "cal-spaces-btn" },
+                id: "cal-spaces",
+                "data-value": if all { "all" } else { "here" },
+                title: "Which spaces the calendar shows: {said}",
+                "aria-label": "Calendar shows: {said}",
+                "aria-haspopup": "menu",
+                "aria-expanded": "{open()}",
+                onclick: move |_| open.toggle(),
+                span { class: "cal-spaces-badges",
+                    for sp in badges {
+                        span {
+                            key: "{sp.id}",
+                            class: "space-badge",
+                            style: "--c: var(--icon-{sp.color}, var(--accent));",
+                            "{sp.initial()}"
+                        }
+                    }
+                }
+                span { class: "ed-chev", Icon { name: "chevron-down", size: 12 } }
+            }
+            if open() {
+                div {
+                    class: "ed-shade",
+                    onclick: move |_| {
+                        open.set(false);
+                    },
+                }
+                PickMenu {
+                    label: "Spaces shown",
+                    heading: "The calendar shows",
+                    right: true,
+                    rows,
+                    on_pick: move |v: String| {
+                        open.set(false);
+                        state.cal_set_all_spaces(v == "all");
+                        focus_button("cal-spaces");
+                    },
+                    on_close: move |_| {
+                        open.set(false);
+                        focus_button("cal-spaces");
+                    },
+                }
             }
         }
     }
@@ -736,8 +850,113 @@ fn time_of(ms: i64) -> NaiveTime {
     NaiveTime::from_hms_opt(t.hour(), t.minute(), 0).unwrap_or(NaiveTime::MIN)
 }
 
-/// The panel for editing the selected event. Keyed by event, so its fields
-/// start fresh when another event is chosen.
+/// What is open in an event's panel: one of its menus or day pickers.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Open {
+    Space,
+    Day,
+    LastDay,
+    Start,
+    End,
+    Repeat,
+    Until,
+    UntilDay,
+    Remind,
+    Delete,
+}
+
+impl Open {
+    /// The button that opens it: the keyboard goes back there when it closes.
+    fn button(self) -> &'static str {
+        match self {
+            Open::Day => "ev-day",
+            Open::LastDay => "ev-last-day",
+            Open::Start => "ev-start",
+            Open::End => "ev-end",
+            Open::Repeat => "ev-repeat",
+            Open::Until | Open::UntilDay => "ev-until",
+            Open::Remind => "ev-remind",
+            Open::Space => "ev-space",
+            Open::Delete => "ev-delete",
+        }
+    }
+}
+
+/// Put the keyboard back on a button of the panel once a menu has closed
+/// (the panel may be drawn afresh first, for another repeat). It waits until
+/// the menu is gone, and gives way when another menu or picker opened
+/// meanwhile (they clear `__edFocus`): a late return must never take the
+/// keyboard away from a menu that is open.
+fn focus_button(id: &str) {
+    document::eval(&format!(
+        "window.__edFocus='{id}';let n=0;const f=()=>{{if(window.__edFocus!=='{id}')return;\
+         if(document.querySelector('.ed-menu')){{if(n++<60)setTimeout(f,20);return;}}\
+         window.__edFocus=null;const b=document.getElementById('{id}');if(b)b.focus({{preventScroll:true}});}};setTimeout(f,20);"
+    ));
+}
+
+/// "Tue, Nov 10", with the year when it is not this year.
+fn day_chip(d: NaiveDate) -> String {
+    if d.year() == when::today().year() {
+        d.format("%a, %b %-d").to_string()
+    } else {
+        d.format("%a, %b %-d, %Y").to_string()
+    }
+}
+
+/// "4 PM", "4:30 PM": a time of day as the calendar writes it.
+fn clock_label(t: NaiveTime) -> String {
+    let (pm, h) = t.hour12();
+    let half = if pm { "PM" } else { "AM" };
+    if t.minute() == 0 {
+        format!("{h} {half}")
+    } else {
+        format!("{h}:{:02} {half}", t.minute())
+    }
+}
+
+/// The two ends of an event, short: "4" and "4:30 PM" say PM once.
+fn short_times(start: i64, end: i64) -> (String, String) {
+    let (a, b) = (when::time_label(start), when::time_label(end));
+    let pm = |ms: i64| when::local(ms).hour12().0;
+    if pm(start) == pm(end) && end - start < 12 * HOUR {
+        (a.trim_end_matches(" AM").trim_end_matches(" PM").to_string(), b)
+    } else {
+        (a, b)
+    }
+}
+
+/// How long an event lasts, beside an end time: "45 min", "1 hour 30 min".
+fn length_label(minutes: i64) -> String {
+    match (minutes / 60, minutes % 60) {
+        (0, m) => format!("{m} min"),
+        (1, 0) => "1 hour".into(),
+        (h, 0) => format!("{h} hours"),
+        (1, m) => format!("1 hour {m} min"),
+        (h, m) => format!("{h} hours {m} min"),
+    }
+}
+
+/// The times to choose from, a quarter of an hour apart: for the start every
+/// one of the day; for the end those after the start, with how long the
+/// event then is.
+fn time_choices(start: Option<NaiveTime>) -> Vec<(NaiveTime, String, String)> {
+    match start {
+        None => (0..96)
+            .map(|q| {
+                let t = NaiveTime::MIN + chrono::Duration::minutes(15 * q);
+                (t, clock_label(t), String::new())
+            })
+            .collect(),
+        Some(s) => (1..96)
+            .map(|q| {
+                let t = s + chrono::Duration::minutes(15 * q);
+                (t, clock_label(t), length_label(15 * q))
+            })
+            .collect(),
+    }
+}
+
 /// The panel of an event that comes from the Mac's calendars. It is only
 /// shown here: it is changed in the Calendar app. A notes page can be made
 /// for it, as for any event.
@@ -746,52 +965,77 @@ fn MacEventPanel(event: Event) -> Element {
     let state = use_context::<AppState>();
     let id = event.id.clone();
     let day = when::date_of(event.start);
-    let summary = if event.all_day {
-        format!("{} · all day", when::day_label(day))
+    let when_text = if event.all_day {
+        format!("{} · all day", day_chip(day))
     } else {
-        format!("{} · {} – {}", when::day_label(day), when::time_label(event.start), when::time_label(event.end))
+        let (a, b) = short_times(event.start, event.end);
+        format!("{} · {a} – {b}", day_chip(day))
     };
     let calendar = {
         let m = state.mac_cal.read();
         m.events.iter().find(|e| e.id == id).map(|e| m.name_of(&e.calendar)).unwrap_or_default()
     };
     let has_page = event.page_id.is_some();
-    // Its place, without the address to join by (that is the button).
-    let joins = event.join_url().is_some();
+    // The address to join by, shown without its "https://"; the button joins.
+    let link = event.join_url().map(|l| l.trim_start_matches("https://").trim_start_matches("http://").to_string());
+    // Its place, without the address to join by.
     let place = event.notes.lines().filter(|l| crate::meeting::join_link(l).is_none()).collect::<Vec<_>>().join("\n");
     let join_id = id.clone();
+    let title = event.display_title();
     rsx! {
-        aside { class: "cal-editor of-the-mac", "data-event": "{id}",
-            div { class: "ed-head",
-                span { class: "ed-swatch", style: "{color_vars(&event.color)}" }
-                span { class: "ed-kicker", "{summary}" }
-                button { class: "icon-btn small", title: "Close", onclick: move |_| state.close_event_panel(), Icon { name: "close", size: 14 } }
-            }
-            h3 { class: "ed-title-plain", "{event.display_title()}" }
-            div { class: "ed-plain", "{calendar}" }
-            if !place.trim().is_empty() {
-                div { class: "ed-plain", "{place}" }
-            }
-            div { class: "ed-actions",
-                if joins {
-                    button { class: "secondary-btn", id: "ev-join", title: "Open the meeting and its notes", onclick: move |_| state.join_event(&join_id), "Join" }
+        aside { class: "cal-editor of-the-mac", "data-event": "{id}", "aria-label": "{title}, from the calendars of this Mac",
+            button { class: "icon-btn ed-close", title: "Close", "aria-label": "Close", onclick: move |_| state.close_event_panel(), Icon { name: "close", size: 16 } }
+            div { class: "ed-body",
+                h3 { class: "ed-title-plain", "{title}" }
+                div { class: "ed-row ed-still",
+                    span { class: "ed-ico", Icon { name: "clock", size: 16 } }
+                    span { class: "ed-val", "{when_text}" }
                 }
-                button { class: "secondary-btn with-icon", id: "mac-event-notes", onclick: move |_| state.event_notes(&id),
-                    Icon { name: "page", size: 15 }
+                div { class: "ed-row ed-still",
+                    span { class: "ed-ico", Icon { name: "calendar", size: 16 } }
+                    span { class: "ed-swatch", style: "{color_vars(&event.color)}" }
+                    span { class: "ed-val", "{calendar}" }
+                }
+                if let Some(l) = link {
+                    div { class: "ed-sep" }
+                    div { class: "ed-row ed-still",
+                        span { class: "ed-ico", Icon { name: "link", size: 16 } }
+                        span { class: "ed-val ed-dim ed-grow", "{l}" }
+                        button { class: "ed-small-btn", id: "ev-join", title: "Open the meeting and its notes", onclick: move |_| state.join_event(&join_id), "Join" }
+                    }
+                }
+                if !place.trim().is_empty() {
+                    div { class: "ed-sep" }
+                    div { class: "ed-notes-row ed-still",
+                        span { class: "ed-ico", Icon { name: "note", size: 16 } }
+                        div { class: "ed-plain-text", "{place}" }
+                    }
+                }
+            }
+            div { class: "ed-lock",
+                Icon { name: "lock", size: 14 }
+                span {
+                    if state.mac_cal.read().can_write() {
+                        "From the calendars of this Mac. Drag it to give it another time."
+                    } else {
+                        "From the calendars of this Mac. Change it in the Calendar app."
+                    }
+                }
+            }
+            div { class: "ed-foot",
+                button { class: "ghost-btn", id: "mac-event-notes", onclick: move |_| state.event_notes(&id),
+                    Icon { name: "file", size: 15 }
                     span { if has_page { "Open notes page" } else { "Make a notes page" } }
-                }
-            }
-            div { class: "ed-plain quiet",
-                if state.mac_cal.read().can_write() {
-                    "From the calendars of this Mac. Drag it to give it another time."
-                } else {
-                    "From the calendars of this Mac. Change it in the Calendar app."
                 }
             }
         }
     }
 }
 
+/// The panel for editing the selected event. Keyed by event, so its fields
+/// start fresh when another event is chosen. One column of quiet rows: an
+/// icon, then the value as words to click. Rune's own menus and day picker
+/// open from them, never the system's lists or pop-ups.
 #[component]
 fn EventEditor(event: Event) -> Element {
     let state = use_context::<AppState>();
@@ -800,22 +1044,8 @@ fn EventEditor(event: Event) -> Element {
     let start_date = when::date_of(event.start);
     let last_day = if all_day { when::date_of(event.end - 1) } else { when::date_of(event.end) };
     let duration = event.end - event.start;
-    let summary = if all_day {
-        if last_day == start_date {
-            format!("{} · all day", when::day_label(start_date))
-        } else {
-            format!("{} – {}", when::day_label(start_date), when::day_label(last_day))
-        }
-    } else {
-        format!("{} · {} – {}", when::day_label(start_date), when::time_label(event.start), when::time_label(event.end))
-    };
     let has_page = event.page_id.as_ref().is_some_and(|p| state.pages.read().get(p).is_some_and(|p| !p.trashed));
-
-    let (i1, i2, i3, i4, i5, i6, i7, i8, i9) =
-        (id.clone(), id.clone(), id.clone(), id.clone(), id.clone(), id.clone(), id.clone(), id.clone(), id.clone());
-    let i10 = id.clone();
     let remind = event.remind;
-    let (i11, i12, i13, i14, i15, i16) = (id.clone(), id.clone(), id.clone(), id.clone(), id.clone(), id.clone());
     // A repeat of a repeating event (rather than the event itself).
     let one_repeat = repeat::split_id(&id).1.is_some() && event.repeat.is_some();
     let first_day = state
@@ -826,291 +1056,796 @@ fn EventEditor(event: Event) -> Element {
         .unwrap_or(start_date);
     let rule_choice = repeat::choice_of(event.repeat.as_ref());
     let custom_label = event.repeat.as_ref().map(|r| repeat::describe(r, first_day)).unwrap_or_default();
+    let choices = repeat::choices(first_day);
+    let repeat_label = if rule_choice == "custom" {
+        custom_label.clone()
+    } else {
+        choices.iter().find(|(k, _)| *k == rule_choice).map(|(_, l)| l.clone()).unwrap_or_default()
+    };
+    let mut repeat_rows: Vec<(String, String, String, bool, bool)> =
+        choices.iter().map(|(k, l)| (k.to_string(), l.clone(), String::new(), *k == rule_choice, false)).collect();
+    if rule_choice == "custom" {
+        repeat_rows.push(("custom".into(), custom_label, String::new(), true, false));
+    }
     let until = event.repeat.as_ref().and_then(|r| r.until_date());
-    let mut asking_delete = use_signal(|| false);
+    let until_label = until.map(|u| format!("Until {}", day_chip(u))).unwrap_or_else(|| "No end date".into());
+    let until_rows = vec![
+        ("never".to_string(), "No end date".to_string(), String::new(), until.is_none(), false),
+        ("date".to_string(), "Until a day…".to_string(), String::new(), until.is_some(), false),
+    ];
+    let remind_value = remind.map(|m| m.to_string()).unwrap_or_else(|| "none".into());
+    let remind_label = match remind {
+        None => "No reminder".to_string(),
+        Some(m) => crate::notify::REMINDERS
+            .iter()
+            .find(|(r, _)| *r == Some(m))
+            .map(|(_, l)| l.to_string())
+            .unwrap_or_else(|| format!("{m} min before")),
+    };
+    let remind_rows: Vec<(String, String, String, bool, bool)> = crate::notify::REMINDERS
+        .iter()
+        .map(|(m, l)| (m.map(|x| x.to_string()).unwrap_or_else(|| "none".into()), l.to_string(), String::new(), *m == remind, false))
+        .collect();
+    // The space it is in, when there is more than one: a row to move it.
+    let spaces = state.spaces.read().clone();
+    let own_space = spaces.iter().find(|s| s.id == event.space_id).cloned();
+    let space_name = own_space.as_ref().map(|s| s.display_name().to_string()).unwrap_or_else(|| "No space".into());
+    let space_rows: Vec<(String, String, String, bool, bool)> =
+        spaces.iter().map(|s| (s.id.clone(), s.display_name().to_string(), String::new(), s.id == event.space_id, false)).collect();
+    let delete_rows = vec![
+        ("one".to_string(), "Delete only this one".to_string(), day_chip(start_date), false, false),
+        ("all".to_string(), "Delete all repeats".to_string(), String::new(), false, true),
+    ];
+    let (from_label, to_label) = short_times(event.start, event.end);
+    // An event that goes on past midnight says so after its end.
+    let past_midnight = !all_day && when::date_of(event.end - 1) > start_date;
+    let long_day = |d: NaiveDate| d.format("%A, %B %-d, %Y").to_string();
+    let day_said = if all_day { format!("First day: {}", long_day(start_date)) } else { format!("Day: {}", long_day(start_date)) };
+    let last_said = format!("Last day: {}", long_day(last_day));
+    let start_said = format!("Starts at {}", when::time_label(event.start));
+    let end_said = format!("Ends at {}", when::time_label(event.end));
+    let title = event.display_title();
+
+    // What is open: one menu or day picker at a time.
+    let mut open = use_signal(|| None::<Open>);
+    let is = move |w: Open| *open.read() == Some(w);
+    let mut toggle = move |w: Open| {
+        let now = *open.peek();
+        open.set(if now == Some(w) { None } else { Some(w) });
+    };
+    let mut close = move || {
+        if let Some(w) = *open.peek() {
+            focus_button(w.button());
+        }
+        open.set(None);
+    };
+    let chip = move |w: Open| if is(w) { "ed-chip open" } else { "ed-chip" };
+    let row = move |w: Open| if is(w) { "ed-row open" } else { "ed-row" };
+
+    // The link to join the call. What is typed in its field waits for
+    // "Save" (or Return): the button beside the field says so, and becomes
+    // "Join" when the link is kept. A link still waiting when this panel
+    // closes is kept then, so that it cannot be lost.
+    let shown_link = event.join_url().unwrap_or_default();
+    let mut typed_link = use_signal(|| None::<String>);
+    let link_waits = typed_link.read().as_ref().is_some_and(|typed| *typed != shown_link);
+    let (link_id, link_was) = (id.clone(), shown_link.clone());
+    use_drop(move || {
+        if let Some(link) = typed_link.peek().clone().filter(|typed| *typed != link_was) {
+            state.update_event(&link_id, |ev| ev.join = link);
+        }
+    });
 
     rsx! {
-        aside { class: "cal-editor",
-            div { class: "ed-head",
-                span { class: "ed-swatch", style: "{color_vars(&event.color)}" }
-                span { class: "ed-kicker", "{summary}" }
-                button { class: "icon-btn small", title: "Close", onclick: move |_| state.close_event_panel(), Icon { name: "close", size: 14 } }
+        aside { class: "cal-editor", "aria-label": "Event: {title}",
+            // A press anywhere else in the panel puts a menu away.
+            if open.read().is_some() {
+                div { class: "ed-shade", onclick: move |_| close() }
             }
-            input {
-                id: "ev-title-{id}",
-                class: "ed-title",
-                placeholder: "New event",
-                initial_value: "{event.title}",
-                oninput: move |e: FormEvent| {
-                    let v = e.value();
-                    state.update_event(&i1, |ev| ev.title = v);
-                },
-                onkeydown: move |e: KeyboardEvent| {
-                    if e.key() == Key::Enter {
-                        e.prevent_default();
-                    }
-                },
-            }
-            if all_day {
-                div { class: "ed-grid",
-                    label { "Starts" }
-                    input {
-                        r#type: "date",
-                        class: "text-input",
-                        value: "{when::date_value(start_date)}",
-                        onchange: move |e: FormEvent| {
-                            if let Some(d) = when::parse_date(&e.value()) {
-                                state.update_event(&i2, |ev| {
-                                    let days = ((ev.end - ev.start) as f64 / (24 * HOUR) as f64).round().max(1.0) as i64;
-                                    ev.start = when::midnight(d);
-                                    ev.end = when::midnight(when::add_days(d, days));
-                                });
-                            }
-                        },
-                    }
-                    label { "Ends" }
-                    input {
-                        r#type: "date",
-                        class: "text-input",
-                        value: "{when::date_value(last_day)}",
-                        onchange: move |e: FormEvent| {
-                            if let Some(d) = when::parse_date(&e.value()) {
-                                state.update_event(&i3, |ev| ev.end = when::midnight(when::next_day(d)));
-                            }
-                        },
-                    }
-                }
-            } else {
-                div { class: "ed-grid",
-                    label { "Date" }
-                    input {
-                        r#type: "date",
-                        class: "text-input",
-                        value: "{when::date_value(start_date)}",
-                        onchange: move |e: FormEvent| {
-                            if let Some(d) = when::parse_date(&e.value()) {
-                                state.update_event(&i2, |ev| {
-                                    ev.start = when::at(d, time_of(ev.start));
-                                    ev.end = ev.start + duration;
-                                });
-                            }
-                        },
-                    }
-                    label { "From" }
-                    div { class: "ed-times",
-                        input {
-                            r#type: "time",
-                            class: "text-input",
-                            value: "{when::time_value(event.start)}",
-                            onchange: move |e: FormEvent| {
-                                if let Some(t) = when::parse_time(&e.value()) {
-                                    state.update_event(&i3, |ev| {
-                                        ev.start = when::at(start_date, t);
-                                        ev.end = ev.start + duration;
-                                    });
-                                }
-                            },
+            button { class: "icon-btn ed-close", title: "Close", "aria-label": "Close", onclick: move |_| state.close_event_panel(), Icon { name: "close", size: 16 } }
+            div { class: "ed-body",
+                textarea {
+                    id: "ev-title-{id}",
+                    class: "ed-title",
+                    rows: "1",
+                    placeholder: "New event",
+                    "aria-label": "Event name",
+                    initial_value: "{event.title}",
+                    oninput: {
+                        let id = id.clone();
+                        move |e: FormEvent| {
+                            let v = e.value().replace('\n', " ");
+                            state.update_event(&id, |ev| ev.title = v);
                         }
-                        span { class: "ed-to", "to" }
-                        input {
-                            r#type: "time",
-                            class: "text-input",
-                            value: "{when::time_value(event.end)}",
-                            onchange: move |e: FormEvent| {
-                                if let Some(t) = when::parse_time(&e.value()) {
-                                    state.update_event(&i4, |ev| {
-                                        let mut end = when::at(when::date_of(ev.start), t);
-                                        if end <= ev.start {
-                                            end += 24 * HOUR;
-                                        }
-                                        ev.end = end;
-                                    });
-                                }
-                            },
-                        }
-                    }
-                }
-            }
-            div { class: "ed-row",
-                span { class: "ed-label", "All day" }
-                button {
-                    class: if all_day { "switch on" } else { "switch" },
-                    role: "switch",
-                    "aria-checked": "{all_day}",
-                    onclick: move |_| {
-                        state.update_event(&i5, |ev| {
-                            if ev.all_day {
-                                ev.all_day = false;
-                                ev.start = when::at(start_date, NaiveTime::from_hms_opt(9, 0, 0).unwrap_or(NaiveTime::MIN));
-                                ev.end = ev.start + HOUR;
-                            } else {
-                                ev.all_day = true;
-                                ev.start = when::midnight(start_date);
-                                ev.end = when::midnight(when::next_day(last_day.max(start_date)));
-                            }
-                        });
                     },
-                    span { class: "knob" }
-                }
-            }
-            div { class: "ed-row",
-                span { class: "ed-label", "Repeat" }
-                select {
-                    id: "ev-repeat",
-                    class: "select small",
-                    onchange: move |e: FormEvent| state.set_event_repeat(&i11, &e.value()),
-                    for (key, label) in repeat::choices(first_day) {
-                        option { value: "{key}", selected: rule_choice == key, "{label}" }
-                    }
-                    if rule_choice == "custom" {
-                        option { value: "custom", selected: true, disabled: true, "{custom_label}" }
-                    }
-                }
-            }
-            if event.repeat.is_some() {
-                div { class: "ed-row",
-                    span { class: "ed-label", "Ends" }
-                    div { class: "ed-until",
-                        select {
-                            class: "select small",
-                            onchange: move |e: FormEvent| {
-                                let end = (e.value() == "date").then(|| when::add_days(start_date, 12 * 7));
-                                state.set_event_until(&i12, end);
-                            },
-                            option { value: "never", selected: until.is_none(), "Never" }
-                            option { value: "date", selected: until.is_some(), "On a date" }
+                    onkeydown: move |e: KeyboardEvent| {
+                        if e.key() == Key::Enter {
+                            e.prevent_default();
                         }
-                        if let Some(u) = until {
-                            input {
-                                r#type: "date",
-                                class: "text-input",
-                                "aria-label": "Last day",
-                                value: "{when::date_value(u)}",
-                                onchange: move |e: FormEvent| {
-                                    if let Some(d) = when::parse_date(&e.value()) {
-                                        state.set_event_until(&i13, Some(d));
+                    },
+                }
+                // When: the day and the times, as words to click.
+                div { class: "ed-row ed-when",
+                    span { class: "ed-ico", Icon { name: "clock", size: 16 } }
+                    div { class: "ed-pick",
+                        button {
+                            class: chip(Open::Day),
+                            id: "ev-day",
+                            "data-value": "{when::date_value(start_date)}",
+                            "aria-label": "{day_said}",
+                            "aria-haspopup": "dialog",
+                            "aria-expanded": "{is(Open::Day)}",
+                            onclick: move |_| toggle(Open::Day),
+                            "{day_chip(start_date)}"
+                        }
+                        if is(Open::Day) {
+                            DayPicker {
+                                label: if all_day { "First day" } else { "Day" },
+                                day: start_date,
+                                on_pick: {
+                                    let id = id.clone();
+                                    move |d: NaiveDate| {
+                                        if all_day {
+                                            state.update_event(&id, |ev| {
+                                                let days = ((ev.end - ev.start) as f64 / (24 * HOUR) as f64).round().max(1.0) as i64;
+                                                ev.start = when::midnight(d);
+                                                ev.end = when::midnight(when::add_days(d, days));
+                                            });
+                                        } else {
+                                            state.update_event(&id, |ev| {
+                                                ev.start = when::at(d, time_of(ev.start));
+                                                ev.end = ev.start + duration;
+                                            });
+                                        }
+                                        close();
                                     }
+                                },
+                                on_close: move |_| close(),
+                            }
+                        }
+                    }
+                    if all_day {
+                        span { class: if last_day == start_date { "ed-mid" } else { "ed-dash" }, "aria-hidden": "true",
+                            if last_day == start_date { "·" } else { "–" }
+                        }
+                        div { class: "ed-pick",
+                            button {
+                                class: chip(Open::LastDay),
+                                id: "ev-last-day",
+                                "data-value": "{when::date_value(last_day)}",
+                                "aria-label": "{last_said}",
+                                "aria-haspopup": "dialog",
+                                "aria-expanded": "{is(Open::LastDay)}",
+                                onclick: move |_| toggle(Open::LastDay),
+                                if last_day == start_date { "1 day" } else { "{day_chip(last_day)}" }
+                            }
+                            if is(Open::LastDay) {
+                                DayPicker {
+                                    label: "Last day",
+                                    day: last_day,
+                                    on_pick: {
+                                        let id = id.clone();
+                                        move |d: NaiveDate| {
+                                            let d = d.max(start_date);
+                                            state.update_event(&id, |ev| ev.end = when::midnight(when::next_day(d)));
+                                            close();
+                                        }
+                                    },
+                                    on_close: move |_| close(),
+                                }
+                            }
+                        }
+                    } else {
+                        span { class: "ed-mid", "aria-hidden": "true", "·" }
+                        div { class: "ed-pick",
+                            button {
+                                class: chip(Open::Start),
+                                id: "ev-start",
+                                "data-value": "{when::time_value(event.start)}",
+                                "aria-label": "{start_said}",
+                                "aria-haspopup": "menu",
+                                "aria-expanded": "{is(Open::Start)}",
+                                onclick: move |_| toggle(Open::Start),
+                                "{from_label}"
+                            }
+                            if is(Open::Start) {
+                                TimeMenu {
+                                    label: "Start",
+                                    choices: time_choices(None),
+                                    current: time_of(event.start),
+                                    on_pick: {
+                                        let id = id.clone();
+                                        move |t: NaiveTime| {
+                                            state.update_event(&id, |ev| {
+                                                ev.start = when::at(start_date, t);
+                                                ev.end = ev.start + duration;
+                                            });
+                                            close();
+                                        }
+                                    },
+                                    on_close: move |_| close(),
+                                }
+                            }
+                        }
+                        span { class: "ed-dash", "aria-hidden": "true", "–" }
+                        div { class: "ed-pick",
+                            button {
+                                class: chip(Open::End),
+                                id: "ev-end",
+                                "data-value": "{when::time_value(event.end)}",
+                                "aria-label": "{end_said}",
+                                "aria-haspopup": "menu",
+                                "aria-expanded": "{is(Open::End)}",
+                                onclick: move |_| toggle(Open::End),
+                                "{to_label}"
+                            }
+                            if is(Open::End) {
+                                TimeMenu {
+                                    label: "End",
+                                    choices: time_choices(Some(time_of(event.start))),
+                                    current: time_of(event.end),
+                                    on_pick: {
+                                        let id = id.clone();
+                                        move |t: NaiveTime| {
+                                            state.update_event(&id, |ev| {
+                                                let mut end = when::at(when::date_of(ev.start), t);
+                                                if end <= ev.start {
+                                                    end += 24 * HOUR;
+                                                }
+                                                ev.end = end;
+                                            });
+                                            close();
+                                        }
+                                    },
+                                    on_close: move |_| close(),
+                                }
+                            }
+                        }
+                        if past_midnight {
+                            span { class: "ed-next", "next day" }
+                        }
+                    }
+                }
+                div { class: "ed-row",
+                    span { class: "ed-ico" }
+                    span { class: "ed-label ed-grow", id: "ev-all-day-label", "All day" }
+                    button {
+                        class: if all_day { "switch on" } else { "switch" },
+                        role: "switch",
+                        "aria-checked": "{all_day}",
+                        "aria-labelledby": "ev-all-day-label",
+                        onclick: {
+                            let id = id.clone();
+                            move |_| {
+                                state.update_event(&id, |ev| {
+                                    if ev.all_day {
+                                        ev.all_day = false;
+                                        ev.start = when::at(start_date, NaiveTime::from_hms_opt(9, 0, 0).unwrap_or(NaiveTime::MIN));
+                                        ev.end = ev.start + HOUR;
+                                    } else {
+                                        ev.all_day = true;
+                                        ev.start = when::midnight(start_date);
+                                        ev.end = when::midnight(when::next_day(last_day.max(start_date)));
+                                    }
+                                });
+                            }
+                        },
+                        span { class: "knob" }
+                    }
+                }
+                div { class: "ed-sep" }
+                // How it repeats, when it reminds, its colour.
+                div { class: "ed-pick ed-pick-row",
+                    button {
+                        class: row(Open::Repeat),
+                        id: "ev-repeat",
+                        "data-value": "{rule_choice}",
+                        "aria-label": "Repeat: {repeat_label}",
+                        "aria-haspopup": "menu",
+                        "aria-expanded": "{is(Open::Repeat)}",
+                        onclick: move |_| toggle(Open::Repeat),
+                        span { class: "ed-ico", Icon { name: "repeat", size: 16 } }
+                        span { class: "ed-val", "{repeat_label}" }
+                        span { class: "ed-chev", Icon { name: "chevron-down", size: 12 } }
+                    }
+                    if is(Open::Repeat) {
+                        PickMenu {
+                            label: "Repeat",
+                            rows: repeat_rows,
+                            on_pick: {
+                                let id = id.clone();
+                                move |v: String| {
+                                    close();
+                                    state.set_event_repeat(&id, &v);
+                                }
+                            },
+                            on_close: move |_| close(),
+                        }
+                    }
+                }
+                if event.repeat.is_some() {
+                    div { class: "ed-pick ed-pick-row",
+                        button {
+                            class: if is(Open::Until) || is(Open::UntilDay) { "ed-row open" } else { "ed-row" },
+                            id: "ev-until",
+                            "data-value": "{until.map(when::date_value).unwrap_or_default()}",
+                            "aria-label": "Last repeat: {until_label}",
+                            "aria-haspopup": "menu",
+                            "aria-expanded": "{is(Open::Until) || is(Open::UntilDay)}",
+                            onclick: move |_| {
+                                if *open.peek() == Some(Open::UntilDay) {
+                                    close();
+                                } else {
+                                    toggle(Open::Until);
+                                }
+                            },
+                            span { class: "ed-ico" }
+                            span { class: "ed-val", "{until_label}" }
+                            span { class: "ed-chev", Icon { name: "chevron-down", size: 12 } }
+                        }
+                        if is(Open::Until) {
+                            PickMenu {
+                                label: "Last repeat",
+                                rows: until_rows,
+                                on_pick: {
+                                    let id = id.clone();
+                                    move |v: String| {
+                                        if v == "date" {
+                                            state.set_event_until(&id, Some(until.unwrap_or_else(|| when::add_days(start_date, 12 * 7))));
+                                            open.set(Some(Open::UntilDay));
+                                        } else {
+                                            state.set_event_until(&id, None);
+                                            close();
+                                        }
+                                    }
+                                },
+                                on_close: move |_| close(),
+                            }
+                        }
+                        if is(Open::UntilDay) {
+                            DayPicker {
+                                label: "Last repeat",
+                                day: until.unwrap_or_else(|| when::add_days(start_date, 12 * 7)),
+                                on_pick: {
+                                    let id = id.clone();
+                                    move |d: NaiveDate| {
+                                        state.set_event_until(&id, Some(d.max(start_date)));
+                                        close();
+                                    }
+                                },
+                                on_close: move |_| close(),
+                            }
+                        }
+                    }
+                }
+                if one_repeat {
+                    p { class: "ed-note",
+                        "Changes apply to every repeat. "
+                        button {
+                            class: "link-btn",
+                            onclick: {
+                                let id = id.clone();
+                                move |_| state.detach_event(&id)
+                            },
+                            "Change only this one"
+                        }
+                    }
+                }
+                div { class: "ed-pick ed-pick-row",
+                    button {
+                        class: row(Open::Remind),
+                        id: "ev-remind",
+                        "data-value": "{remind_value}",
+                        title: "A Mac notification before the event",
+                        "aria-label": "Reminder: {remind_label}",
+                        "aria-haspopup": "menu",
+                        "aria-expanded": "{is(Open::Remind)}",
+                        onclick: move |_| toggle(Open::Remind),
+                        span { class: "ed-ico", Icon { name: "bell", size: 16 } }
+                        span { class: "ed-val", "{remind_label}" }
+                        span { class: "ed-chev", Icon { name: "chevron-down", size: 12 } }
+                    }
+                    if is(Open::Remind) {
+                        PickMenu {
+                            label: "Reminder",
+                            rows: remind_rows,
+                            on_pick: {
+                                let id = id.clone();
+                                move |v: String| {
+                                    state.update_event(&id, |ev| ev.remind = crate::notify::parse_reminder(&v));
+                                    close();
+                                }
+                            },
+                            on_close: move |_| close(),
+                        }
+                    }
+                }
+                if spaces.len() > 1 {
+                    div { class: "ed-pick ed-pick-row",
+                        button {
+                            class: row(Open::Space),
+                            id: "ev-space",
+                            "data-value": "{event.space_id}",
+                            "aria-label": "Space: {space_name}",
+                            "aria-haspopup": "menu",
+                            "aria-expanded": "{is(Open::Space)}",
+                            onclick: move |_| toggle(Open::Space),
+                            span { class: "ed-ico",
+                                if let Some(sp) = own_space.clone() {
+                                    span { class: "space-badge ed-space-badge", style: "--c: var(--icon-{sp.color}, var(--accent));", "{sp.initial()}" }
+                                }
+                            }
+                            span { class: "ed-val", "{space_name}" }
+                            span { class: "ed-chev", Icon { name: "chevron-down", size: 12 } }
+                        }
+                        if is(Open::Space) {
+                            PickMenu {
+                                label: "Space",
+                                heading: "Move to the space",
+                                rows: space_rows,
+                                on_pick: {
+                                    let id = id.clone();
+                                    move |v: String| {
+                                        close();
+                                        state.set_event_space(&id, &v);
+                                    }
+                                },
+                                on_close: move |_| close(),
+                            }
+                        }
+                    }
+                }
+                div { class: "ed-row ed-still",
+                    span { class: "ed-ico", Icon { name: "palette", size: 16 } }
+                    div { class: "ed-tints", role: "radiogroup", "aria-label": "Colour",
+                        for (color, label) in ICON_COLORS {
+                            button {
+                                class: if event.color == *color { "tint on" } else { "tint" },
+                                role: "radio",
+                                "aria-checked": "{event.color == *color}",
+                                title: "{label}",
+                                "aria-label": "{label}",
+                                style: "--c: var(--icon-{color})",
+                                onclick: {
+                                    let id = id.clone();
+                                    move |_| state.update_event(&id, |ev| ev.color = color.to_string())
                                 },
                             }
                         }
                     }
                 }
-            }
-            if one_repeat {
-                p { class: "note tight ed-repeat-note",
-                    "Changes here apply to every repeat. "
-                    button { class: "link-btn", onclick: move |_| state.detach_event(&i14), "Change only this one" }
-                }
-            }
-            div { class: "ed-row",
-                span { class: "ed-label", "Reminder" }
-                select {
-                    class: "select small",
-                    title: "A Mac notification before the event",
-                    onchange: move |e: FormEvent| {
-                        let v = e.value();
-                        state.update_event(&i10, |ev| ev.remind = crate::notify::parse_reminder(&v));
-                    },
-                    for (m, label) in crate::notify::REMINDERS {
-                        option {
-                            value: m.map(|x| x.to_string()).unwrap_or_else(|| "none".into()),
-                            selected: remind == m,
-                            "{label}"
-                        }
-                    }
-                }
-            }
-            div { class: "ed-row",
-                span { class: "ed-label", "Colour" }
-                div { class: "tints small",
-                    for (color, label) in ICON_COLORS {
-                        button {
-                            class: if event.color == *color { "tint on" } else { "tint" },
-                            title: "{label}",
-                            style: "--c: var(--icon-{color})",
-                            onclick: {
-                                let id = i6.clone();
-                                move |_| state.update_event(&id, |ev| ev.color = color.to_string())
-                            },
-                        }
-                    }
-                }
-            }
-            div { class: "ed-link-row",
-                span { class: "ed-link-icon", Icon { name: "link", size: 14 } }
-                input {
-                    id: "ev-link",
-                    class: "ed-link",
-                    r#type: "text",
-                    placeholder: "Meeting link (Teams, Zoom, Meet…)",
-                    title: "The link to join the call of this event",
-                    "aria-label": "Meeting link",
-                    autocomplete: "off",
-                    spellcheck: false,
-                    // An older event with its link in its notes shows it here too.
-                    initial_value: "{event.join_url().unwrap_or_default()}",
-                    oninput: {
-                        let id = event.id.clone();
-                        move |e: FormEvent| {
-                            let v = e.value().trim().to_string();
-                            state.update_event(&id, |ev| ev.join = v);
-                        }
-                    },
-                }
-                if event.join_url().is_some() {
-                    button {
-                        class: "secondary-btn small",
-                        id: "ev-join",
-                        title: "Open the meeting and its notes",
-                        onclick: {
-                            let id = event.id.clone();
-                            move |_| state.join_event(&id)
+                div { class: "ed-sep" }
+                div { class: "ed-row ed-still ed-link-row",
+                    span { class: "ed-ico", Icon { name: "link", size: 16 } }
+                    input {
+                        id: "ev-link",
+                        class: "ed-link",
+                        r#type: "text",
+                        placeholder: "Add a meeting link",
+                        title: "The link to join the call of this event (Teams, Zoom, Meet…)",
+                        "aria-label": "Meeting link",
+                        autocomplete: "off",
+                        spellcheck: false,
+                        // An older event with its link in its notes shows it here too.
+                        initial_value: "{shown_link}",
+                        oninput: move |e: FormEvent| typed_link.set(Some(e.value().trim().to_string())),
+                        onkeydown: {
+                            let id = id.clone();
+                            move |e: KeyboardEvent| {
+                                if e.key() == Key::Enter {
+                                    let typed = typed_link.peek().clone();
+                                    if let Some(link) = typed {
+                                        typed_link.set(None);
+                                        state.update_event(&id, |ev| ev.join = link);
+                                    }
+                                }
+                            }
                         },
-                        "Join"
+                    }
+                    if link_waits {
+                        button {
+                            class: "ed-small-btn",
+                            id: "ev-link-save",
+                            title: "Keep this link in the event",
+                            onclick: {
+                                let id = id.clone();
+                                move |_| {
+                                    let typed = typed_link.peek().clone();
+                                    if let Some(link) = typed {
+                                        typed_link.set(None);
+                                        state.update_event(&id, |ev| ev.join = link);
+                                    }
+                                }
+                            },
+                            "Save"
+                        }
+                    } else if event.join_url().is_some() {
+                        button {
+                            class: "ed-small-btn",
+                            id: "ev-join",
+                            title: "Open the meeting and its notes",
+                            onclick: {
+                                let id = id.clone();
+                                move |_| state.join_event(&id)
+                            },
+                            "Join"
+                        }
                     }
                 }
-            }
-            div { class: "ed-notes-wrap",
-                textarea {
-                    id: "ev-notes",
-                    class: "ed-notes",
-                    placeholder: "Add notes",
-                    initial_value: "{event.notes}",
-                    oninput: move |e: FormEvent| {
-                        let v = e.value();
-                        state.update_event(&i7, |ev| ev.notes = v);
-                    },
+                div { class: "ed-sep" }
+                div { class: "ed-notes-row",
+                    span { class: "ed-ico", Icon { name: "note", size: 16 } }
+                    textarea {
+                        id: "ev-notes",
+                        class: "ed-notes",
+                        placeholder: "Add notes",
+                        "aria-label": "Notes",
+                        initial_value: "{event.notes}",
+                        oninput: {
+                            let id = id.clone();
+                            move |e: FormEvent| {
+                                let v = e.value();
+                                state.update_event(&id, |ev| ev.notes = v);
+                            }
+                        },
+                    }
+                    button { class: "icon-btn small mic-btn ed-notes-mic", "data-dictate": "ev-notes", title: "Speak the notes", "aria-label": "Speak the notes", Icon { name: "mic", size: 14 } }
                 }
-                button { class: "icon-btn small mic-btn ed-notes-mic", "data-dictate": "ev-notes", title: "Speak the notes", "aria-label": "Speak the notes", Icon { name: "mic", size: 14 } }
             }
-            div { class: "ed-actions",
-                button { class: "secondary-btn with-icon", onclick: move |_| state.event_notes(&i8),
-                    Icon { name: "file", size: 14 }
+            div { class: "ed-foot",
+                button {
+                    class: "ghost-btn",
+                    id: "ev-page",
+                    onclick: {
+                        let id = id.clone();
+                        move |_| state.event_notes(&id)
+                    },
+                    Icon { name: "file", size: 15 }
                     span { if has_page { "Open notes page" } else { "Make a notes page" } }
                 }
-                // For a repeat, it asks first: this one or all of them.
-                button {
-                    class: "ghost-btn danger-text",
-                    "aria-expanded": if one_repeat { "{asking_delete()}" } else { "" },
-                    onclick: move |_| {
-                        if one_repeat {
-                            asking_delete.toggle();
-                        } else {
-                            state.delete_event(&i9);
+                // For a repeat it asks first: this one or all of them.
+                div { class: "ed-pick",
+                    button {
+                        class: if is(Open::Delete) { "icon-btn ed-trash open" } else { "icon-btn ed-trash" },
+                        id: "ev-delete",
+                        title: "Delete event",
+                        "aria-label": if one_repeat { "Delete…" } else { "Delete event" },
+                        "aria-haspopup": if one_repeat { "menu" } else { "false" },
+                        "aria-expanded": "{is(Open::Delete)}",
+                        onclick: {
+                            let id = id.clone();
+                            move |_| {
+                                if one_repeat {
+                                    toggle(Open::Delete);
+                                } else {
+                                    state.delete_event(&id);
+                                }
+                            }
+                        },
+                        Icon { name: "trash", size: 16 }
+                    }
+                    if is(Open::Delete) {
+                        PickMenu {
+                            label: "Delete",
+                            heading: "This event repeats",
+                            right: true,
+                            rows: delete_rows,
+                            on_pick: {
+                                let id = id.clone();
+                                move |v: String| {
+                                    open.set(None);
+                                    if v == "one" {
+                                        state.skip_event(&id);
+                                    } else {
+                                        state.delete_event(&id);
+                                    }
+                                }
+                            },
+                            on_close: move |_| close(),
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One of the panel's lists to choose from, in Rune's own menu: plain rows,
+/// the chosen one in grey. bridge.js lifts it out of the panel's scrolling
+/// part, gives the chosen row the keyboard and moves it with the arrows.
+#[component]
+fn PickMenu(
+    #[props(into)] label: String,
+    rows: Vec<(String, String, String, bool, bool)>,
+    on_pick: EventHandler<String>,
+    on_close: EventHandler<()>,
+    #[props(default, into)] heading: String,
+    #[props(default)] right: bool,
+) -> Element {
+    let choice = rows.iter().any(|r| r.3);
+    rsx! {
+        div {
+            class: if right { "ed-menu ed-menu-right" } else { "ed-menu" },
+            role: "menu",
+            "aria-label": "{label}",
+            onkeydown: move |e: KeyboardEvent| {
+                if e.key() == Key::Escape {
+                    e.stop_propagation();
+                    on_close.call(());
+                }
+            },
+            if !heading.is_empty() {
+                div { class: "ed-menu-label", "{heading}" }
+            }
+            for (value, text, aside, on, danger) in rows {
+                button {
+                    key: "{value}",
+                    class: if on { "ed-menu-row on" } else if danger { "ed-menu-row danger" } else { "ed-menu-row" },
+                    role: if choice { "menuitemradio" } else { "menuitem" },
+                    "aria-checked": choice.then(|| on.to_string()),
+                    "data-value": "{value}",
+                    onclick: {
+                        let v = value.clone();
+                        move |_| on_pick.call(v.clone())
                     },
-                    Icon { name: "trash", size: 14 }
-                    span { if one_repeat { "Delete…" } else { "Delete" } }
+                    span { "{text}" }
+                    span { class: "ed-menu-aside", "{aside}" }
                 }
             }
-            if one_repeat && asking_delete() {
-                div { class: "ed-delete-choice", role: "group", "aria-label": "Delete",
-                    button { class: "secondary-btn small", onclick: move |_| state.skip_event(&i15), "Only this one" }
-                    button { class: "secondary-btn small danger-text", onclick: move |_| state.delete_event(&i16), "All repeats" }
-                    button { class: "ghost-btn small", onclick: move |_| asking_delete.set(false), "Cancel" }
+        }
+    }
+}
+
+/// The times to choose from, with a box to type any other time in.
+#[component]
+fn TimeMenu(
+    #[props(into)] label: String,
+    choices: Vec<(NaiveTime, String, String)>,
+    current: NaiveTime,
+    on_pick: EventHandler<NaiveTime>,
+    on_close: EventHandler<()>,
+) -> Element {
+    let mut typed = use_signal(String::new);
+    let mut wrong = use_signal(|| false);
+    rsx! {
+        div {
+            class: "ed-menu ed-times-menu",
+            role: "menu",
+            "aria-label": "{label}",
+            onkeydown: move |e: KeyboardEvent| {
+                if e.key() == Key::Escape {
+                    e.stop_propagation();
+                    on_close.call(());
+                }
+            },
+            input {
+                class: if wrong() { "ed-menu-field wrong" } else { "ed-menu-field" },
+                r#type: "text",
+                placeholder: "Type a time",
+                "aria-label": "Type a time",
+                "aria-invalid": "{wrong()}",
+                autocomplete: "off",
+                spellcheck: false,
+                oninput: move |e: FormEvent| {
+                    typed.set(e.value());
+                    wrong.set(false);
+                },
+                onkeydown: move |e: KeyboardEvent| {
+                    if e.key() == Key::Enter {
+                        e.prevent_default();
+                        match crate::quickadd::typed_time(&typed.peek()) {
+                            Some(t) => on_pick.call(t),
+                            None => wrong.set(true),
+                        }
+                    }
+                },
+            }
+            div { class: "ed-menu-list",
+                for (t, name, aside) in choices {
+                    button {
+                        key: "{t}",
+                        class: if t == current { "ed-menu-row on" } else { "ed-menu-row" },
+                        role: "menuitemradio",
+                        "aria-checked": "{t == current}",
+                        "data-value": t.format("%H:%M").to_string(),
+                        onclick: move |_| on_pick.call(t),
+                        span { "{name}" }
+                        span { class: "ed-menu-aside", "{aside}" }
+                    }
                 }
             }
-            p { class: "note tight", "Tip: click an empty time in the week to add an event there." }
+        }
+    }
+}
+
+/// Rune's own day picker: a month of days, the arrow keys move a day or a
+/// week, Page Up and Page Down a month, Escape puts it away.
+#[component]
+fn DayPicker(#[props(into)] label: String, day: NaiveDate, on_pick: EventHandler<NaiveDate>, on_close: EventHandler<()>) -> Element {
+    let mut month = use_signal(|| day.with_day(1).unwrap_or(day));
+    let mut focused = use_signal(|| day);
+    // The keyboard follows the day that the arrows move to (the chosen day
+    // first). The days may not be in the page yet when this runs, so it tries
+    // again on the next frames; it also stops a late return of the keyboard
+    // to the panel's buttons (see `focus_button`).
+    use_effect(move || {
+        let d = when::date_value(focused());
+        document::eval(&format!(
+            "window.__edFocus=null;let n=0;const f=()=>{{const b=document.querySelector('.ed-days [data-day=\"{d}\"]');\
+             if(b){{b.focus({{preventScroll:true}});}}else if(n++<60){{requestAnimationFrame(f);}}}};f();"
+        ));
+    });
+    let mut go = move |d: NaiveDate| {
+        focused.set(d);
+        let shown = *month.peek();
+        if d.month() != shown.month() || d.year() != shown.year() {
+            month.set(d.with_day(1).unwrap_or(d));
+        }
+    };
+    let shown = month();
+    let today = when::today();
+    let heading = shown.format("%B %Y").to_string();
+    rsx! {
+        div {
+            class: "ed-menu ed-days",
+            role: "dialog",
+            "aria-label": "{label}",
+            onkeydown: move |e: KeyboardEvent| {
+                let f = *focused.peek();
+                let to = match e.key() {
+                    Key::ArrowLeft => Some(when::add_days(f, -1)),
+                    Key::ArrowRight => Some(when::add_days(f, 1)),
+                    Key::ArrowUp => Some(when::add_days(f, -7)),
+                    Key::ArrowDown => Some(when::add_days(f, 7)),
+                    Key::PageUp => Some(when::add_months(f, -1)),
+                    Key::PageDown => Some(when::add_months(f, 1)),
+                    Key::Escape => {
+                        e.stop_propagation();
+                        on_close.call(());
+                        None
+                    }
+                    _ => None,
+                };
+                if let Some(d) = to {
+                    e.prevent_default();
+                    go(d);
+                }
+            },
+            div { class: "ed-days-head",
+                span { "{heading}" }
+                button { class: "icon-btn small", title: "Previous month", "aria-label": "Previous month", onclick: move |_| go(when::add_months(shown, -1)), Icon { name: "chevron-left", size: 14 } }
+                button { class: "icon-btn small", title: "Next month", "aria-label": "Next month", onclick: move |_| go(when::add_months(shown, 1)), Icon { name: "chevron-right", size: 14 } }
+            }
+            div { class: "ed-days-grid",
+                for w in ["S", "M", "T", "W", "T", "F", "S"] {
+                    span { class: "wd", "aria-hidden": "true", "{w}" }
+                }
+                for d in when::month_grid(shown) {
+                    button {
+                        key: "{d}",
+                        class: {
+                            let mut c = String::new();
+                            if d.month() != shown.month() {
+                                c.push_str(" other");
+                            }
+                            if d == today {
+                                c.push_str(" today");
+                            }
+                            if d == day {
+                                c.push_str(" on");
+                            }
+                            c.trim().to_string()
+                        },
+                        "data-day": "{when::date_value(d)}",
+                        tabindex: if d == focused() { "0" } else { "-1" },
+                        "aria-label": "{d.format(\"%A, %B %-d, %Y\")}",
+                        "aria-pressed": "{d == day}",
+                        "aria-current": if d == today { "date" } else { "false" },
+                        onclick: move |_| on_pick.call(d),
+                        "{d.day()}"
+                    }
+                }
+            }
         }
     }
 }

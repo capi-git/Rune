@@ -78,6 +78,15 @@ fn clock(word: &str) -> Option<Clock> {
     ok.then_some(Clock { hour, minute, pm })
 }
 
+/// A time typed into a box: "4:15 pm", "4:15pm", "16:15", "4p", "noon".
+/// With no "am" or "pm", 1 to 7 are in the afternoon, as for an event typed
+/// in words.
+pub fn typed_time(text: &str) -> Option<NaiveTime> {
+    let word: String = text.trim().to_lowercase().split_whitespace().collect();
+    let c = clock(&word)?;
+    NaiveTime::from_hms_opt(c.hour24(), c.minute, 0)
+}
+
 /// Whether a word is a time by itself: it says "am" or "pm", or has a colon.
 fn sure_clock(word: &str) -> Option<Clock> {
     clock(word).filter(|c| c.pm.is_some() || word.contains(':'))
@@ -356,6 +365,20 @@ mod tests {
 
     fn day(m: u32, d: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(2026, m, d).unwrap()
+    }
+
+    #[test]
+    fn a_time_typed_into_a_box() {
+        let t = |h, m| NaiveTime::from_hms_opt(h, m, 0);
+        assert_eq!(typed_time("4:15 pm"), t(16, 15));
+        assert_eq!(typed_time(" 4:15PM "), t(16, 15));
+        assert_eq!(typed_time("16:15"), t(16, 15));
+        assert_eq!(typed_time("9"), t(9, 0));
+        assert_eq!(typed_time("4"), t(16, 0));
+        assert_eq!(typed_time("12 am"), t(0, 0));
+        assert_eq!(typed_time("noon"), t(12, 0));
+        assert_eq!(typed_time("soon"), None);
+        assert_eq!(typed_time("25:00"), None);
     }
 
     /// (name, day, start "H:MM", minutes long) or all day (minutes 0).

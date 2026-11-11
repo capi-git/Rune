@@ -54,6 +54,15 @@ pub const UI_ICONS: &[&str] = &[
     "inline-code",
     "undo",
     "redo",
+    "minus",
+    "arrow-up-right",
+    "hash",
+    "gauge",
+    "choice",
+    "chart-bars",
+    "ring",
+    "days",
+    "sliders",
 ];
 
 /// Icons offered for pages and callouts, in picker order.
@@ -216,6 +225,17 @@ pub fn paths(name: &str) -> Option<&'static str> {
             r#"<path d="M5.75 4.5h12.5c.97 0 1.75.78 1.75 1.75v8.5c0 .97-.78 1.75-1.75 1.75H10.5L6.25 20v-3.5h-.5c-.97 0-1.75-.78-1.75-1.75v-8.5c0-.97.78-1.75 1.75-1.75z"/>"#
         }
         "check" => r#"<path d="m5 12.5 4.5 4.5L19 7.5"/>"#,
+        "hash" => r#"<path d="M9.5 4 7.5 20M16.5 4l-2 16M4.5 9h15.5M4 15h15.5"/>"#,
+        "gauge" => r#"<path d="M4.5 17a7.5 7.5 0 1 1 15 0"/><path d="m12 17 3.75-4.75"/>"#,
+        "choice" => r#"<rect x="3.5" y="7.5" width="17" height="9" rx="4.5"/><path d="M8 12h5"/>"#,
+        "chart-bars" => r#"<path d="M4 20h16"/><path d="M7 16.5V12M12 16.5V6.5M17 16.5V9.5"/>"#,
+        "ring" => {
+            r#"<circle cx="12" cy="12" r="7.75" stroke-opacity=".4"/><path d="M12 4.25A7.75 7.75 0 0 1 19.75 12" stroke-width="2.5"/>"#
+        }
+        "days" => {
+            r#"<rect x="4" y="4" width="4.5" height="4.5" rx="1"/><rect x="9.75" y="4" width="4.5" height="4.5" rx="1" fill="currentColor"/><rect x="15.5" y="4" width="4.5" height="4.5" rx="1"/><rect x="4" y="9.75" width="4.5" height="4.5" rx="1" fill="currentColor"/><rect x="9.75" y="9.75" width="4.5" height="4.5" rx="1"/><rect x="15.5" y="9.75" width="4.5" height="4.5" rx="1" fill="currentColor"/><rect x="4" y="15.5" width="4.5" height="4.5" rx="1"/><rect x="9.75" y="15.5" width="4.5" height="4.5" rx="1" fill="currentColor"/><rect x="15.5" y="15.5" width="4.5" height="4.5" rx="1"/>"#
+        }
+        "sliders" => r#"<path d="M4 7.5h9M17 7.5h3M4 16.5h3M11 16.5h9"/><circle cx="15" cy="7.5" r="2"/><circle cx="9" cy="16.5" r="2"/>"#,
         "check-circle" => {
             r#"<circle cx="12" cy="12" r="8.5"/><path d="m8.25 12.25 2.5 2.5 5-5.25"/>"#
         }
@@ -229,6 +249,8 @@ pub fn paths(name: &str) -> Option<&'static str> {
         "clock" => r#"<circle cx="12" cy="12" r="8.25"/><path d="M12 7.5V12l3 2"/>"#,
         "repeat" => r#"<path d="m16.5 3.5 3 3-3 3"/><path d="M4.5 11.5v-1a4 4 0 0 1 4-4h11"/><path d="m7.5 20.5-3-3 3-3"/><path d="M19.5 12.5v1a4 4 0 0 1-4 4h-11"/>"#,
         "speaker" => r#"<path d="M4.5 9.75v4.5h3.25l4.25 3.5V6.25l-4.25 3.5H4.5z"/><path d="M15.25 9.25a4 4 0 0 1 0 5.5"/><path d="M17.75 6.75a7.5 7.5 0 0 1 0 10.5"/>"#,
+        "minus" => r#"<path d="M6.5 12h11"/>"#,
+        "arrow-up-right" => r#"<path d="M8 16 16.5 7.5M9.75 7.5h6.75v6.75"/>"#,
         "mic" => r#"<rect x="9" y="3.25" width="6" height="11" rx="3"/><path d="M5.75 11.5a6.25 6.25 0 0 0 12.5 0"/><path d="M12 17.75v3"/>"#,
         "history" => r#"<path d="M4.1 13.5A8.25 8.25 0 1 0 6.2 6.1"/><path d="M5.6 2.9 6.2 6.1 3 6.7"/><path d="M12 8v4l2.75 1.75"/>"#,
         "close" => r#"<path d="m6.5 6.5 11 11M17.5 6.5l-11 11"/>"#,

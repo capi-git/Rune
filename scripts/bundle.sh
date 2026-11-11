@@ -29,10 +29,12 @@ cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 # sound and turns speech into text. Without the Swift compiler the app is
 # built without it, and says so when asked to listen.
 if xcrun --find swiftc >/dev/null 2>&1; then
-  xcrun swiftc -swift-version 5 -O -suppress-warnings -o "$APP/Contents/MacOS/n2listen" helper/n2listen.swift
+  # Built for macOS 14.2 and later (what it uses to hear the Mac's sound came
+  # with 14.2), not only for the macOS of the Mac that builds it.
+  xcrun swiftc -swift-version 5 -O -suppress-warnings -target arm64-apple-macos14.2 -o "$APP/Contents/MacOS/n2listen" helper/n2listen.swift
   # The calendar reader (helper/n2cal.swift): reads the events of the Mac's
   # calendars, only when the person turns that on in Settings.
-  xcrun swiftc -swift-version 5 -O -suppress-warnings -o "$APP/Contents/MacOS/n2cal" helper/n2cal.swift
+  xcrun swiftc -swift-version 5 -O -suppress-warnings -target arm64-apple-macos13.0 -o "$APP/Contents/MacOS/n2cal" helper/n2cal.swift
 else
   echo "No Swift compiler: built without the meeting listener and the calendar reader." >&2
 fi
@@ -48,13 +50,13 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleVersion</key><string>${N2_BUILD_STAMP}</string>
-  <key>CFBundleShortVersionString</key><string>0.1.1</string>
-  <key>LSMinimumSystemVersion</key><string>12.0</string>
+  <key>CFBundleShortVersionString</key><string>0.1.2</string>
+  <key>LSMinimumSystemVersion</key><string>14.2</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSMicrophoneUsageDescription</key><string>Rune listens to your microphone only when you ask it to: to write what you say, or the notes of a meeting. The sound is not kept.</string>
   <key>NSCalendarsFullAccessUsageDescription</key><string>Rune shows the events of your calendars beside its own, when you turn that on in Settings. It only reads them, and they stay on this Mac.</string>
   <key>NSCalendarsUsageDescription</key><string>Rune shows the events of your calendars beside its own, when you turn that on in Settings. It only reads them, and they stay on this Mac.</string>
-  <key>NSSpeechRecognitionUsageDescription</key><string>Rune turns what it hears into text, on this Mac, when you ask it to listen.</string>
+  <key>NSSpeechRecognitionUsageDescription</key><string>Rune turns what it hears into text when you ask it to listen. Apple's speech recognition does this on this Mac when it can for your language.</string>
   <key>NSAudioCaptureUsageDescription</key><string>Rune hears the other people in a meeting through the sound this Mac plays, only while you have asked it to listen. The sound is not kept.</string>
 </dict>
 </plist>

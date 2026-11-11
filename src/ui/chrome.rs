@@ -285,13 +285,6 @@ pub fn PageBar(route: Route, pane: String, multi: bool) -> Element {
             if let Some(id) = page_id {
                 div { class: "top-actions",
                     button {
-                        class: "ghost-btn",
-                        title: "Ask AI about this page (⌘J)",
-                        onclick: move |_| state.ai_shortcut(),
-                        Icon { name: "sparkles", size: 15 }
-                        span { "Ask AI" }
-                    }
-                    button {
                         class: if favorite { "icon-btn star on" } else { "icon-btn star" },
                         title: if favorite { "Remove from Favorites" } else { "Add to Favorites" },
                         onclick: {

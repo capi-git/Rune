@@ -158,10 +158,6 @@ pub fn parse_date(s: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok()
 }
 
-pub fn parse_time(s: &str) -> Option<NaiveTime> {
-    NaiveTime::parse_from_str(s.trim(), "%H:%M").ok().or_else(|| NaiveTime::parse_from_str(s.trim(), "%H:%M:%S").ok())
-}
-
 /// Read a time written by an agent: "2026-11-10" (a day), "2026-11-10T14:00"
 /// (local time) or a full RFC 3339 time with an offset. Returns (ms, all_day).
 pub fn parse_iso(s: &str) -> Option<(i64, bool)> {

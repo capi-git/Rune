@@ -11,8 +11,6 @@ use dioxus::prelude::*;
 #[component]
 pub fn Sidebar() -> Element {
     let state = use_context::<AppState>();
-    // Only whether the AI panel is open; not every word it streams.
-    let ai_open = use_memo(move || state.ai.read().is_some());
     let ui = state.ui.read();
     let space_id = ui.space.clone();
     let on_home = *ui.tab().route() == Route::Home;
@@ -36,7 +34,6 @@ pub fn Sidebar() -> Element {
         -1 => "side-scroll from-prev",
         _ => "side-scroll",
     };
-    let ai_open = ai_open();
 
     rsx! {
         aside {
@@ -48,7 +45,9 @@ pub fn Sidebar() -> Element {
                     title: "Switch space",
                     onclick: move |_| state.set_popover((!space_menu).then_some(Popover::SpaceMenu)),
                     SpaceBadge { space: space.clone() }
-                    span { class: "ws-label", "{space.display_name()}" }
+                    for name in std::iter::once(space.display_name().to_string()) {
+                        span { key: "{name}", class: "ws-label", "{name}" }
+                    }
                     Icon { name: "chevron-down", size: 12, class: "ws-chevron" }
                 }
                 button {
@@ -85,12 +84,6 @@ pub fn Sidebar() -> Element {
                     "aria-label": "Graph: how your pages connect",
                     onclick: move |_| state.navigate(Route::Graph),
                     Icon { name: "graph", size: 16 }
-                }
-                button {
-                    class: if ai_open { "tile current" } else { "tile" },
-                    title: "Ask AI (⌘J)",
-                    onclick: move |_| state.ai_shortcut(),
-                    Icon { name: "sparkles", size: 16 }
                 }
             }
             // One list for each space (a new one when the space changes, so that it comes in).
