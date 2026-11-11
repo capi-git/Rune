@@ -801,6 +801,10 @@ document.addEventListener(
       return;
     }
     if (e.key === 'Escape' && !(isBlock(t) && t.dataset.menu === '1')) {
+      // The list of a choice cell closes, and the caret goes back to its cell.
+      const list = t.closest && t.closest('.choice-picker');
+      const back = list && list.parentElement.querySelector('.cell.pick');
+      if (back) setTimeout(() => back.isConnected && back.focus(), 80);
       if (peeking()) setPeek(false);
       if (ctxFor) closeCtx();
       if (findOpen()) closeFind();
@@ -976,6 +980,65 @@ document.addEventListener('focusin', (e) => {
     send({ t: 'focus', page: t.dataset.page, id: t.dataset.id });
   }
 });
+
+// ----- pictures for the AI ---------------------------------------------------------
+// A picture pasted or dropped into the AI bar of a page, or into the box that
+// asks all the notes, goes to the AI with the request (a screenshot, say). It
+// is made smaller first when it is large: the AI needs no more, and a small
+// picture is sent faster.
+const aiBoxOf = (el) => el && el.closest && el.closest('.ai-dock, .modal.ask-notes');
+const sendAiPicture = (file) => {
+  const url = URL.createObjectURL(file);
+  const img = new Image();
+  img.onload = () => {
+    const most = 1568;
+    const scale = Math.min(1, most / Math.max(img.naturalWidth, img.naturalHeight));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+    canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+    URL.revokeObjectURL(url);
+    send({ t: 'ai_image', data: canvas.toDataURL('image/jpeg', 0.9) });
+  };
+  img.onerror = () => URL.revokeObjectURL(url);
+  img.src = url;
+};
+const aiPicturesIn = (data) => [...((data && data.files) || [])].filter((f) => f.type.startsWith('image/')).slice(0, 4);
+document.addEventListener(
+  'paste',
+  (e) => {
+    if (!aiBoxOf(e.target)) return;
+    const pictures = aiPicturesIn(e.clipboardData);
+    if (!pictures.length) return;
+    // (Not a picture for the page under the box.)
+    e.preventDefault();
+    e.stopPropagation();
+    pictures.forEach(sendAiPicture);
+  },
+  true,
+);
+document.addEventListener(
+  'dragover',
+  (e) => {
+    if (!aiBoxOf(e.target) || !e.dataTransfer || ![...e.dataTransfer.types].includes('Files')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'copy';
+  },
+  true,
+);
+document.addEventListener(
+  'drop',
+  (e) => {
+    if (!aiBoxOf(e.target) || !e.dataTransfer) return;
+    const pictures = aiPicturesIn(e.dataTransfer);
+    if (!pictures.length) return;
+    e.preventDefault();
+    e.stopPropagation();
+    pictures.forEach(sendAiPicture);
+  },
+  true,
+);
 
 // Paste plain text. Several lines become blocks; a link pasted over selected
 // text turns it into a link.
@@ -1313,7 +1376,9 @@ const placeGlider = (animate) => {
       glider.style.opacity = '0';
       return;
     }
-    const jump = !animate || !glider._placed;
+    // Another space has other tabs: nothing to slide from.
+    const jump = !animate || !glider._placed || glider._space !== tabs.dataset.space;
+    glider._space = tabs.dataset.space;
     if (jump) glider.style.transition = 'none';
     glider.style.width = active.offsetWidth + 'px';
     glider.style.transform = `translateX(${active.offsetLeft}px)`;
@@ -1391,6 +1456,38 @@ const anchorMenu = (menu) => {
   menu.style.top = top - cb.top + 'px';
   menu.style.right = 'auto';
 };
+
+// A menu that hangs from a cell of a table. The table scrolls sideways in a
+// box that would cut the menu at its edges, so the menu is fixed to the
+// window: under what it hangs from, moved up as far as it must to end above
+// the foot of the window, and inside the window at both sides. With no room
+// at its right, its second list opens at its left.
+const SUB_ROOM = 244;
+const placeTableMenu = (menu) => {
+  const anchor = menu.parentElement;
+  if (!anchor) return;
+  const a = anchor.getBoundingClientRect();
+  const cb = containingBlock(menu);
+  menu.classList.add('anchored');
+  const w = menu.offsetWidth;
+  const h = menu.offsetHeight;
+  let left = a.left;
+  left = Math.max(8, Math.min(left, innerWidth - w - 8));
+  const top = Math.max(8, Math.min(a.bottom + 4, innerHeight - h - 8));
+  menu.style.left = left - cb.left + 'px';
+  menu.style.top = top - cb.top + 'px';
+  menu.style.right = 'auto';
+  menu.dataset.sub = left + w + SUB_ROOM > innerWidth - 8 ? 'left' : 'right';
+};
+// A second list beside a menu of a table, and a menu of the table itself,
+// end above the foot of the window too.
+const placeSubMenu = (sub) => {
+  sub.style.top = '';
+  const over = sub.getBoundingClientRect().bottom - (innerHeight - 8);
+  if (over > 0) sub.style.top = `${parseFloat(getComputedStyle(sub).top) - over}px`;
+};
+const RAISED_MENUS = '.table-menu .column-sub, .own-menu, .kinds-menu';
+const TABLE_MENUS = '.table-block .popover:not(.column-sub)';
 
 // ----- the event panel's menus: the chosen row takes the keyboard -------------
 // (the day picker moves its own focus: it knows the days). Arrows, Home and
@@ -2030,81 +2127,262 @@ document.addEventListener('drop', (e) => {
 });
 
 // ----- tables ----------------------------------------------------------------------
-// Tab goes to the next cell and Return to the cell below; past the last row
-// each adds a row. The small buttons above a table act on the row and column
-// of the cell that has the caret.
+// Tab goes to the next cell and Return to the cell below, in the order the
+// rows show (a table can be sorted); past the last row each adds a row. The
+// handle at the left of the row under the pointer adds a row below, opens
+// the menu of the row, and moves the row when it is dragged. The card of a
+// board is dragged to another column.
 const tableOp = (box, op, row, column) => send({ t: 'table_op', page: box.dataset.page, id: box.dataset.table, op, row, column });
 const cellAt = (box, r, c) => box.querySelector(`.cell[data-r="${r}"][data-c="${c}"]`);
+const rowsOf = (box) => [...box.querySelectorAll('tr[data-r]')];
+// The cells of a row that are typed in (not those worked out).
+const FILLED_CELLS = 'textarea.cell:not([readonly]), button.cell.pick';
+const typedCells = (tr) => [...tr.querySelectorAll(FILLED_CELLS)];
 const intoCell = (cell) => {
   if (!cell) return;
   cell.focus();
-  cell.setSelectionRange(cell.value.length, cell.value.length);
+  // (A choice cell is a button: there is no caret in it.)
+  if (cell.setSelectionRange) cell.setSelectionRange(cell.value.length, cell.value.length);
+};
+// A letter typed on a choice cell opens its list with that letter in the box.
+const seedPicker = (letter) => {
+  let tries = 0;
+  const tick = () => {
+    const box = document.querySelector('.choice-picker .pick-input');
+    if (box) {
+      box.value = letter;
+      box.dispatchEvent(new Event('input', { bubbles: true }));
+    } else if (tries++ < 30) requestAnimationFrame(tick);
+  };
+  tick();
 };
 window.__n2.focusCell = (id, r, c) => {
   const box = document.querySelector(`.table-block[data-table="${id}"]`);
-  intoCell(box && (cellAt(box, r, c) || box.querySelector('.cell')));
+  if (!box) return;
+  const tr = box.querySelector(`tr[data-r="${r}"]`);
+  intoCell(cellAt(box, r, c) || (tr && typedCells(tr)[0]) || box.querySelector('.cell'));
 };
+// Where the columns that stay in place are, once the page shows them.
+window.__n2.freezeColumns = (id) =>
+  requestAnimationFrame(() => {
+    const box = document.querySelector(`.table-block[data-table="${id}"]`);
+    if (!box) return;
+    const heads = box.querySelectorAll('tr.head-row > td');
+    let left = 0;
+    for (let i = 0; i < (Number(box.dataset.frozen) || 0) && i < heads.length; i += 1) {
+      box.style.setProperty(`--f${i}`, `${left}px`);
+      left += heads[i].getBoundingClientRect().width;
+    }
+  });
+window.addEventListener('resize', () => {
+  for (const box of document.querySelectorAll('.table-block[data-frozen]:not([data-frozen="0"])')) window.__n2.freezeColumns(box.dataset.table);
+});
 document.addEventListener(
   'keydown',
   (e) => {
-    const cell = e.target.closest && e.target.closest('textarea.cell');
+    const cell = e.target.closest && e.target.closest('textarea.cell, button.cell.pick');
     // Not while characters are being put together (Japanese, Chinese,
     // Korean), and not the keys that change tab.
     if (!cell || e.isComposing || e.keyCode === 229 || e.ctrlKey || e.metaKey || e.altKey) return;
+    // A choice cell: Return and Space open its list by themselves; a letter
+    // opens it to search; Tab goes on as in any cell.
+    if (cell.tagName === 'BUTTON' && e.key !== 'Tab') {
+      if (e.key.length === 1 && e.key !== ' ') {
+        e.preventDefault();
+        cell.click();
+        seedPicker(e.key);
+      }
+      return;
+    }
+    // (The values at the top of a row's page are not in a table: there Tab
+    // goes to the next field by itself.)
     const box = cell.closest('.table-block');
-    const r = Number(cell.dataset.r);
-    const c = Number(cell.dataset.c);
-    const rows = box.querySelectorAll('tr').length;
-    const columns = box.querySelectorAll('tr:first-child .cell').length;
+    const tr = cell.closest('tr');
+    if (!box || !tr) {
+      if (e.key === 'Enter') e.preventDefault();
+      return;
+    }
+    const trs = rowsOf(box);
+    const at = trs.indexOf(tr);
     if (e.key === 'Tab') {
       e.preventDefault();
       e.stopPropagation();
-      let nr = r;
-      let nc = c + (e.shiftKey ? -1 : 1);
-      if (nc >= columns) {
-        nc = 0;
-        nr += 1;
-      } else if (nc < 0) {
-        nc = columns - 1;
-        nr -= 1;
-      }
-      if (nr < 0) return;
-      if (nr >= rows) tableOp(box, 'add-row', r, 0);
-      else intoCell(cellAt(box, nr, nc));
+      const step = e.shiftKey ? -1 : 1;
+      const cells = typedCells(tr);
+      const beside = cells[cells.indexOf(cell) + step];
+      const line = trs[at + step];
+      if (beside) intoCell(beside);
+      else if (line) intoCell(e.shiftKey ? typedCells(line).pop() : typedCells(line)[0]);
+      else if (!e.shiftKey) tableOp(box, 'add-row', Number(tr.dataset.r), 0);
     } else if (e.key === 'Enter') {
       e.preventDefault();
       e.stopPropagation();
-      if (r + 1 >= rows) tableOp(box, 'add-row', r, c);
-      else intoCell(cellAt(box, r + 1, c));
+      const below = trs[at + 1];
+      if (below) intoCell(below.querySelector(`textarea.cell[data-c="${cell.dataset.c}"]:not([readonly]), button.cell.pick[data-c="${cell.dataset.c}"]`) || typedCells(below)[0]);
+      else tableOp(box, 'add-row', Number(tr.dataset.r), Number(cell.dataset.c));
     }
   },
   true,
 );
+// The table with the caret keeps the order of its rows while the caret is
+// in it (see `HELD` in ui/tables.rs): the app is told when it comes and goes.
+let heldTable = null;
+const letGo = () => {
+  if (heldTable) tableOp(heldTable, 'release', 0, 0);
+  heldTable = null;
+};
 document.addEventListener('focusin', (e) => {
   const cell = e.target.closest && e.target.closest('textarea.cell');
-  if (!cell) return;
-  const box = cell.closest('.table-block');
+  const box = cell && cell.closest('.table-block');
+  if (!box) return letGo();
   box.dataset.r = cell.dataset.r;
   box.dataset.c = cell.dataset.c;
   box.classList.add('editing');
+  if (heldTable !== box) {
+    letGo();
+    heldTable = box;
+    tableOp(box, 'hold', 0, 0);
+  }
 });
-document.addEventListener('focusout', (e) => {
-  const box = e.target.closest && e.target.closest('.table-block');
-  if (box && !box.contains(e.relatedTarget)) box.classList.remove('editing');
-});
+// A press on a control of the table that has the caret (Open, a checkbox,
+// the arrow of nested rows) takes the caret out of its cell first. If the
+// rows went to their sorted places at that moment, the press would end on
+// another row than the one it was made on: the order is let go only when
+// the press is over.
+let pressedTable = null;
+let owedRelease = null;
+const pressOver = () =>
+  setTimeout(() => {
+    pressedTable = null;
+    const box = owedRelease;
+    owedRelease = null;
+    if (box && heldTable === box && !box.contains(document.activeElement)) letGo();
+  }, 0);
 document.addEventListener(
   'mousedown',
   (e) => {
-    // The caret stays in its cell while a table button is pressed.
-    if (e.target.closest && e.target.closest('[data-table-op]')) e.preventDefault();
+    pressedTable = (e.target.closest && e.target.closest('.table-frame')) || null;
   },
   true,
 );
-document.addEventListener('click', (e) => {
-  const b = e.target.closest && e.target.closest('[data-table-op]');
-  const box = b && b.closest('.table-block');
-  if (box) tableOp(box, b.dataset.tableOp, Number(box.dataset.r) || 0, Number(box.dataset.c) || 0);
+document.addEventListener('mouseup', pressOver, true);
+document.addEventListener('dragend', pressOver, true);
+document.addEventListener('focusout', (e) => {
+  const box = e.target.closest && e.target.closest('.table-block');
+  if (!box || box.contains(e.relatedTarget)) return;
+  box.classList.remove('editing');
+  if (heldTable !== box) return;
+  if (pressedTable && pressedTable.contains(box)) owedRelease = box;
+  else letGo();
 });
+// The handle goes to the row under the pointer.
+document.addEventListener(
+  'mousemove',
+  (e) => {
+    const tr = e.target.closest && e.target.closest('.table-block tr[data-r]');
+    if (!tr || tr.dataset.r === '0') return;
+    const frame = tr.closest('.table-frame');
+    const handle = frame && frame.querySelector(':scope > .row-handle');
+    if (!handle) return;
+    const top = `${Math.round(tr.getBoundingClientRect().top - frame.getBoundingClientRect().top + (tr.offsetHeight - 24) / 2)}px`;
+    if (handle.dataset.r === tr.dataset.r && handle.style.top === top) return;
+    handle.dataset.r = tr.dataset.r;
+    handle.style.top = top;
+    handle.classList.add('on');
+  },
+  { passive: true },
+);
+const tableOfHandle = (handle) => handle.parentElement.querySelector(':scope > .table-block');
+// The table with picked rows: a press anywhere but on a handle or in a menu
+// lets them go (the menu of the rows can close and the rows stay picked, so
+// that more rows are added with Shift and a click).
+let pickedTable = null;
+const unpick = () => {
+  if (pickedTable) tableOp(pickedTable, 'unpick', 0, 0);
+  pickedTable = null;
+};
+document.addEventListener(
+  'mousedown',
+  (e) => {
+    if (pickedTable && !(e.target.closest && e.target.closest('.row-handle, .popover, .backdrop'))) unpick();
+  },
+  true,
+);
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !document.querySelector('.popover')) unpick();
+});
+document.addEventListener(
+  'click',
+  (e) => {
+    const b = e.target.closest && e.target.closest('.row-handle [data-row-op]');
+    if (!b) return;
+    // (Before the app sees the click: its own click closes an open menu,
+    // and the menu of the rows must stay to take more rows.)
+    e.stopPropagation();
+    const handle = b.closest('.row-handle');
+    const row = Number(handle.dataset.r) || 0;
+    if (!row) return;
+    const box = tableOfHandle(handle);
+    if (b.dataset.rowOp === 'row-menu') pickedTable = box;
+    tableOp(box, b.dataset.rowOp, row, b.dataset.rowOp === 'row-menu' && e.shiftKey ? 1 : 0);
+  },
+  true,
+);
+// A row dragged by its handle, or a card of a board by itself.
+let tableDrag = null;
+const endTableDrag = () => {
+  for (const el of document.querySelectorAll('.drop-before, .drop-after, .board-col.drop')) el.classList.remove('drop-before', 'drop-after', 'drop');
+  tableDrag = null;
+};
+document.addEventListener('dragstart', (e) => {
+  const grip = e.target.closest && e.target.closest('.row-handle [draggable="true"]');
+  const card = e.target.closest && e.target.closest('.board-card[data-card]');
+  if (grip) {
+    const handle = grip.closest('.row-handle');
+    const box = tableOfHandle(handle);
+    const from = Number(handle.dataset.r) || 0;
+    // (A sorted table shows its rows in the order of the sort: there is no place to move a row to.)
+    if (!from || box.classList.contains('sorted')) return e.preventDefault();
+    tableDrag = { box, from };
+    const tr = box.querySelector(`tr[data-r="${from}"]`);
+    if (tr) e.dataTransfer.setDragImage(tr, 20, 12);
+  } else if (card) {
+    tableDrag = { board: card.closest('.table-board'), from: Number(card.dataset.card) };
+  } else {
+    return;
+  }
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', '');
+  markOwnDrag(e.dataTransfer);
+});
+document.addEventListener('dragover', (e) => {
+  if (!tableDrag) return;
+  const tr = tableDrag.box && e.target.closest && e.target.closest('tr[data-r]');
+  const col = tableDrag.board && e.target.closest && e.target.closest('.board-col');
+  const before = tableDrag.to;
+  if (tr && tr.dataset.r !== '0' && tr.closest('.table-block') === tableDrag.box) {
+    const rect = tr.getBoundingClientRect();
+    tableDrag.to = { row: Number(tr.dataset.r), after: e.clientY > rect.top + rect.height / 2, el: tr };
+  } else if (col && col.closest('.table-board') === tableDrag.board) {
+    tableDrag.to = { el: col };
+  } else {
+    return;
+  }
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  if (before && before.el === tableDrag.to.el && before.after === tableDrag.to.after) return;
+  if (before) before.el.classList.remove('drop-before', 'drop-after', 'drop');
+  tableDrag.to.el.classList.add(tableDrag.board ? 'drop' : tableDrag.to.after ? 'drop-after' : 'drop-before');
+});
+document.addEventListener('drop', (e) => {
+  if (!tableDrag || !tableDrag.to) return;
+  e.preventDefault();
+  const { box, board, from, to } = tableDrag;
+  if (box && to.row !== from) tableOp(box, to.after ? 'move-after' : 'move-row', from, to.row);
+  if (board) send({ t: 'table_set', page: board.dataset.page, id: board.dataset.board, row: from, column: Number(board.dataset.group), text: to.el.dataset.value || '' });
+  endTableDrag();
+});
+document.addEventListener('dragend', endTableDrag);
 
 // ----- a cover picture, dragged to show another part ------------------------------
 let coverDrag = null;
@@ -2490,7 +2768,7 @@ document.addEventListener(
     const t = e.target;
     const row = t.closest('.blocks > .block-row');
     // What has a use of its own for a press: text, controls, pictures, tables, drawings.
-    const own = t.closest('.blk, input, textarea, select, button, a, .gutter, .marker, .image-block, .table-block, .drawing, .video-embed, .popover, .ai-panel, .page-link, .code-wrap, .callout-icon, .check, .toggle-arrow');
+    const own = t.closest('.blk, input, textarea, select, button, a, .gutter, .marker, .image-block, .table-wrap, .row-values, .drawing, .video-embed, .popover, .ai-panel, .page-link, .code-wrap, .callout-icon, .check, .toggle-arrow');
     const some = pickedRows().length > 0;
     if (row && (!own || (e.shiftKey && some))) {
       e.preventDefault();
@@ -2848,6 +3126,10 @@ new MutationObserver((mutations) => {
       const menus = n.matches && n.matches('.sidebar-menu, .tab-menu, .due-menu, .ed-menu') ? [n] : n.querySelectorAll ? n.querySelectorAll('.sidebar-menu, .tab-menu, .due-menu, .ed-menu') : [];
       menus.forEach(anchorMenu);
       menus.forEach(focusEdMenu);
+      // The menus that hang from the cells of a table; one whose rows changed keeps its place in the window.
+      const within = n.closest && n.closest(TABLE_MENUS);
+      (within ? [within] : n.matches && n.matches(TABLE_MENUS) ? [n] : n.querySelectorAll ? [...n.querySelectorAll(TABLE_MENUS)] : []).forEach(placeTableMenu);
+      (n.matches && n.matches(RAISED_MENUS) ? [n] : n.querySelectorAll ? [...n.querySelectorAll(RAISED_MENUS)] : []).forEach(placeSubMenu);
       if ((n.matches && n.matches('.page-outline, .outline-item')) || (n.querySelector && n.querySelector('.page-outline'))) queueOutline();
       (n.matches && n.matches('.graph[data-graph]') ? [n] : n.querySelectorAll ? [...n.querySelectorAll('.graph[data-graph]')] : []).forEach(startGraph);
       const pickers = n.matches && n.matches('.ai-menu') ? [n] : n.querySelectorAll ? n.querySelectorAll('.ai-menu') : [];
@@ -3759,7 +4041,13 @@ window.addEventListener(
 // list leans with the fingers, so the move is felt before the space changes;
 // if the fingers stop short, or there is no space on that side, it goes back.
 // After a move the trackpad keeps sending steps (the rest of the move, then
-// the glide): those are not a new move. A pause is, or a step the other way.
+// the glide): those are not a new move. A pause is, or a step the other way,
+// or steps that were small (the end of the glide, or the fingers down again)
+// and then are large again: the next move, with no pause before it. Without
+// that last sign a second move soon after the first was lost, and with three
+// spaces the sidebar stopped at the middle one. A soft move is seen the same
+// way: after the steps came nearly to rest, steps that climb are the fingers.
+// (The glide only gets weaker; it never climbs.)
 (() => {
   const NEED = 30; // how far the fingers go, in all, before the space changes
   let across = 0; // this move so far, sideways
@@ -3768,6 +4056,23 @@ window.addEventListener(
   let last = 0;
   let done = 0; // when this move changed the space (0: it has not)
   let dir = 0; // which way that move went
+  let quiet = 0; // small steps in a row, after the space changed
+  let low = Infinity; // the weakest step since the space changed
+  let prev = 0; // the step before this one
+  let climb = 0; // how far the steps went since that weakest one
+  // For a fault that cannot be seen from here: the steps of the fingers and
+  // what was made of them, as numbers, kept in a file on this Mac. It is on
+  // only when the app says so (see `swipe_trace` in state.rs).
+  const trace = [];
+  let traceSoon = 0;
+  const note = (e, now, what) => {
+    if (document.body.dataset.swipeLog !== '1') return;
+    trace.push(`${Math.round(now)} ${e.deltaX} ${e.deltaY} ${what}`);
+    clearTimeout(traceSoon);
+    traceSoon = setTimeout(() => send({ t: 'swipe_trace', lines: trace.splice(0).join('\n') }), 1500);
+  };
+  let rx = 0; // the last few steps: sideways,
+  let ry = 0; // and up or down
   let rest = 0;
   const list = () => document.querySelector('.sidebar .side-scroll');
   const still = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -3803,6 +4108,10 @@ window.addEventListener(
     down = 0;
     upDown = false;
     done = 0;
+    quiet = 0;
+    low = Infinity;
+    prev = 0;
+    climb = 0;
   };
   document.addEventListener(
     'wheel',
@@ -3813,28 +4122,62 @@ window.addEventListener(
       const step = Math.abs(e.deltaX);
       const gap = now - last;
       last = now;
+      rx = (gap > 250 ? 0 : rx * 0.7) + step;
+      ry = (gap > 250 ? 0 : ry * 0.7) + Math.abs(e.deltaY);
       if (done) {
         // One space for one move. The move and its glide come as steps with
         // no pause between them, in one direction. A new move is a pause, or
-        // a clear step the other way. (Steps that get larger again are not a
-        // sign: the fingers do that in the middle of one move.)
+        // a clear step the other way, or a large step after two or more
+        // small ones. (One step that is larger than the last is not a sign:
+        // the fingers go faster and slower in the middle of one move.)
         const back = e.deltaX !== 0 && Math.sign(e.deltaX) === -dir && step >= 3;
-        if (now - done < 220 || (gap <= 80 && !back)) return;
+        let again = false;
+        if (step <= 4) {
+          quiet += 1;
+        } else {
+          again = step >= 8 && quiet >= 2;
+          quiet = 0;
+        }
+        // A soft move: the steps came nearly to rest, and now they climb.
+        const soft = low <= 2 && prev >= low + 1 && step >= Math.max(low + 3, 4);
+        if (step <= low) {
+          low = step;
+          climb = 0;
+        }
+        climb += e.deltaX;
+        prev = step;
+        if (now - done < 120 || (gap <= 60 && !back && !again && !soft)) {
+          note(e, now, 'glide');
+          return;
+        }
+        note(e, now, back ? 'new:back' : again ? 'new:strong' : soft ? 'new:soft' : 'new:pause');
+        // The steps of the climb are the start of the new move: they count
+        // for it (a soft move is short, and would stop short without them).
+        const carried = again || soft ? climb - e.deltaX : 0;
         fresh();
+        across = carried;
       } else if (gap > 250) {
         fresh(); // a long pause before the space changed: start again
       }
-      if (upDown) return;
+      if (upDown) {
+        // The move turned sideways: it is a move for the spaces after all.
+        if (!(rx > 14 && rx > ry * 2)) {
+          note(e, now, 'list');
+          return;
+        }
+        fresh();
+      }
       across += e.deltaX;
       down += e.deltaY;
       // Up and down is the list itself: this move is not for the spaces.
-      if (Math.abs(down) >= 24 && Math.abs(down) > Math.abs(across)) {
+      if (Math.abs(down) >= 24 && Math.abs(down) > Math.abs(across) * 1.5) {
         upDown = true;
         settle();
         return;
       }
       // Not clearly sideways yet.
-      if (Math.abs(across) < 3 || Math.abs(across) < Math.abs(down) * 1.2) return;
+      if (Math.abs(across) < 3 || Math.abs(across) < Math.abs(down)) return;
+      note(e, now, `lean:${Math.round(across)}`);
       lean();
       clearTimeout(rest);
       if (Math.abs(across) < NEED) {
@@ -3847,6 +4190,7 @@ window.addEventListener(
       }
       done = now;
       dir = Math.sign(across);
+      note(e, now, across > 0 ? 'CHANGE:next' : 'CHANGE:prev');
       const el = list();
       const space = el && el.dataset.space;
       send({ t: 'shortcut', name: across > 0 ? 'space_next' : 'space_prev' });

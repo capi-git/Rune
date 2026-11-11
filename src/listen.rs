@@ -577,7 +577,27 @@ pub fn put_under(page: &mut Vec<Block>, toggle: &mut Option<Id>, title: &str, co
 /// Put the transcript into a page: inside a "Transcript" toggle at the end
 /// (made the first time, closed), in place of what the toggle held before.
 /// `toggle` remembers which block it is.
-pub fn put_transcript(page: &mut Vec<Block>, toggle: &mut Option<Id>, lines: Vec<Block>) {
+/// The "Transcript" toggle that a page has already (the last one), and how
+/// many lines it holds. The app listened to this page before: what it hears
+/// now goes on in the same toggle (see `put_transcript`).
+pub fn transcript_so_far(page: &[Block]) -> (Option<Id>, usize) {
+    let Some(at) = page.iter().rposition(|b| b.kind == BlockKind::Toggle && b.indent == 0 && b.plain_text().trim().eq_ignore_ascii_case("Transcript")) else {
+        return (None, 0);
+    };
+    let lines = page[at + 1..].iter().take_while(|b| b.indent > 0).count();
+    (Some(page[at].id.clone()), lines)
+}
+
+/// The line between what was heard before and what is heard now.
+pub fn again_line(time: &str) -> Block {
+    Block::text(format!("_Listening started again at {time}_")).with_indent(1)
+}
+
+/// Put the lines of a transcript in the page's "Transcript" toggle (made at
+/// the end of the page the first time). The first `kept` lines of the toggle
+/// are from an earlier time of listening: they stay as they are, and `lines`
+/// take the place of what comes after them.
+pub fn put_transcript(page: &mut Vec<Block>, toggle: &mut Option<Id>, kept: usize, lines: Vec<Block>) {
     if lines.is_empty() {
         return;
     }
@@ -597,12 +617,13 @@ pub fn put_transcript(page: &mut Vec<Block>, toggle: &mut Option<Id>, lines: Vec
     };
     // What the toggle holds: the indented blocks after it.
     let end = page[at + 1..].iter().position(|b| b.indent == 0).map(|i| at + 1 + i).unwrap_or(page.len());
+    let from = (at + 1 + kept).min(end);
     // Lines already there keep their ids, so the page is not redrawn for them.
     let mut lines = lines;
-    for (new, old) in lines.iter_mut().zip(&page[at + 1..end]) {
+    for (new, old) in lines.iter_mut().zip(&page[from..end]) {
         new.id = old.id.clone();
     }
-    page.splice(at + 1..end, lines);
+    page.splice(from..end, lines);
 }
 
 /// `notion2 --transcript-into <page id> <lines file> [--notes <markdown
@@ -655,7 +676,7 @@ pub fn into_page(args: &[String]) -> i32 {
             .iter()
             .find(|b| b.kind == BlockKind::Toggle && b.indent == 0 && b.plain_text().trim().eq_ignore_ascii_case("Transcript"))
             .map(|b| b.id.clone());
-        put_transcript(&mut blocks, &mut toggle, transcript.blocks());
+        put_transcript(&mut blocks, &mut toggle, 0, transcript.blocks());
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
         store.save_blocks_at(&page, &blocks, now)?;
         Ok(Some((transcript.turns.len(), added)))
@@ -1006,20 +1027,60 @@ mod tests {
         let mut toggle = None;
         let mut t = Transcript::default();
         t.add(Who::Me, "Hello.", 1.0);
-        put_transcript(&mut page, &mut toggle, t.blocks());
+        put_transcript(&mut page, &mut toggle, 0, t.blocks());
         assert_eq!(page.len(), 3, "the empty last line gives way to the toggle");
         assert_eq!((page[1].kind, page[1].text.as_str(), page[1].collapsed), (BlockKind::Toggle, "Transcript", true));
         let first_line = page[2].id.clone();
         // More is said; then the person writes under the page.
         t.add(Who::Others, "Hi there.", 4.0);
         page.push(Block::text("My own note"));
-        put_transcript(&mut page, &mut toggle, t.blocks());
+        put_transcript(&mut page, &mut toggle, 0, t.blocks());
         assert_eq!(page.iter().map(|b| b.text.clone()).collect::<Vec<_>>(), vec!["Notes", "Transcript", "**Me** · 0:01 — Hello.", "**Others** · 0:04 — Hi there.", "My own note"]);
         assert_eq!(page[2].id, first_line, "lines already shown are not redrawn");
         // Nothing heard: nothing is added.
         let mut empty = vec![Block::text("x")];
-        put_transcript(&mut empty, &mut None, Vec::new());
+        put_transcript(&mut empty, &mut None, 0, Vec::new());
         assert_eq!(empty.len(), 1);
+    }
+
+    #[test]
+    fn listening_again_goes_on_in_the_same_transcript() {
+        let texts = |page: &[Block]| page.iter().map(|b| b.text.clone()).collect::<Vec<_>>();
+        // A page with no transcript: there is nothing to go on from.
+        let mut page = vec![Block::new(BlockKind::Heading2, "Notes"), Block::text("")];
+        assert_eq!(transcript_so_far(&page), (None, 0));
+        // The first time of listening.
+        let mut toggle = None;
+        let mut first = Transcript::default();
+        first.add(Who::Me, "Hello.", 1.0);
+        first.add(Who::Others, "Hi there.", 4.0);
+        put_transcript(&mut page, &mut toggle, 0, first.blocks());
+        page.push(Block::text("My own note"));
+        // The second time (the person stopped and pressed Listen again, or
+        // the meeting went on): the same toggle, the old lines kept, a line
+        // that says when, then the new words. Its clock starts again.
+        let (mut again_in, kept) = transcript_so_far(&page);
+        assert_eq!((again_in.clone(), kept), (toggle.clone(), 2));
+        let marker = again_line("2:31 PM");
+        let mut second = Transcript::default();
+        second.add(Who::Others, "Back again.", 2.0);
+        let lines = |t: &Transcript| std::iter::once(marker.clone()).chain(t.blocks()).collect::<Vec<_>>();
+        put_transcript(&mut page, &mut again_in, kept, lines(&second));
+        let old_ids: Vec<Id> = page[2..4].iter().map(|b| b.id.clone()).collect();
+        second.add(Who::Me, "Good.", 5.0);
+        put_transcript(&mut page, &mut again_in, kept, lines(&second));
+        assert_eq!(
+            texts(&page),
+            vec!["Notes", "Transcript", "**Me** · 0:01 — Hello.", "**Others** · 0:04 — Hi there.", "_Listening started again at 2:31 PM_", "**Others** · 0:02 — Back again.", "**Me** · 0:05 — Good.", "My own note"]
+        );
+        assert_eq!(page.iter().filter(|b| b.kind == BlockKind::Toggle).count(), 1, "one transcript");
+        assert_eq!(page[2..4].iter().map(|b| b.id.clone()).collect::<Vec<_>>(), old_ids, "the old lines are not touched");
+        assert!(page[4..7].iter().all(|b| b.indent == 1));
+        // A third time counts all of it.
+        assert_eq!(transcript_so_far(&page), (toggle, 5));
+        // The transcript of a video has a name of its own: it is not gone on from.
+        let video = vec![Block::new(BlockKind::Toggle, "Transcript of the video"), Block::text("x").with_indent(1)];
+        assert_eq!(transcript_so_far(&video), (None, 0));
     }
 
     #[test]

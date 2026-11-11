@@ -10,7 +10,10 @@ mod modals;
 pub mod pad;
 mod page;
 mod sidebar;
-mod tables;
+mod table_choices;
+mod table_menus;
+mod table_views;
+pub mod tables;
 
 use crate::state::{AppState, Bridge, Look, Modal, Route, Tab, Theme};
 use crate::sync;
@@ -217,7 +220,16 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
         if !primary || std::env::var_os("NOTION2_SELFTEST").is_some() {
             return;
         }
-        let mut watch = crate::meeting::Watch::default();
+        // A call can go on while the app is closed and opened again: the
+        // meeting that the last run wrote down is known again, and the
+        // watcher knows the program of one that was on.
+        let mut watch = match state.recall_meeting() {
+            Some(app) => {
+                crate::meeting::log(&format!("Opened during a meeting in {app}"));
+                crate::meeting::Watch::after(app)
+            }
+            None => crate::meeting::Watch::default(),
+        };
         loop {
             crate::ai::sleep_ms(crate::meeting::POLL_MS).await;
             if !crate::meeting::enabled() {
@@ -225,10 +237,24 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
                 continue;
             }
             let heard = crate::meeting::poll().await;
-            match watch.step(&heard) {
+            let change = watch.step(&heard);
+            if let Some(change) = change {
+                crate::meeting::log(&format!("{change:?}"));
+            }
+            match change {
                 Some(crate::meeting::Change::Started(app)) => state.meeting_started(app),
+                // Sound alone, after an end: only the meeting that ended can go on.
+                Some(crate::meeting::Change::Back(_)) => {
+                    if !state.meeting_back() {
+                        watch.not_back();
+                        crate::meeting::log("Not the meeting that ended");
+                    }
+                }
                 Some(crate::meeting::Change::Ended) => state.meeting_ended(crate::model::now_ms() - crate::meeting::END_LAG_MS),
                 None => {}
+            }
+            if watch.in_meeting() {
+                state.meeting_seen();
             }
         }
     });
@@ -327,15 +353,25 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
         // The test reports each check as it starts (so a hang can be found),
         // then the results.
         let progress = format!("{}.progress", std::path::Path::new(&path).display());
-        let report = loop {
+        // (A saved screen comes in a message of its own, as it is taken.)
+        let mut snaps = serde_json::Map::new();
+        let mut report = loop {
             match test.recv::<serde_json::Value>().await {
                 Ok(v) if v.get("progress").is_some() => {
                     let _ = std::fs::write(&progress, v["progress"].to_string());
+                }
+                Ok(mut v) if v.get("snap").is_some() => {
+                    if let Some(name) = v["snap"].as_str().map(str::to_string) {
+                        snaps.insert(name, v["html"].take());
+                    }
                 }
                 Ok(v) => break v,
                 Err(e) => break serde_json::json!({ "error": format!("{e:?}") }),
             }
         };
+        if let Some(report) = report.as_object_mut() {
+            report.insert("snaps".to_string(), serde_json::Value::Object(snaps));
+        }
         crate::ai::sleep_ms(400).await;
         // A drawing is reported by how many shapes its saved scene has.
         let shapes = |data: &str| match serde_json::from_str::<serde_json::Value>(data).ok().and_then(|v| v["elements"].as_array().map(Vec::len)) {
@@ -618,12 +654,7 @@ fn ListenBar(page: String) -> Element {
                 span { class: "listen-what", if crate::ai::has_ai() { "Listen to this meeting and write the notes?" } else { "Listen to this meeting and keep the transcript?" } }
                 span { class: "listen-latest", "{crate::listen::where_speech_goes()}" }
                 button { class: "primary-btn small", id: "listen-start", onclick: move |_| state.start_listening(&p1), "Listen" }
-                button { class: "ghost-btn small", id: "listen-no", onclick: move |_| {
-                        if state.listen_offer.peek().as_deref() == Some(p2.as_str()) {
-                            let mut offer = state.listen_offer;
-                            offer.set(None);
-                        }
-                    }, "Not now" }
+                button { class: "ghost-btn small", id: "listen-no", onclick: move |_| state.decline_listen(&p2), "Not now" }
             }
         };
     }
@@ -652,19 +683,20 @@ fn PaneRail(tab: Tab, pane: String) -> Element {
 }
 
 /// On the page of a meeting that is over, and on any page after "Move to…"
-/// in its menu: which page to keep it in. The list is the pages of the
-/// space, with the one it is in now chosen; a new choice moves it there at
-/// once. "Done" puts the bar away, and the page asks no more.
+/// in its menu: where to keep it. The list is every space with its pages,
+/// with the place it is in now chosen; a new choice moves it there at once.
+/// "Done" puts the bar away, and the page asks no more.
 #[component]
 fn PlaceBar(page: String) -> Element {
     let state = use_context::<AppState>();
+    // The page whose menu is open (a pane can go on to another page).
+    let mut listing = use_signal(|| None::<String>);
     // While the meeting's pad asks this on the screen, the page does not.
     let padded = state.pad.read().as_ref().is_some_and(|p| p.page == page && matches!(p.form, crate::pad::Form::End | crate::pad::Form::Kept));
     if padded || !state.asks_place(&page) {
         return rsx! {};
     }
-    let here = state.pages.read().get(&page).and_then(|p| p.parent_id.clone()).unwrap_or_default();
-    let places = state.meeting_places(&page);
+    let (here, here_space) = state.page_place(&page);
     let what = if state.is_notes_page(&page) { "Keep these notes in" } else { "Keep this page in" };
     // A meeting remembers its page: the next one of the same name starts there.
     let (before, by_itself) = state.slot_of_page(&page);
@@ -673,19 +705,43 @@ fn PlaceBar(page: String) -> Element {
         None if by_itself => "The notes of a meeting at this time go here by themselves.".to_string(),
         None => String::new(),
     };
-    let (p1, p2) = (page.clone(), page.clone());
+    let (p1, p2, p3) = (page.clone(), page.clone(), page.clone());
+    let open = listing().as_deref() == Some(page.as_str());
     rsx! {
         div { class: "listen-bar place-bar", role: "group", "aria-label": "{what}",
             span { class: "listen-ask", icons::Icon { name: "folder", size: 15 } }
             span { class: "listen-what", "{what}" }
-            select {
-                id: "meeting-place",
-                class: "select",
-                "aria-label": "The page to keep it in",
-                onchange: move |e: FormEvent| state.keep_page_in(&p1, &e.value()),
-                option { value: "", selected: here.is_empty(), "No page (top of the list)" }
-                for (id, title, depth) in places {
-                    option { key: "{id}", value: "{id}", selected: id == here, "{\"\u{2003}\".repeat(depth)}{title}" }
+            div { class: "place-pick",
+                button {
+                    class: "pad-pick place-field",
+                    id: "meeting-place",
+                    "data-home": "{here.id}",
+                    "aria-haspopup": "menu",
+                    "aria-expanded": "{open}",
+                    "aria-label": "{what}: {here.title}",
+                    onclick: move |_| listing.set((!open).then(|| p3.clone())),
+                    pad::PlaceMark { place: here.clone() }
+                    span { class: "pad-pick-name", "{here.title}" }
+                    if !here_space.is_empty() {
+                        span { class: "place-aside", "{here_space}" }
+                    }
+                    span { class: "pad-chev", Icon { name: "chevron-down", size: 13 } }
+                }
+                if open {
+                    // A press anywhere else puts the menu away.
+                    div { class: "ai-menu-shade place-shade", onclick: move |_| listing.set(None) }
+                    PlaceMenu {
+                        page: page.clone(),
+                        here: here.id.clone(),
+                        on_pick: move |home: String| {
+                            listing.set(None);
+                            state.keep_page_in(&p1, &home);
+                        },
+                        on_close: move |_| {
+                            listing.set(None);
+                            document::eval("document.getElementById('meeting-place')?.focus({preventScroll:true})");
+                        },
+                    }
                 }
             }
             // A meeting at this time was kept in these pages before: one click.
@@ -707,6 +763,47 @@ fn PlaceBar(page: String) -> Element {
             }
             span { class: "listen-latest", id: "meeting-place-kept", "{kept}" }
             button { class: "secondary-btn small", id: "meeting-place-done", onclick: move |_| state.place_done(&p2), "Done" }
+        }
+    }
+}
+
+/// The menu of `PlaceBar`: every space with its pages. (As the menus of an
+/// event's panel: bridge.js lifts it out of the pane, gives the chosen row
+/// the keyboard and moves it with the arrows.)
+#[component]
+fn PlaceMenu(page: String, here: String, on_pick: EventHandler<String>, on_close: EventHandler<()>) -> Element {
+    let state = use_context::<AppState>();
+    let places = state.meeting_places(&page);
+    rsx! {
+        div {
+            class: "ed-menu place-menu",
+            role: "menu",
+            "aria-label": "The place to keep it in",
+            onkeydown: move |e: KeyboardEvent| {
+                if e.key() == Key::Escape {
+                    e.stop_propagation();
+                    on_close.call(());
+                }
+            },
+            for place in places {
+                button {
+                    key: "{place.id}",
+                    class: "ed-menu-row place-row {pad::place_kind(&place)}",
+                    class: if place.id == here { "on" },
+                    role: "menuitemradio",
+                    "aria-checked": "{place.id == here}",
+                    "data-home": "{place.id}",
+                    style: "padding-left: {10 + place.depth * 16}px",
+                    onclick: {
+                        let home = place.id.clone();
+                        move |_| on_pick.call(home.clone())
+                    },
+                    span { class: "place-row-name",
+                        pad::PlaceMark { place: place.clone() }
+                        span { class: "place-name", "{place.title}" }
+                    }
+                }
+            }
         }
     }
 }

@@ -554,8 +554,9 @@ pub fn PageView(page_id: String) -> Element {
         let i = index_of(&blocks, &t)?;
         Some((i + 1, subtree_end(&blocks, i)))
     });
+    let sides = side_lines(&blocks);
     let mut appear_n = 0usize;
-    let rows: Vec<(Block, Option<usize>, bool, Option<usize>)> = blocks
+    let rows: Vec<(Block, Option<usize>, bool, Option<usize>, (u8, bool))> = blocks
         .iter()
         .enumerate()
         .filter(|(i, _)| visible[*i])
@@ -564,7 +565,7 @@ pub fn PageView(page_id: String) -> Element {
                 appear_n += 1;
                 appear_n - 1
             });
-            (b.clone(), numbers[i], has_children(&blocks, i), appear)
+            (b.clone(), numbers[i], has_children(&blocks, i), appear, sides[i])
         })
         .collect();
 
@@ -734,6 +735,9 @@ pub fn PageView(page_id: String) -> Element {
                         }
                     },
                 }
+                if page.row_of.is_some() {
+                    super::tables::RowValues { page_id: page_id.clone() }
+                }
                 if words > 0 {
                     div { class: "page-meta",
                         span { class: "meta-edited", "Edited {edited}" }
@@ -750,10 +754,12 @@ pub fn PageView(page_id: String) -> Element {
                 MeetingBand { page_id: page_id.clone(), voices: v }
             }
             div { class: "blocks",
-                for (block, number, kids, appear) in rows {
+                for (block, number, kids, appear, (side, side_last)) in rows {
                     BlockRow {
                         key: "{block.id}",
                         appear,
+                        side,
+                        side_last,
                         page_id: page_id.clone(),
                         slash: slash.clone().filter(|s| s.block_id == block.id),
                         menu_open: block_menu.as_deref() == Some(block.id.as_str()),
@@ -790,6 +796,32 @@ pub fn PageView(page_id: String) -> Element {
             }
         }
     }
+}
+
+/// The room between two tables that stand in one line.
+const SIDE_GAP: usize = 44;
+
+/// For each block: how many tables stand in its line (0 for a block that
+/// has the line to itself), and whether it is the last of them. A table
+/// with `beside` stands in the line of the table above it (three at most).
+fn side_lines(blocks: &[Block]) -> Vec<(u8, bool)> {
+    let mut out = vec![(0, false); blocks.len()];
+    let mut i = 0;
+    while i < blocks.len() {
+        let mut end = i + 1;
+        if blocks[i].kind == BlockKind::Table {
+            while end < blocks.len() && end - i < 3 && blocks[end].kind == BlockKind::Table && blocks[end].place.beside {
+                end += 1;
+            }
+        }
+        if end - i > 1 {
+            for (n, slot) in out[i..end].iter_mut().enumerate() {
+                *slot = ((end - i) as u8, n + 1 == end - i);
+            }
+        }
+        i = end;
+    }
+    out
 }
 
 fn bullet_for(indent: u8) -> &'static str {
@@ -839,6 +871,11 @@ fn BlockRow(
     #[props(default)] due_open: bool,
     #[props(default)] picked: bool,
     #[props(!optional)] appear: Option<usize>,
+    /// How many tables stand in this block's line (0: it has the line to
+    /// itself), and whether it is the last of them.
+    #[props(default)]
+    side: u8,
+    #[props(default)] side_last: bool,
 ) -> Element {
     let state = use_context::<AppState>();
     let id = block.id.clone();
@@ -848,8 +885,9 @@ fn BlockRow(
     // A line that is only a YouTube link shows the video under it.
     let video = crate::video::in_block(kind, &block.text).filter(|_| block.data != crate::video::HIDDEN);
     let class = format!(
-        "block-row kind-{}{}{}{}{}{}",
+        "block-row kind-{}{}{}{}{}{}{}",
         kind.as_str(),
+        if side > 0 { " side" } else { "" },
         if block.checked { " checked" } else { "" },
         if menu_open { " menu-open" } else { "" },
         if appear.is_some() { " appear" } else { "" },
@@ -876,7 +914,12 @@ fn BlockRow(
     } else {
         // Nesting is room inside the row (not a margin), so that it still
         // shows when the row sits beside a picture.
-        format!("margin-left: 0px; margin-right: 0px; width: auto; padding-left: {}px; --i: {appear_i};", block.indent as usize * 26)
+        // Tables in one line share its width, with a gap between them.
+        let (width, gap) = match side {
+            0 => ("auto".to_string(), 0),
+            n => (format!("calc((100% - {}px) / {n})", (n as usize - 1) * SIDE_GAP), if side_last { 0 } else { SIDE_GAP }),
+        };
+        format!("margin-left: 0px; margin-right: {gap}px; width: {width}; padding-left: {}px; --i: {appear_i};", block.indent as usize * 26)
     };
     let menu_flag = if slash.is_some() { "1" } else { "0" };
     let placeholder = if kind == BlockKind::Toggle && has_children { "" } else { kind.placeholder() };
@@ -1539,6 +1582,44 @@ pub fn AiDock(route: Route, duplicate: bool) -> Element {
     }
 }
 
+/// A picture that goes with a request to the AI: small, with a press to
+/// take it out again.
+#[component]
+pub fn AiShot(id: String, src: String) -> Element {
+    let state = use_context::<AppState>();
+    rsx! {
+        span { class: "ai-shot",
+            img { src: "{src}", alt: "A picture for the AI" }
+            button {
+                class: "ai-shot-x",
+                title: "Take this picture out",
+                "aria-label": "Take this picture out",
+                onclick: move |e| {
+                    e.stop_propagation();
+                    state.ai_remove_picture(&id);
+                },
+                Icon { name: "close", size: 12 }
+            }
+        }
+    }
+}
+
+/// How long a run of the AI goes on, as a small clock that counts.
+#[component]
+fn Elapsed(since: i64) -> Element {
+    let mut now = use_signal(crate::model::now_ms);
+    use_future(move || async move {
+        loop {
+            crate::ai::sleep_ms(1000).await;
+            now.set(crate::model::now_ms());
+        }
+    });
+    let seconds = if since > 0 { ((*now.read() - since).max(0) / 1000) as u64 } else { 0 };
+    rsx! {
+        span { class: "ai-clock", "aria-label": "Time so far", "{seconds / 60}:{seconds % 60:02}" }
+    }
+}
+
 #[component]
 fn AiPanel() -> Element {
     let state = use_context::<AppState>();
@@ -1554,6 +1635,11 @@ fn AiPanel() -> Element {
         (action, _) => action.label(),
     };
     let caption = if crate::ai::split_revision(&crate::ai::clean_reply(&session.output).0).is_some() { format!("The page, changed · {caption}") } else { caption };
+    let caption = match session.pictures.len() {
+        0 => caption,
+        1 => format!("{caption} · 1 picture"),
+        n => format!("{caption} · {n} pictures"),
+    };
     // Model picker: every model of every installed tool, grouped by tool.
     let groups = use_hook(|| {
         let installed = crate::ai::local::installed_cached().unwrap_or_default();
@@ -1603,7 +1689,11 @@ fn AiPanel() -> Element {
     let did = if session.status == AiStatus::Streaming { Vec::new() } else { crate::mcp::describe(&session.did) };
     let acted = !did.is_empty();
     let more = did.len().saturating_sub(6);
-    let working = session.steps.last().cloned().unwrap_or_else(|| if session.output.trim().is_empty() { "Thinking" } else { "Writing" }.to_string());
+    let working = session
+        .working
+        .clone()
+        .or_else(|| session.steps.last().cloned())
+        .unwrap_or_else(|| if session.output.trim().is_empty() { "Thinking" } else { "Writing" }.to_string());
     // The plan is short. The text of the pages shows when the person asks.
     let mut show_pages = use_signal(|| false);
     let reply = match (planned, *show_pages.read()) {
@@ -1627,6 +1717,9 @@ fn AiPanel() -> Element {
                 // send (there once something is typed). Escape, or a press
                 // outside while it is empty, puts the box away.
                 div { class: "ai-compose",
+                    for picture in session.pictures.iter() {
+                        AiShot { key: "{picture.id}", id: picture.id.clone(), src: picture.data_url() }
+                    }
                     input {
                         id: "ai-input",
                         class: "ai-input",
@@ -1718,6 +1811,7 @@ fn AiPanel() -> Element {
                 AiStatus::Streaming => rsx! {
                     div { class: "ai-status",
                         span { class: "ai-writing", id: "ai-step", "{working}" span { class: "dots" } }
+                        Elapsed { since: session.started }
                         button { class: "ghost-btn", onclick: move |_| state.ai_stop(), "Stop" }
                     }
                 },

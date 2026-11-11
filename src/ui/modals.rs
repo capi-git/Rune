@@ -595,6 +595,7 @@ fn AiSettings() -> Element {
             while let Some(event) = rx.next().await {
                 match event {
                     AiEvent::Step(..) => {}
+                    AiEvent::Working { .. } => {}
                     AiEvent::Delta(t) => reply.push_str(&t),
                     AiEvent::Done => {
                         outcome = Some((true, format!("{label} replied: “{}”", reply.trim().chars().take(160).collect::<String>())));
@@ -1281,10 +1282,11 @@ pub fn AskNotesModal() -> Element {
         did.set(Vec::new());
         looked.set(Vec::new());
         status.set("work".into());
-        let mut rx = ai::start_with(ai::Prefs::load(), messages, tools);
+        let mut rx = ai::start_with(ai::Prefs::load(), messages, tools, state.ask_pictures.peek().clone());
         spawn(async move {
             while let Some(event) = rx.next().await {
                 match event {
+                    AiEvent::Working { tool, title, chars } => step.set(ai::working_label(&tool, title.as_deref(), chars)),
                     AiEvent::Step(tool, input) => {
                         let label = {
                             let pages = state.pages.peek();
@@ -1316,6 +1318,12 @@ pub fn AskNotesModal() -> Element {
     });
     let did_lines = crate::mcp::describe(&did.read());
     let with_tools = ai::takes_tools();
+    // Pictures for this box go when the box goes.
+    use_drop(move || {
+        let mut pictures = state.ask_pictures;
+        pictures.write().clear();
+    });
+    let pictures = state.ask_pictures.read().clone();
     let looked_in = match looked.read().as_slice() {
         [] => String::new(),
         [one] => format!("Looked in {one}"),
@@ -1341,6 +1349,9 @@ pub fn AskNotesModal() -> Element {
         div { class: "modal-backdrop soft ask-back", onclick: move |_| state.set_modal(None),
             div { class: "modal ask-notes", role: "dialog", "aria-label": "Ask your notes", onclick: move |e| e.stop_propagation(),
                 div { class: "ask-row",
+                    for picture in pictures.iter() {
+                        super::page::AiShot { key: "{picture.id}", id: picture.id.clone(), src: picture.data_url() }
+                    }
                     input {
                         id: "ask-notes-input",
                         class: "ask-input",

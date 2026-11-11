@@ -90,6 +90,9 @@ pub struct Pad {
     pub span: Option<(i64, i64)>,
     /// When it was over.
     pub ended: Option<i64>,
+    /// The form it had before its last card: it goes back to that one if
+    /// the meeting goes on after all.
+    pub was: Form,
 }
 
 impl Pad {
@@ -109,6 +112,7 @@ impl Pad {
             started: now,
             span,
             ended: None,
+            was: Form::Small,
         }
     }
 
@@ -211,10 +215,14 @@ pub struct Hears {
 /// A page the notes can be kept in.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Place {
+    /// What `AppState::keep_page_in` takes: a page, a space (the top of its
+    /// list), or "" (the top of the list, with one space only).
     pub id: Id,
     pub title: String,
     pub depth: usize,
     pub icon: Option<String>,
+    /// On the row of a space: its badge (its first letter, its colour).
+    pub badge: Option<(String, String)>,
 }
 
 /// Everything the pad draws, worked out by the first window.
@@ -244,11 +252,11 @@ pub struct View {
     /// (they are where the person chose before), `told` says where they are.
     pub asks_place: bool,
     pub told: String,
-    /// The page the notes are in now, the pages they can go to, and the
-    /// pages they were kept in before at this time ("Last time:").
-    pub here: Id,
-    pub here_title: String,
-    pub here_icon: Option<String>,
+    /// Where the notes are now, the name of its space (with several
+    /// spaces), the places they can go to, and the pages they were kept in
+    /// before at this time ("Last time:").
+    pub here: Place,
+    pub here_space: String,
     pub places: Vec<Place>,
     pub before: Vec<(Id, String)>,
 }
@@ -267,7 +275,7 @@ pub enum Command {
     Lines(Vec<String>),
     /// Show the meeting's page in the app.
     OpenPage,
-    /// Keep the notes in this page ("": at the top of the list).
+    /// Keep the notes in this place (see `Place::id`).
     Keep(Id),
     Done,
 }

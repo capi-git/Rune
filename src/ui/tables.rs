@@ -1,265 +1,990 @@
-//! A table in a page: its cells, the kind of each column (an icon in the
-//! heading and a small menu to change it), the totals under it, and a
-//! button that adds a row for today when it has a date column.
+//! A table in a page: its name, its cells by the kind of their column, the
+//! totals at its foot, what shows of its filters and sorts, and the values
+//! of a row at the top of the row's page. Its menus are in table_menus.rs
+//! and its other layouts (board, list, gallery, calendar) in table_views.rs.
 
-use super::icons::Icon;
-use crate::state::{AppState, Popover};
-use crate::table::{format_day, Column, Kind, Table};
+use super::icons::{Icon, PageIcon};
+use super::table_choices::{tag_class, ChoicePicker, Tag};
+use super::table_menus::{CellMenu, ChipMenu, ColumnMenu, IconMenu, KindsMenu, PaintMenu, RowMenu, TableMenu};
+use super::table_views::{Board, Calendar, Gallery, List};
+use crate::state::{AppState, Open, Popover};
+use crate::table::{checked, format_day, parts, Column, Kind, Layout, Show, Table};
 use dioxus::prelude::*;
 
-/// A table: the first row is its header. Tab goes to the next cell and
-/// Return to the cell below (a new row at the end); the small buttons above
-/// it, shown while a cell has the caret, add and take out the row or column
-/// of that cell (see the page script).
+/// The order of the rows of the table that has the caret, kept while the
+/// caret is in it: a row must not jump to its new place (a sort) or go out
+/// of view (a filter) under the hand that types in it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Held {
+    pub block: String,
+    /// How many rows the table had: with more or fewer, the order is stale.
+    pub rows: usize,
+    pub order: Vec<usize>,
+}
+
+pub static HELD: GlobalSignal<Option<Held>> = Signal::global(|| None);
+
+/// The caret came into this table (`table` is it as it is now), or left it.
+/// Only a table with a sort or a filter has an order to keep.
+pub fn hold(id: &str, table: Option<&Table>) {
+    let held = table.filter(|t| !t.view.sort.is_empty() || !t.view.filter.is_empty()).map(|t| Held { block: id.to_string(), rows: t.rows.len(), order: t.order() });
+    let now = HELD.peek().clone();
+    let mine = now.as_ref().is_some_and(|h| h.block == id);
+    if (held.is_some() || mine) && now != held {
+        *HELD.write() = held;
+    }
+}
+
+/// The rows of a table that are picked (by a click on their handle). They
+/// stay picked when their menu closes, so that more rows can be added with
+/// ⇧ and a click; a click anywhere else lets them go (see the page script).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Picked {
+    pub block: String,
+    pub rows: Vec<usize>,
+}
+
+pub static PICKED: GlobalSignal<Option<Picked>> = Signal::global(|| None);
+
+/// The rows of a table in the order the screen shows them now (the order
+/// that is kept while the caret is in the table, if one is).
+pub fn shown_order(id: &str, table: &Table) -> Vec<usize> {
+    HELD.peek().as_ref().filter(|h| h.block == id && h.rows == table.rows.len()).map(|h| h.order.clone()).unwrap_or_else(|| table.order())
+}
+
+/// Pick a row of a table: that row alone, or with `extend` also the rows
+/// from the row picked last to it, as `order` (what the screen shows) has
+/// them: a row that does not show between the two is not picked. Returns
+/// the rows picked now.
+pub fn pick(id: &str, row: usize, extend: bool, order: &[usize]) -> Vec<usize> {
+    let mut rows = PICKED.peek().as_ref().filter(|p| p.block == id && extend).map(|p| p.rows.clone()).unwrap_or_default();
+    let place = |r: usize| order.iter().position(|&o| o == r);
+    let between = rows.last().and_then(|&last| Some((place(last)?, place(row)?)));
+    match between {
+        Some((a, b)) => rows.extend(order[a.min(b)..=a.max(b)].iter().filter(|r| !rows.contains(r)).copied().collect::<Vec<_>>()),
+        None if !rows.contains(&row) => rows.push(row),
+        None => {}
+    }
+    *PICKED.write() = Some(Picked { block: id.to_string(), rows: rows.clone() });
+    rows
+}
+
+/// Let the picked rows of a table go.
+pub fn unpick(id: &str) {
+    if PICKED.peek().as_ref().is_some_and(|p| p.block == id) {
+        *PICKED.write() = None;
+    }
+}
+
+/// The table changed by something other than typing in a cell. If a row
+/// came or went, the numbers of the rows are other numbers now: an order
+/// that is kept is worked out again. Picked rows are let go: a row that
+/// came, went or moved gives their numbers to other rows.
+pub fn changed(id: &str, table: &Table) {
+    if HELD.peek().as_ref().is_some_and(|h| h.block == id && h.rows != table.rows.len()) {
+        hold(id, Some(table));
+    }
+    unpick(id);
+}
+
+/// The table a popover belongs to.
+fn table_of(popover: &Popover) -> Option<&str> {
+    match popover {
+        Popover::TableColumn { block_id, .. }
+        | Popover::TableMenu { block_id }
+        | Popover::TableKinds { block_id }
+        | Popover::TableIcon { block_id }
+        | Popover::TableRow { block_id, .. }
+        | Popover::TableChip { block_id, .. }
+        | Popover::TablePaint { block_id }
+        | Popover::TableCell { block_id, .. } => Some(block_id),
+        _ => None,
+    }
+}
+
+/// A table. In its plain layout the first row is its header; Tab goes to the
+/// next cell and Return to the cell below (a new row at the end). The handle
+/// at the left of the row under the pointer adds a row, moves the row and
+/// opens its menu (see the page script).
 #[component]
 pub fn TableView(page_id: String, id: String, data: String) -> Element {
     let state = use_context::<AppState>();
     let table = Table::parse(&data);
-    let typed = table.is_typed();
-    let open_menu = match state.ui.read().popover.clone() {
-        Some(Popover::TableColumn { block_id, column }) if block_id == id => Some(column),
-        _ => None,
-    };
+    let open = state.ui.read().popover.clone().filter(|p| table_of(p) == Some(id.as_str()));
+    let picked: Vec<usize> = PICKED.read().as_ref().filter(|p| p.block == id).map(|p| p.rows.clone()).unwrap_or_default();
+    let order = HELD.read().as_ref().filter(|h| h.block == id && h.rows == table.rows.len()).map(|h| h.order.clone()).unwrap_or_else(|| table.order());
+    {
+        let id = id.clone();
+        use_drop(move || {
+            hold(&id, None);
+            unpick(&id);
+        });
+    }
+    let layout = table.view.layout;
     let today = crate::when::today();
     let has_date = table.first_of(Kind::Date).is_some();
-    let columns = table.columns();
-    let totals: Vec<(usize, bool, Option<(&'static str, String)>)> = (0..columns).map(|c| (c, table.kind(c).is_amount(), table.total(c))).collect();
-    let (today_page, today_id) = (page_id.clone(), id.clone());
+    let named = !table.name.is_empty() || !table.icon.is_empty();
+    let (p, b) = (page_id.clone(), id.clone());
+    let body = match layout {
+        Layout::Table => {
+            // The rows whose page shows in a pane now, to mark them (looked
+            // at here, where every change of the panes is seen).
+            let mut open_rows: Vec<String> = if table.has_ids() { state.row_pages(&id).into_iter().filter(|(_, page)| state.shows_page(page)).map(|(row, _)| row).collect() } else { Vec::new() };
+            open_rows.sort();
+            rsx! { Grid { page_id: page_id.clone(), id: id.clone(), table: table.clone(), order, picked: picked.clone(), open_rows, open: open.clone(), named } }
+        }
+        Layout::Board => rsx! { Board { page_id: page_id.clone(), id: id.clone(), table: table.clone(), order } },
+        Layout::List => rsx! { List { page_id: page_id.clone(), id: id.clone(), table: table.clone(), order } },
+        Layout::Gallery => rsx! { Gallery { page_id: page_id.clone(), id: id.clone(), table: table.clone(), order } },
+        Layout::Calendar => rsx! { Calendar { page_id: page_id.clone(), id: id.clone(), table: table.clone(), order } },
+    };
     rsx! {
-        div { class: "table-wrap",
-            div {
-                class: match (typed, open_menu.is_some()) {
-                    (true, true) => "table-block typed menu-open",
-                    (true, false) => "table-block typed",
-                    (false, true) => "table-block menu-open",
-                    (false, false) => "table-block",
-                },
-                "data-table": "{id}",
-                "data-page": "{page_id}",
-                div { class: "table-tools",
-                    button { class: "ghost-btn small", "data-table-op": "add-row", title: "Add a row below this one", "Add row" }
-                    button { class: "ghost-btn small", "data-table-op": "add-column", title: "Add a column after this one", "Add column" }
-                    button { class: "ghost-btn small", "data-table-op": "remove-row", title: "Take this row out", "Delete row" }
-                    button { class: "ghost-btn small", "data-table-op": "remove-column", title: "Take this column out", "Delete column" }
+        div { class: "table-wrap layout-{layout.name()}", "data-table-wrap": "{id}", "data-page": "{page_id}",
+            if named || layout != Layout::Table {
+                TableHead { page_id: page_id.clone(), id: id.clone(), table: table.clone(), picked: picked.len(), open: open.clone() }
+            }
+            Chips { page_id: page_id.clone(), id: id.clone(), table: table.clone(), open: open.clone() }
+            {body}
+            // The menus of the table itself hang from its top right corner.
+            div { class: if named || layout != Layout::Table { "table-menus named" } else { "table-menus" },
+                if matches!(open, Some(Popover::TableMenu { .. })) {
+                    TableMenu { page_id: page_id.clone(), id: id.clone(), table: table.clone() }
                 }
-                table {
-                    tbody {
-                        for (r, row) in table.rows.iter().enumerate() {
-                            tr { key: "{r}",
-                                for (c, cell) in row.iter().enumerate() {
-                                    Cell {
-                                        key: "{c}",
-                                        page_id: page_id.clone(),
-                                        id: id.clone(),
-                                        r,
-                                        c,
-                                        text: cell.clone(),
-                                        shown: table.shown(r, c),
-                                        heading: table.heading(c),
-                                        column: table.column(c),
-                                        typed,
-                                        menu_open: r == 0 && open_menu == Some(c),
-                                    }
-                                }
-                            }
-                        }
-                    }
+                if matches!(open, Some(Popover::TablePaint { .. })) {
+                    PaintMenu { page_id: page_id.clone(), id: id.clone(), table: table.clone() }
+                }
+                if matches!(open, Some(Popover::TableIcon { .. })) {
+                    IconMenu { page_id: page_id.clone(), id: id.clone(), icon: table.icon.clone() }
                 }
             }
-            if table.has_totals() {
-                table { class: "table-totals", "aria-label": "Totals",
-                    tbody {
-                        tr {
-                            for (c, amount, total) in totals {
-                                td { key: "{c}", class: if amount { "num" } else { "" },
-                                    if let Some((word, value)) = total {
-                                        if !word.is_empty() {
-                                            span { class: "total-word", "{word} " }
-                                        }
-                                        "{value}"
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            if has_date {
-                button {
-                    class: "table-today",
-                    title: "Add a row with today's date",
-                    onclick: move |_| state.add_today_row(&today_page, &today_id),
+            if layout != Layout::Table {
+                button { class: "table-today", "data-new-row": "1", onclick: move |_| state.new_card(&p, &b, &[]),
                     Icon { name: "plus", size: 14 }
-                    span { "New row for today" }
-                    span { class: "table-today-day", "{format_day(today, today)}" }
+                    span { "New row" }
+                }
+            } else if has_date {
+                button { class: "table-today", "data-new-row": "1", title: "Add a row with the date of {format_day(today, today)}", onclick: move |_| state.add_today_row(&p, &b),
+                    Icon { name: "plus", size: 14 }
+                    span { "New row" }
+                }
+            } else {
+                button { class: "table-today", "data-new-row": "1", onclick: move |_| state.new_table_row(&p, &b, &[]),
+                    Icon { name: "plus", size: 14 }
+                    span { "New row" }
                 }
             }
         }
     }
 }
 
-/// One cell. In the header: its words, the icon of its kind and the button
-/// of its menu. Under it, by kind: a box to tick, a pace worked out, a tag
-/// for a choice, or words to type.
+/// The line above a table: its icon, its name, and the button of its menu.
 #[component]
-fn Cell(page_id: String, id: String, r: usize, c: usize, text: String, shown: String, heading: String, column: Column, typed: bool, menu_open: bool) -> Element {
+fn TableHead(page_id: String, id: String, table: Table, picked: usize, open: Option<Popover>) -> Element {
     let state = use_context::<AppState>();
-    let kind = column.kind;
-    let (pid, bid) = (page_id.clone(), id.clone());
-    let typing = move |e: FormEvent| state.set_table_cell(&pid, &bid, r, c, &e.value());
-    if r == 0 {
-        let menu_block = id.clone();
-        return rsx! {
-            td { class: if menu_open { "head menu-open" } else { "head" },
-                div { class: "th",
-                    if typed {
-                        span { class: "th-kind", title: "{kind.label()}", Icon { name: kind.icon(), size: 13 } }
-                    }
-                    textarea {
-                        class: "cell",
-                        rows: "1",
-                        spellcheck: false,
-                        "data-r": "0",
-                        "data-c": "{c}",
-                        "aria-label": "Heading of column {c + 1}",
-                        value: "{text}",
-                        oninput: typing,
-                    }
-                    button {
-                        class: if menu_open { "th-menu open" } else { "th-menu" },
-                        title: "Kind and total of this column",
-                        "aria-label": "Kind and total of {heading}",
-                        "aria-haspopup": "menu",
-                        "aria-expanded": if menu_open { "true" } else { "false" },
-                        onclick: move |e| {
-                            e.stop_propagation();
-                            state.set_popover((!menu_open).then(|| Popover::TableColumn { block_id: menu_block.clone(), column: c }));
-                        },
-                        Icon { name: "chevron-down", size: 12 }
-                    }
-                }
-                if menu_open {
-                    ColumnMenu { page_id: page_id.clone(), id: id.clone(), c, column: column.clone() }
+    let locked = table.view.locked;
+    let icon_open = matches!(open, Some(Popover::TableIcon { .. }));
+    let (p_name, b_name) = (page_id.clone(), id.clone());
+    let b_icon = id.clone();
+    rsx! {
+        div { class: "table-head",
+            if !table.icon.is_empty() {
+                button {
+                    class: "table-icon",
+                    title: "Change the icon",
+                    "aria-label": "Icon of the table",
+                    disabled: locked,
+                    onclick: move |e| {
+                        e.stop_propagation();
+                        state.set_popover((!icon_open).then(|| Popover::TableIcon { block_id: b_icon.clone() }));
+                    },
+                    PageIcon { icon: Some(table.icon.clone()), size: 17 }
                 }
             }
-        };
+            input {
+                class: "table-name",
+                r#type: "text",
+                placeholder: "Name",
+                spellcheck: false,
+                readonly: locked,
+                "aria-label": "Name of the table",
+                value: "{table.name}",
+                oninput: move |e: FormEvent| state.set_table_name(&p_name, &b_name, &e.value()),
+            }
+            if let Some(c) = table.board_column().filter(|_| table.view.layout == Layout::Board) {
+                span { class: "table-by", "by {table.heading(c)}" }
+            }
+            span { class: "table-head-gap" }
+            if picked > 0 {
+                span { class: "table-picked", if picked == 1 { "1 row selected" } else { "{picked} rows selected" } }
+            }
+            MenuButton { id: id.clone(), open: matches!(open, Some(Popover::TableMenu { .. })) }
+        }
     }
-    let label = format!("Row {}, {}", r + 1, heading);
-    match kind {
-        Kind::Checkbox => {
-            let on = crate::table::checked(&text);
-            rsx! {
-                td { class: "check-cell",
+}
+
+/// The button that opens the menu of a table.
+#[component]
+fn MenuButton(id: String, open: bool) -> Element {
+    let state = use_context::<AppState>();
+    rsx! {
+        button {
+            class: if open { "table-more open" } else { "table-more" },
+            title: "Table options",
+            "aria-label": "Table options",
+            "aria-haspopup": "menu",
+            "aria-expanded": if open { "true" } else { "false" },
+            onclick: move |e| {
+                e.stop_propagation();
+                state.set_popover((!open).then(|| Popover::TableMenu { block_id: id.clone() }));
+            },
+            Icon { name: "more-horizontal", size: 16 }
+        }
+    }
+}
+
+/// What the view of a table does, each as a small chip that opens to change
+/// it: the filters, the sorts, the grouping.
+#[component]
+fn Chips(page_id: String, id: String, table: Table, open: Option<Popover>) -> Element {
+    let state = use_context::<AppState>();
+    let view = &table.view;
+    // (A board says what it is by in the line of its name.)
+    let grouped = view.group.filter(|_| view.layout == Layout::Table);
+    if view.filter.is_empty() && view.sort.is_empty() && grouped.is_none() {
+        return rsx! {};
+    }
+    let chip_open = match &open {
+        Some(Popover::TableChip { sort, index, .. }) => Some((*sort, *index)),
+        _ => None,
+    };
+    let filters: Vec<(usize, String)> = view.filter.iter().map(|rule| table.rule_words(rule)).enumerate().collect();
+    let sorts: Vec<(usize, bool, String)> = view.sort.iter().enumerate().map(|(i, s)| (i, s.down, table.sort_words(s))).collect();
+    let group_name = grouped.map(|c| table.heading(c));
+    let (p_group, b_group) = (page_id.clone(), id.clone());
+    rsx! {
+        div { class: "table-chips",
+            for (i, words) in filters {
+                span { key: "f{i}", class: "chip-box",
                     button {
-                        class: if on { "cell-check on" } else { "cell-check" },
-                        role: "checkbox",
-                        "aria-checked": if on { "true" } else { "false" },
-                        "aria-label": "{label}",
-                        onclick: move |_| state.toggle_table_check(&page_id, &id, r, c),
-                        if on {
-                            Icon { name: "check", size: 11 }
+                        class: if chip_open == Some((false, i)) { "table-chip open" } else { "table-chip" },
+                        "data-chip": "filter",
+                        onclick: {
+                            let id = id.clone();
+                            move |e: MouseEvent| {
+                                e.stop_propagation();
+                                state.set_popover((chip_open != Some((false, i))).then(|| Popover::TableChip { block_id: id.clone(), sort: false, index: i }));
+                            }
+                        },
+                        Icon { name: "filter", size: 13 }
+                        span { "{words}" }
+                    }
+                    button {
+                        class: "chip-x on-chip",
+                        title: "Remove this filter",
+                        "aria-label": "Remove this filter",
+                        "data-chip-x": "filter",
+                        onclick: {
+                            let (p, b) = (page_id.clone(), id.clone());
+                            move |e: MouseEvent| {
+                                e.stop_propagation();
+                                state.set_popover(None);
+                                state.change_table_view(&p, &b, |v| {
+                                    if i < v.filter.len() {
+                                        v.filter.remove(i);
+                                    }
+                                });
+                            }
+                        },
+                        Icon { name: "close", size: 11 }
+                    }
+                    if chip_open == Some((false, i)) {
+                        ChipMenu { page_id: page_id.clone(), id: id.clone(), table: table.clone(), sort: false, index: i }
+                    }
+                }
+            }
+            for (i, down, words) in sorts {
+                span { key: "s{i}", class: "chip-box",
+                    button {
+                        class: if chip_open == Some((true, i)) { "table-chip open" } else { "table-chip" },
+                        "data-chip": "sort",
+                        onclick: {
+                            let id = id.clone();
+                            move |e: MouseEvent| {
+                                e.stop_propagation();
+                                state.set_popover((chip_open != Some((true, i))).then(|| Popover::TableChip { block_id: id.clone(), sort: true, index: i }));
+                            }
+                        },
+                        Icon { name: if down { "sort-down" } else { "sort-up" }, size: 13 }
+                        span { "{words}" }
+                    }
+                    button {
+                        class: "chip-x on-chip",
+                        title: "Remove this sort",
+                        "aria-label": "Remove this sort",
+                        "data-chip-x": "sort",
+                        onclick: {
+                            let (p, b) = (page_id.clone(), id.clone());
+                            move |e: MouseEvent| {
+                                e.stop_propagation();
+                                state.set_popover(None);
+                                state.change_table_view(&p, &b, |v| {
+                                    if i < v.sort.len() {
+                                        v.sort.remove(i);
+                                    }
+                                });
+                            }
+                        },
+                        Icon { name: "close", size: 11 }
+                    }
+                    if chip_open == Some((true, i)) {
+                        ChipMenu { page_id: page_id.clone(), id: id.clone(), table: table.clone(), sort: true, index: i }
+                    }
+                }
+            }
+            if let Some(name) = group_name {
+                span { class: "chip-box",
+                    span { class: "table-chip", "data-chip": "group",
+                        Icon { name: "group", size: 13 }
+                        span { "By {name}" }
+                        button {
+                            class: "chip-x",
+                            title: "Stop grouping",
+                            "aria-label": "Stop grouping by {name}",
+                            onclick: move |_| state.change_table_view(&p_group, &b_group, |v| v.group = None),
+                            Icon { name: "close", size: 11 }
                         }
                     }
                 }
             }
         }
-        Kind::Pace => rsx! {
-            td { class: "num",
+    }
+}
+
+/// One line of the plain layout: the heading of a group, or a row.
+enum Line {
+    Group(String, usize),
+    Row(usize),
+}
+
+/// The least width of a column with a kind, in points: room for the
+/// longest word of its heading beside its sign (a heading wraps between
+/// its words only), and for what its kind holds.
+fn column_width(table: &Table, c: usize) -> usize {
+    let longest = table.heading(c).split_whitespace().map(|word| word.chars().count()).max().unwrap_or(0);
+    let for_kind = match table.kind(c) {
+        Kind::Text | Kind::Multi | Kind::Link | Kind::Email | Kind::Relation => 150,
+        Kind::Checkbox => 66,
+        Kind::Number | Kind::Formula => 110,
+        Kind::Time | Kind::Pace => 96,
+        _ => 118,
+    };
+    (longest * 9 + 40).max(for_kind).max(if c == 0 { 150 } else { 0 }).min(280)
+}
+
+/// The plain layout: a header, the rows, the totals; at its right the
+/// buttons for a new column and (with no line above the table) for its menu;
+/// at its left the handle of the row under the pointer.
+#[component]
+fn Grid(page_id: String, id: String, table: Table, order: Vec<usize>, picked: Vec<usize>, open_rows: Vec<String>, open: Option<Popover>, named: bool) -> Element {
+    let state = use_context::<AppState>();
+    let cols = table.shown_columns();
+    let typed = table.is_typed();
+    let locked = table.view.locked;
+    let frozen = table.view.frozen;
+    let menu_col = match &open {
+        Some(Popover::TableColumn { column, .. }) => Some(*column),
+        _ => None,
+    };
+    let cell_menu = match &open {
+        Some(Popover::TableCell { row, column, .. }) => Some((*row, *column)),
+        _ => None,
+    };
+    // The menu of the picked rows hangs under the row picked last.
+    let menu_rows: Vec<usize> = match &open {
+        Some(Popover::TableRow { rows, .. }) => rows.clone(),
+        _ => Vec::new(),
+    };
+    let row_menu = menu_rows.last().copied();
+    let kinds_open = matches!(open, Some(Popover::TableKinds { .. }));
+    let menu_open = matches!(open, Some(Popover::TableMenu { .. }));
+    let any_menu = menu_col.is_some() || cell_menu.is_some() || row_menu.is_some();
+    // The rows, under the headings of their groups when the table is grouped.
+    let lines: Vec<Line> = match table.view.group {
+        Some(g) => {
+            let kind = table.kind(g);
+            let heading = table.heading(g);
+            table
+                .groups(&order, g)
+                .into_iter()
+                .filter(|(_, rows)| !rows.is_empty())
+                .flat_map(|(value, rows)| std::iter::once(Line::Group(group_label(kind, &heading, &value), rows.len())).chain(rows.into_iter().map(Line::Row)))
+                .collect()
+        }
+        None => order.iter().copied().map(Line::Row).collect(),
+    };
+    // What a full bar or ring is, once for each column that shows one.
+    let fulls: Vec<f64> = (0..table.columns()).map(|c| if table.column(c).show == Show::Number { 0.0 } else { table.full_at(c) }).collect();
+    let totals: Vec<(usize, bool, Option<(&'static str, String)>)> = cols.iter().map(|&c| (c, table.kind(c).is_amount(), table.total(c))).collect();
+    // Room for every column: with many, the table scrolls sideways in
+    // its box before a column gets too thin to read. A column with a kind
+    // has the width that its kind and the longest word of its heading need.
+    let widths: Vec<usize> = cols.iter().map(|&c| if typed { column_width(&table, c) } else { 96 }).collect();
+    let room: usize = widths.iter().sum();
+    // (The first column, the names of the rows, takes what is left.)
+    let wide = |n: usize| if typed && n > 0 { format!("width: {}px;", widths[n]) } else { String::new() };
+    let sticky = |n: usize| if n < frozen { format!("left: var(--f{n}, 0px);") } else { String::new() };
+    if frozen > 0 {
+        document::eval(&format!("window.__n2 && window.__n2.freezeColumns && window.__n2.freezeColumns({})", serde_json::to_string(&id).unwrap_or_default()));
+    }
+    let b_kinds = id.clone();
+    let block_class = format!("table-block{}{}{}{}", if typed { " typed" } else { "" }, if any_menu { " menu-open" } else { "" }, if locked { " locked" } else { "" }, if table.view.sort.is_empty() { "" } else { " sorted" });
+    rsx! {
+        div { class: "table-frame",
+            div { class: "{block_class}", "data-table": "{id}", "data-page": "{page_id}", "data-frozen": "{frozen}",
+                table { style: "min-width: {room}px;",
+                    tbody {
+                        tr { class: "head-row", "data-r": "0",
+                            for (n, c) in cols.iter().copied().enumerate() {
+                                td {
+                                    key: "{c}",
+                                    class: match (menu_col == Some(c), n < frozen) {
+                                        (true, true) => "head menu-open frozen",
+                                        (true, false) => "head menu-open",
+                                        (false, true) => "head frozen",
+                                        (false, false) => "head",
+                                    },
+                                    style: "{wide(n)}{sticky(n)}",
+                                    HeadCell {
+                                        page_id: page_id.clone(),
+                                        id: id.clone(),
+                                        c,
+                                        text: table.cell(0, c).to_string(),
+                                        heading: table.heading(c),
+                                        column: table.column(c),
+                                        typed,
+                                        locked,
+                                        menu_open: menu_col == Some(c),
+                                    }
+                                    if menu_col == Some(c) {
+                                        ColumnMenu { page_id: page_id.clone(), id: id.clone(), c, table: table.clone() }
+                                    }
+                                }
+                            }
+                        }
+                        for (n, line) in lines.into_iter().enumerate() {
+                            match line {
+                                Line::Group(label, count) => rsx! {
+                                    tr { key: "g-{n}", class: "group-row",
+                                        td { colspan: "{cols.len()}",
+                                            span { class: table.view.group.map_or("tag".to_string(), |g| tag_class(&table.column(g), &label)), "{label}" }
+                                            span { class: "group-count", "{count}" }
+                                        }
+                                    }
+                                },
+                                Line::Row(r) => {
+                                    let info = table.info(r);
+                                    let indent = table.shown_indent(r) as usize;
+                                    let kids = table.has_children(r) && table.view.filter.is_empty();
+                                    let is_open = !info.id.is_empty() && open_rows.contains(&info.id);
+                                    let color = table.color(r).unwrap_or_default().to_string();
+                                    let class = format!("{}{}{}", if picked.contains(&r) { "picked " } else { "" }, if is_open { "open " } else { "" }, if color.is_empty() { "" } else { "painted" });
+                                    let style = if color.is_empty() { String::new() } else { format!("--row-tint: var(--icon-{color}-soft);") };
+                                    let (p_fold, b_fold) = (page_id.clone(), id.clone());
+                                    let (p_open, b_open) = (page_id.clone(), id.clone());
+                                    rsx! {
+                                        tr { key: "{r}", class: "{class}", style: "{style}", "data-r": "{r}",
+                                            for (n, c) in cols.iter().copied().enumerate() {
+                                                td {
+                                                    key: "{c}",
+                                                    class: cell_class(table.kind(c), n == 0, n < frozen),
+                                                    style: "{sticky(n)}",
+                                                    if n == 0 {
+                                                        div { class: "first-cell", style: "padding-left: {indent * 18}px;",
+                                                            if kids {
+                                                                button {
+                                                                    class: if info.closed { "row-fold closed" } else { "row-fold" },
+                                                                    title: if info.closed { "Show the rows inside" } else { "Hide the rows inside" },
+                                                                    "aria-expanded": if info.closed { "false" } else { "true" },
+                                                                    onclick: {
+                                                                        let (p, b) = (p_fold.clone(), b_fold.clone());
+                                                                        move |_| state.table_op(&p, &b, "fold-row", r, 0)
+                                                                    },
+                                                                    Icon { name: "triangle-right", size: 10 }
+                                                                }
+                                                            }
+                                                            CellBody {
+                                                                page_id: page_id.clone(),
+                                                                id: id.clone(),
+                                                                r,
+                                                                c,
+                                                                text: table.cell(r, c).to_string(),
+                                                                shown: if table.kind(c).is_worked_out() { table.shown(r, c) } else { String::new() },
+                                                                heading: table.heading(c),
+                                                                column: table.column(c),
+                                                                hint: String::new(),
+                                                                share: None,
+                                                                menu_open: cell_menu == Some((r, c)),
+                                                            }
+                                                            button {
+                                                                class: "row-open",
+                                                                title: if table.view.full { "Open as a page (⌘ click: in a new tab)" } else { "Open at the side (⌘ click: in a new tab)" },
+                                                                "data-open-row": "{r}",
+                                                                onclick: {
+                                                                    let (p, b) = (p_open.clone(), b_open.clone());
+                                                                    move |e: MouseEvent| {
+                                                                        e.stop_propagation();
+                                                                        state.open_row(&p, &b, r, if e.modifiers().meta() { Open::Tab } else { Open::Auto });
+                                                                    }
+                                                                },
+                                                                Icon { name: "side", size: 13 }
+                                                                span { "Open" }
+                                                            }
+                                                            if row_menu == Some(r) {
+                                                                RowMenu { page_id: page_id.clone(), id: id.clone(), table: table.clone(), rows: menu_rows.clone() }
+                                                            }
+                                                        }
+                                                    } else {
+                                                        CellBody {
+                                                            page_id: page_id.clone(),
+                                                            id: id.clone(),
+                                                            r,
+                                                            c,
+                                                            text: table.cell(r, c).to_string(),
+                                                            shown: if table.kind(c).is_worked_out() { table.shown(r, c) } else { String::new() },
+                                                            heading: table.heading(c),
+                                                            column: table.column(c),
+                                                            hint: table.rolled_up(r, c).unwrap_or_default(),
+                                                            share: share_of(&table, r, c, fulls[c]),
+                                                            menu_open: cell_menu == Some((r, c)),
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if totals.iter().any(|(_, _, total)| total.is_some()) {
+                        tfoot { class: "table-totals", "aria-label": "Totals",
+                            tr {
+                                for (n, (c, amount, total)) in totals.into_iter().enumerate() {
+                                    td {
+                                        key: "{c}",
+                                        class: match (amount, n < frozen) {
+                                            (true, true) => "num frozen",
+                                            (true, false) => "num",
+                                            (false, true) => "frozen",
+                                            (false, false) => "",
+                                        },
+                                        style: "{sticky(n)}",
+                                        if let Some((word, value)) = total {
+                                            if !word.is_empty() {
+                                                span { class: "total-word", "{word} " }
+                                            }
+                                            "{value}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // The handle of the row under the pointer (the page script puts it there).
+            div { class: "row-handle", "data-row-handle": "{id}", "aria-hidden": "true",
+                button { class: "g-btn", "data-row-op": "add-below", title: "Add a row below", tabindex: "-1", Icon { name: "plus", size: 15 } }
+                button { class: "g-btn handle", "data-row-op": "row-menu", draggable: "true", title: "Drag to move · Click for options · ⇧ click for more rows", tabindex: "-1", Icon { name: "grip", size: 15 } }
+            }
+            div { class: if kinds_open || (menu_open && !named) { "table-side open" } else { "table-side" },
+                if !locked {
+                    button {
+                        class: if kinds_open { "table-more open" } else { "table-more" },
+                        title: "Add a column",
+                        "aria-label": "Add a column",
+                        "aria-haspopup": "menu",
+                        "aria-expanded": if kinds_open { "true" } else { "false" },
+                        "data-add-column": "1",
+                        onclick: move |e| {
+                            e.stop_propagation();
+                            state.set_popover((!kinds_open).then(|| Popover::TableKinds { block_id: b_kinds.clone() }));
+                        },
+                        Icon { name: "plus", size: 15 }
+                    }
+                }
+                if !named {
+                    MenuButton { id: id.clone(), open: menu_open }
+                }
+                if kinds_open {
+                    KindsMenu { page_id: page_id.clone(), id: id.clone() }
+                }
+            }
+        }
+    }
+}
+
+/// What the heading of a group says: the value, or that there is none.
+pub fn group_label(kind: Kind, heading: &str, value: &str) -> String {
+    match (kind, value.is_empty()) {
+        (Kind::Checkbox, _) => if checked(value) { "Ticked" } else { "Not ticked" }.to_string(),
+        (_, true) => format!("No {heading}"),
+        (_, false) => value.to_string(),
+    }
+}
+
+fn cell_class(kind: Kind, first: bool, frozen: bool) -> String {
+    let by_kind = match kind {
+        Kind::Checkbox => "check-cell",
+        kind if kind.is_amount() => "num",
+        _ => "",
+    };
+    format!("{by_kind}{}{}", if first { " first" } else { "" }, if frozen { " frozen" } else { "" })
+}
+
+/// How full the bar or ring of a cell is (none for a column that shows
+/// plain numbers, or a cell with no amount).
+fn share_of(table: &Table, r: usize, c: usize, full: f64) -> Option<f64> {
+    if full <= 0.0 {
+        return None;
+    }
+    table.value(r, c).map(|v| (v / full).clamp(0.0, 1.0))
+}
+
+/// The heading of a column: the icon of its kind, its name, and the button
+/// of its menu.
+#[component]
+fn HeadCell(page_id: String, id: String, c: usize, text: String, heading: String, column: Column, typed: bool, locked: bool, menu_open: bool) -> Element {
+    let state = use_context::<AppState>();
+    let kind = column.kind;
+    let menu_block = id.clone();
+    rsx! {
+        div { class: "th",
+            if typed {
+                span { class: "th-kind", title: "{kind.label()}", Icon { name: kind.icon(), size: 13 } }
+            }
+            textarea {
+                class: "cell",
+                rows: "1",
+                spellcheck: false,
+                readonly: locked,
+                "data-r": "0",
+                "data-c": "{c}",
+                "aria-label": "Heading of column {c + 1}",
+                value: "{text}",
+                oninput: move |e: FormEvent| state.set_table_cell(&page_id, &id, 0, c, &e.value()),
+            }
+            button {
+                class: if menu_open { "th-menu open" } else { "th-menu" },
+                title: "Kind, total and order of this column",
+                "aria-label": "Menu of {heading}",
+                "aria-haspopup": "menu",
+                "aria-expanded": if menu_open { "true" } else { "false" },
+                onclick: move |e| {
+                    e.stop_propagation();
+                    state.set_popover((!menu_open).then(|| Popover::TableColumn { block_id: menu_block.clone(), column: c }));
+                },
+                Icon { name: "chevron-down", size: 12 }
+            }
+        }
+    }
+}
+
+/// What a cell holds, by the kind of its column: a box to tick, something
+/// worked out, tags, a link, pictures, or words to type. The same in a table
+/// and in the list of values at the top of a row's page.
+#[component]
+pub fn CellBody(
+    page_id: String,
+    id: String,
+    r: usize,
+    c: usize,
+    text: String,
+    shown: String,
+    heading: String,
+    column: Column,
+    hint: String,
+    #[props(!optional)] share: Option<f64>,
+    menu_open: bool,
+) -> Element {
+    let state = use_context::<AppState>();
+    let kind = column.kind;
+    let label = format!("Row {}, {}", r + 1, heading);
+    // A gain green and a loss red, in a column that asks for it.
+    let amount = if kind.is_worked_out() { crate::table::number(&shown) } else { crate::table::number(&text).or_else(|| crate::table::number(&shown)) };
+    let sign = match amount {
+        Some(n) if column.signed && n > 0.0 => " pos",
+        Some(n) if column.signed && n < 0.0 => " neg",
+        _ => "",
+    };
+    let (p_type, b_type) = (page_id.clone(), id.clone());
+    let (p_left, b_left) = (page_id.clone(), id.clone());
+    let typing = move |e: FormEvent| state.set_table_cell(&p_type, &b_type, r, c, &e.value());
+    let left = move |_: FormEvent| state.settle_table_cell(&p_left, &b_left, r, c);
+    // Words to type, as most kinds are.
+    let field = |class: &'static str| {
+        rsx! {
+            textarea {
+                class: "{class}{sign}",
+                rows: "1",
+                spellcheck: kind == Kind::Text,
+                "data-r": "{r}",
+                "data-c": "{c}",
+                "aria-label": "{label}",
+                placeholder: "{hint}",
+                value: "{text}",
+                oninput: typing.clone(),
+                onchange: left.clone(),
+            }
+        }
+    };
+    let meter = share.map(|share| match column.show {
+        Show::Bar => rsx! {
+            span { class: "meter-bar", role: "img", "aria-label": "{(share * 100.0).round()} percent", span { style: "width: {share * 100.0}%;" } }
+        },
+        _ => rsx! {
+            svg { class: "meter-ring", role: "img", "aria-label": "{(share * 100.0).round()} percent", width: "16", height: "16", view_box: "0 0 16 16",
+                circle { class: "ring-rest", cx: "8", cy: "8", r: "6" }
+                circle { class: "ring-done", cx: "8", cy: "8", r: "6", stroke_dasharray: "{share * 37.7} 37.7", transform: "rotate(-90 8 8)" }
+            }
+        },
+    });
+    match kind {
+        Kind::Checkbox => {
+            let on = checked(&text);
+            rsx! {
+                button {
+                    class: if on { "cell-check on" } else { "cell-check" },
+                    role: "checkbox",
+                    "aria-checked": if on { "true" } else { "false" },
+                    "aria-label": "{label}",
+                    onclick: move |_| state.toggle_table_check(&page_id, &id, r, c),
+                    if on {
+                        Icon { name: "check", size: 11 }
+                    }
+                }
+            }
+        }
+        Kind::Pace | Kind::Formula => rsx! {
+            div { class: "cell-meter",
                 textarea {
-                    class: "cell computed",
+                    class: "cell computed{sign}",
                     rows: "1",
                     readonly: true,
                     tabindex: "-1",
                     "data-r": "{r}",
                     "data-c": "{c}",
-                    "aria-label": "{label}, worked out from the distance and the time",
+                    "aria-label": "{label}, worked out",
                     value: "{shown}",
                 }
+                {meter}
             }
         },
-        _ => rsx! {
-            td { class: if kind.is_amount() { "num" } else { "" },
-                textarea {
-                    class: match (kind, text.trim().is_empty()) {
-                        (Kind::Choice, false) => "cell choice",
-                        _ => "cell",
-                    },
-                    rows: "1",
-                    spellcheck: kind == Kind::Text,
+        Kind::Number if meter.is_some() => rsx! {
+            div { class: "cell-meter",
+                {field("cell")}
+                {meter}
+            }
+        },
+        k if k.has_options() => {
+            let names = column.names_in(&text);
+            let block = id.clone();
+            rsx! {
+                button {
+                    class: if menu_open { "cell pick open" } else { "cell pick" },
+                    value: "{text}",
                     "data-r": "{r}",
                     "data-c": "{c}",
                     "aria-label": "{label}",
-                    value: "{text}",
-                    oninput: typing,
+                    "aria-haspopup": "listbox",
+                    onclick: move |e| {
+                        e.stop_propagation();
+                        state.set_popover((!menu_open).then(|| Popover::TableCell { block_id: block.clone(), row: r, column: c }));
+                    },
+                    for name in names {
+                        Tag { key: "{name}", name: name.clone(), color: column.color_of(&name), dot: k == Kind::Status }
+                    }
+                }
+                if menu_open {
+                    ChoicePicker { page_id: page_id.clone(), id: id.clone(), r, c, column: column.clone(), text: text.clone() }
                 }
             }
-        },
-    }
-}
-
-/// The menu of a column: the kinds it can be, the total at its foot, and
-/// (for numbers) its unit. Rune's own menu: plain rows, the chosen one grey.
-#[component]
-fn ColumnMenu(page_id: String, id: String, c: usize, column: Column) -> Element {
-    let state = use_context::<AppState>();
-    let (p_unit, b_unit) = (page_id.clone(), id.clone());
-    let unit = column.unit.clone().unwrap_or_default();
-    rsx! {
-        div { class: "popover column-menu", role: "menu", onclick: move |e| e.stop_propagation(),
-            div { class: "ai-menu-label", "Type" }
-            for kind in Kind::ALL {
-                button {
-                    key: "{kind.name()}",
-                    class: if column.kind == kind { "ai-menu-row active" } else { "ai-menu-row" },
-                    role: "menuitemradio",
-                    "aria-checked": if column.kind == kind { "true" } else { "false" },
-                    "data-kind": "{kind.name()}",
-                    onclick: {
-                        let (p, b) = (page_id.clone(), id.clone());
-                        move |_| state.set_column_kind(&p, &b, c, kind)
-                    },
-                    span { class: "ai-menu-value", Icon { name: kind.icon(), size: 14 } "{kind.label()}" }
-                    if kind == Kind::Pace {
-                        span { class: "ai-menu-aside", "from distance and time" }
+        }
+        Kind::Link | Kind::Email => {
+            let address = text.trim().to_string();
+            let url = match kind {
+                Kind::Email => format!("mailto:{address}"),
+                _ if address.contains("://") => address.clone(),
+                _ => format!("https://{address}"),
+            };
+            rsx! {
+                div { class: "cell-link",
+                    {field("cell link")}
+                    if !address.is_empty() {
+                        button { class: "cell-go", title: "Open", "aria-label": "Open {address}", tabindex: "-1", onclick: move |_| state.open_url(&url),
+                            Icon { name: "arrow-up-right", size: 12 }
+                        }
                     }
                 }
             }
-            div { class: "ai-menu-sep" }
-            div { class: "ai-menu-label", "Total at the foot" }
-            button {
-                class: if column.total.is_none() { "ai-menu-row active" } else { "ai-menu-row" },
-                role: "menuitemradio",
-                "aria-checked": if column.total.is_none() { "true" } else { "false" },
-                onclick: {
-                    let (p, b) = (page_id.clone(), id.clone());
-                    move |_| state.set_column_total(&p, &b, c, None)
-                },
-                span { class: "ai-menu-value", "None" }
-            }
-            for total in column.kind.totals().iter().copied() {
-                button {
-                    key: "{total.name()}",
-                    class: if column.total == Some(total) { "ai-menu-row active" } else { "ai-menu-row" },
-                    role: "menuitemradio",
-                    "aria-checked": if column.total == Some(total) { "true" } else { "false" },
-                    "data-total": "{total.name()}",
-                    onclick: {
-                        let (p, b) = (page_id.clone(), id.clone());
-                        move |_| state.set_column_total(&p, &b, c, Some(total))
-                    },
-                    span { class: "ai-menu-value", "{total.label()}" }
+        }
+        Kind::File => {
+            let names: Vec<String> = parts(&text).into_iter().filter(|name| crate::files::valid_name(name)).collect();
+            let (p_add, b_add) = (page_id.clone(), id.clone());
+            rsx! {
+                div { class: "cell-pics",
+                    for name in names {
+                        span { key: "{name}", class: "cell-pic",
+                            img { src: "{crate::files::url(&name)}", alt: "Picture", draggable: "false" }
+                            button {
+                                class: "pic-x",
+                                title: "Take this picture out",
+                                "aria-label": "Take this picture out",
+                                onclick: {
+                                    let (p, b) = (page_id.clone(), id.clone());
+                                    move |_| state.toggle_cell_part(&p, &b, r, c, &name)
+                                },
+                                Icon { name: "close", size: 9 }
+                            }
+                        }
+                    }
+                    button { class: "cell-add", title: "Add a picture", "aria-label": "Add a picture to {label}", onclick: move |_| state.pick_cell_picture(&p_add, &b_add, r, c),
+                        Icon { name: "plus", size: 12 }
+                    }
                 }
             }
-            if column.kind == Kind::Number {
-                div { class: "ai-menu-sep" }
-                label { class: "column-unit",
-                    span { "Unit" }
-                    input {
-                        r#type: "text",
-                        placeholder: "km",
-                        "aria-label": "Unit",
-                        value: "{unit}",
-                        onchange: move |e: FormEvent| state.set_column_unit(&p_unit, &b_unit, c, &e.value()),
+        }
+        Kind::Relation => {
+            let from = column.from.clone();
+            let menu_block = id.clone();
+            rsx! {
+                div { class: "cell-pics",
+                    if from.is_empty() {
+                        span { class: "cell-note", "Choose its table in the column's menu" }
+                    }
+                    for (i, name) in parts(&text).into_iter().enumerate() {
+                        button {
+                            key: "{i}",
+                            class: "tag as-link",
+                            title: "Open this row",
+                            onclick: {
+                                let from = from.clone();
+                                move |_| state.open_related(&from, &name)
+                            },
+                            "{name}"
+                        }
+                    }
+                    if !from.is_empty() {
+                        button {
+                            class: if menu_open { "cell-add open" } else { "cell-add" },
+                            title: "Choose rows",
+                            "aria-label": "Choose rows for {label}",
+                            "aria-haspopup": "menu",
+                            onclick: move |e| {
+                                e.stop_propagation();
+                                state.set_popover((!menu_open).then(|| Popover::TableCell { block_id: menu_block.clone(), row: r, column: c }));
+                            },
+                            Icon { name: "plus", size: 12 }
+                        }
+                    }
+                    if menu_open {
+                        CellMenu { page_id: page_id.clone(), id: id.clone(), r, c, from: from.clone(), text: text.clone() }
+                    }
+                }
+            }
+        }
+        _ => field("cell"),
+    }
+}
+
+/// The values of a row, at the top of the row's page: one line for each
+/// column after the first (the first is the page's title), each to change in
+/// place, and a line to add a column. For the page of a template: what a new
+/// row starts with.
+#[component]
+pub fn RowValues(page_id: String) -> Element {
+    let state = use_context::<AppState>();
+    // (Read here so that this is drawn again when a table or a page changes.)
+    let _ = (state.blocks.read().len(), state.pages.read().len());
+    let Some(row) = state.row_ref(&page_id) else { return rsx! {} };
+    let cell_menu = match state.ui.read().popover.clone() {
+        Some(Popover::TableCell { block_id, row: at, column }) if block_id == row.block => Some((at, column)),
+        _ => None,
+    };
+    let table = row.table.clone();
+    let (page, block) = (row.page.clone(), row.block.clone());
+    let locked = table.view.locked;
+    let (p_add, b_add) = (page.clone(), block.clone());
+    match row.row {
+        Some(r) => {
+            let fulls: Vec<f64> = (0..table.columns()).map(|c| if table.column(c).show == Show::Number { 0.0 } else { table.full_at(c) }).collect();
+            rsx! {
+                div { class: "row-values", "data-row-values": "{block}",
+                    for c in 1..table.columns() {
+                        div { key: "{c}", class: "row-value",
+                            span { class: "value-kind", Icon { name: table.kind(c).icon(), size: 15 } }
+                            input {
+                                class: "value-name",
+                                r#type: "text",
+                                placeholder: "Column {c + 1}",
+                                spellcheck: false,
+                                readonly: locked,
+                                "aria-label": "Name of column {c + 1}",
+                                value: "{table.cell(0, c)}",
+                                oninput: {
+                                    let (p, b) = (page.clone(), block.clone());
+                                    move |e: FormEvent| state.set_table_cell(&p, &b, 0, c, &e.value())
+                                },
+                            }
+                            div { class: if table.kind(c) == Kind::Checkbox { "value-cell check-cell" } else { "value-cell" },
+                                CellBody {
+                                    page_id: page.clone(),
+                                    id: block.clone(),
+                                    r,
+                                    c,
+                                    text: table.cell(r, c).to_string(),
+                                    shown: if table.kind(c).is_worked_out() { table.shown(r, c) } else { String::new() },
+                                    heading: table.heading(c),
+                                    column: table.column(c),
+                                    hint: table.rolled_up(r, c).unwrap_or_else(|| "Empty".to_string()),
+                                    share: share_of(&table, r, c, fulls[c]),
+                                    menu_open: cell_menu == Some((r, c)),
+                                }
+                            }
+                        }
+                    }
+                    if !locked {
+                        button { class: "row-value add", "data-add-value": "1", onclick: move |_| state.add_table_column(&p_add, &b_add, Kind::Text),
+                            span { class: "value-kind", Icon { name: "plus", size: 15 } }
+                            span { "Add a column" }
+                        }
+                    }
+                }
+            }
+        }
+        None => {
+            let cells = table.template.as_ref().map(|t| t.cells.clone()).unwrap_or_default();
+            rsx! {
+                div { class: "row-values", "data-row-values": "{block}",
+                    p { class: "values-note", "A new row of this table starts with what you put here, and its page with the lines below." }
+                    for c in (0..table.columns()).filter(|&c| !table.kind(c).is_worked_out()) {
+                        div { key: "{c}", class: "row-value",
+                            span { class: "value-kind", Icon { name: table.kind(c).icon(), size: 15 } }
+                            span { class: "value-name", "{table.heading(c)}" }
+                            div { class: "value-cell",
+                                input {
+                                    class: "cell",
+                                    r#type: "text",
+                                    placeholder: "Empty",
+                                    "aria-label": "{table.heading(c)} of a new row",
+                                    value: "{cells.get(c).cloned().unwrap_or_default()}",
+                                    oninput: {
+                                        let (p, b) = (page.clone(), block.clone());
+                                        move |e: FormEvent| state.set_template_cell(&p, &b, c, &e.value())
+                                    },
+                                }
+                            }
+                        }
                     }
                 }
             }

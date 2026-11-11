@@ -271,11 +271,12 @@ pub fn shown() -> bool {
 /// Start a request with whichever AI the settings pick. Text arrives as
 /// `Delta` events, then `Done` or `Error`. Dropping the receiver stops it.
 pub fn start(prefs: Prefs, messages: Vec<ChatMessage>) -> UnboundedReceiver<AiEvent> {
-    start_with(prefs, messages, None)
+    start_with(prefs, messages, None, Vec::new())
 }
 
-/// As `start`, and with `tools` the AI can use the tools of Rune.
-pub fn start_with(prefs: Prefs, messages: Vec<ChatMessage>, tools: Option<Tools>) -> UnboundedReceiver<AiEvent> {
+/// As `start`. With `tools` the AI can use the tools of Rune, and the
+/// `pictures` go to it with the request.
+pub fn start_with(prefs: Prefs, messages: Vec<ChatMessage>, tools: Option<Tools>, pictures: Vec<Picture>) -> UnboundedReceiver<AiEvent> {
     let (tx, rx) = unbounded();
     if let Some(reply) = CANNED.lock().unwrap_or_else(|e| e.into_inner()).clone() {
         // A test can say what the stand-in AI answers: "[[reply: text]]" in
@@ -289,6 +290,8 @@ pub fn start_with(prefs: Prefs, messages: Vec<ChatMessage>, tools: Option<Tools>
             Some((text, _)) => text.trim().replace("\\n", "\n"),
             None => reply,
         };
+        // (A test can have the stand-in say how many pictures it was given.)
+        let reply = reply.replace("{pictures}", &pictures.len().to_string());
         // A test of a large job: the reply is a plan ("@plan …"). The tools
         // are used only after the yes, and the answer is then "[[then: text]]".
         let is_plan = split_plan(&reply).is_some();
@@ -325,8 +328,11 @@ pub fn start_with(prefs: Prefs, messages: Vec<ChatMessage>, tools: Option<Tools>
         }
         runtime().spawn(async move {
             for (name, args) in steps {
-                tokio::time::sleep(Duration::from_millis(60)).await;
+                let title = args.get("title").and_then(serde_json::Value::as_str).map(str::to_string);
+                let _ = tx.unbounded_send(AiEvent::Working { tool: name.clone(), title, chars: 0 });
+                tokio::time::sleep(Duration::from_millis(220)).await;
                 let _ = tx.unbounded_send(AiEvent::Step(name, args));
+                tokio::time::sleep(Duration::from_millis(160)).await;
             }
             // In a few pieces, as a real reply arrives.
             let chars: Vec<char> = reply.chars().collect();
@@ -339,7 +345,7 @@ pub fn start_with(prefs: Prefs, messages: Vec<ChatMessage>, tools: Option<Tools>
         return rx;
     }
     runtime().spawn(async move {
-        let result = dispatch(&prefs, &messages, tools.as_ref(), &tx).await;
+        let result = dispatch(&prefs, &messages, tools.as_ref(), &pictures, &tx).await;
         let _ = tx.unbounded_send(match result {
             Ok(()) => AiEvent::Done,
             Err(e) => AiEvent::Error(e),
@@ -348,7 +354,7 @@ pub fn start_with(prefs: Prefs, messages: Vec<ChatMessage>, tools: Option<Tools>
     rx
 }
 
-async fn dispatch(prefs: &Prefs, messages: &[ChatMessage], tools: Option<&Tools>, tx: &UnboundedSender<AiEvent>) -> Result<(), String> {
+async fn dispatch(prefs: &Prefs, messages: &[ChatMessage], tools: Option<&Tools>, pictures: &[Picture], tx: &UnboundedSender<AiEvent>) -> Result<(), String> {
     let provider = match prefs.provider {
         Some(p) => p,
         None => {
@@ -356,7 +362,7 @@ async fn dispatch(prefs: &Prefs, messages: &[ChatMessage], tools: Option<&Tools>
             pick_provider(prefs, &found).ok_or_else(|| NO_AI.to_string())?
         }
     };
-    local::run(provider, prefs.model(provider), &prefs.effort, messages, tools, tx).await
+    local::run(provider, prefs.model(provider), &prefs.effort, messages, tools, pictures, tx).await
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -379,6 +385,10 @@ pub enum AiEvent {
     Delta(String),
     /// The AI used one of the tools of Rune: its name, and what it gave it.
     Step(String, serde_json::Value),
+    /// The AI is writing what it gives to a tool (a long page takes a
+    /// while): the tool, the name of the page when it is known, and how
+    /// many characters so far.
+    Working { tool: String, title: Option<String>, chars: usize },
     Done,
     Error(String),
 }
@@ -441,6 +451,36 @@ pub fn approved(request: &str, plan: &str) -> String {
     format!("{}\n\n{PLAN_OK} Do it now with the tools, and do not ask again. The plan:\n{}", request.trim(), plan.trim())
 }
 
+/// A picture that goes to the AI with a request: a screenshot that the
+/// person pasted or dropped into the box.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Picture {
+    pub id: String,
+    /// "image/png", "image/jpeg", …
+    pub media: String,
+    /// The picture, in base64.
+    pub data: String,
+}
+
+/// No more pictures than this go with one request.
+pub const MOST_PICTURES: usize = 4;
+
+impl Picture {
+    /// From a data address ("data:image/jpeg;base64,…"), as the page script
+    /// sends it. Nothing for another kind of file, or one that is too large.
+    pub fn from_data_url(url: &str) -> Option<Picture> {
+        let (head, data) = url.strip_prefix("data:")?.split_once(',')?;
+        let media = head.strip_suffix(";base64")?;
+        let known = matches!(media, "image/png" | "image/jpeg" | "image/gif" | "image/webp");
+        (known && !data.is_empty() && data.len() <= 4_000_000).then(|| Picture { id: crate::model::new_id(), media: media.to_string(), data: data.to_string() })
+    }
+
+    /// As an address that a page can show.
+    pub fn data_url(&self) -> String {
+        format!("data:{};base64,{}", self.media, self.data)
+    }
+}
+
 /// The name of the tools as the AI tool sees them ("mcp__rune__read_page").
 pub const TOOLS_NAME: &str = "rune";
 
@@ -458,6 +498,34 @@ pub fn takes_tools() -> bool {
         Some(found) => pick_provider(&Prefs::load(), &found).is_some(),
         None => false,
     }
+}
+
+/// What the AI is at while it writes what it gives to a tool, in plain
+/// words ("Writing the page “Trading journal” · 2,400 characters").
+pub fn working_label(tool: &str, title: Option<&str>, chars: usize) -> String {
+    let tool = tool.rsplit("__").next().unwrap_or(tool);
+    let named = title.map(str::trim).filter(|t| !t.is_empty());
+    let what = match (tool, named) {
+        ("create_page", Some(t)) => format!("Writing the page “{t}”"),
+        ("create_page", None) => "Writing a new page".to_string(),
+        ("append_to_page" | "replace_page_content" | "update_page", _) => "Writing to a page".to_string(),
+        ("create_event" | "update_event" | "delete_event", _) => "Working in the calendar".to_string(),
+        ("add_table_row" | "update_table_row", _) => "Filling a table".to_string(),
+        ("search_pages" | "list_pages" | "read_page" | "list_events", _) => "Looking at your notes".to_string(),
+        _ => "Working".to_string(),
+    };
+    if chars < 300 {
+        return what;
+    }
+    let count = chars.to_string();
+    let mut grouped = String::new();
+    for (i, c) in count.chars().enumerate() {
+        if i > 0 && (count.len() - i) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(c);
+    }
+    format!("{what} · {grouped} characters")
 }
 
 /// One use of a tool, in plain words ("Made the page “Fitness”"). `title`
@@ -597,8 +665,9 @@ make, change, name, move and remove pages, and add, change and remove calendar e
 Never tell the person to do a step that you can do, and never say that you cannot see or change the notes: look, and do it. \
 You have no other tools: you cannot read files, run commands or browse the web, and you see nothing of this Mac but Rune. \
 Never invent what is in the notes: look it up with the tools. A page that you remove goes to the Trash. \
-Do what the request asks for and no more. When the work is done, say in one or two plain sentences what you did, \
-with the names of the pages and events, and with no ids and no links. \
+Do what the request asks for and no more. Make each page with a tool call of its own, the main page first, \
+so that the person sees each page as it is made. When the work is done, say in one or two plain sentences what you did, \
+with the names of the pages and events, and with no ids and no links; but a reply that is a page (one that starts with @replace) says nothing else. \
 When you reply with content for a page, use Markdown: headings (#, ##, ###), bulleted lists, numbered lists, \
 to-do items (- [ ] task), block quotes, fenced code blocks and plain paragraphs; inside text you may \
 use **bold**, _italic_, `code` and [links](https://example.com). No preamble and no closing remarks.";
@@ -718,7 +787,9 @@ pub fn build_messages(action: &AiAction, page_md: &str, block_text: &str, prompt
              `{PAGE_MARK}` followed by the name of the sub-page, and under it that sub-page in Markdown; \
              do this for each sub-page. Link each sub-page from the page: a line that is only \
              `[[the name]]`, or `[[the name]]` inside a sentence. Do the work yourself: never tell \
-             the person to make or link the pages. \
+             the person to make or link the pages. A reply that starts with `{REVISE_MARK}` is only \
+             the pages: write nothing before the mark and nothing after the last page, not even a line \
+             on what you did, because every line after it goes into that page. \
              If the request is a question, or asks for something new that changes nothing that is \
              there, reply with only the answer or the new content, and no `{REVISE_MARK}` line.",
             prompt.trim()
@@ -801,6 +872,25 @@ pub fn active_label(prefs: &Prefs) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_picture_for_the_ai_comes_from_a_data_address() {
+        let p = Picture::from_data_url("data:image/jpeg;base64,AAAA").unwrap();
+        assert_eq!((p.media.as_str(), p.data.as_str()), ("image/jpeg", "AAAA"));
+        assert_eq!(p.data_url(), "data:image/jpeg;base64,AAAA");
+        assert!(Picture::from_data_url("data:text/html;base64,AAAA").is_none());
+        assert!(Picture::from_data_url("data:image/png;base64,").is_none());
+        assert!(Picture::from_data_url("https://example.com/a.png").is_none());
+    }
+
+    #[test]
+    fn the_words_for_what_the_ai_is_at() {
+        assert_eq!(working_label("mcp__rune__create_page", Some("Trading journal"), 2400), "Writing the page “Trading journal” · 2,400 characters");
+        assert_eq!(working_label("mcp__rune__create_page", None, 0), "Writing a new page");
+        assert_eq!(working_label("mcp__rune__replace_page_content", None, 12345), "Writing to a page · 12,345 characters");
+        assert_eq!(working_label("mcp__rune__list_pages", None, 0), "Looking at your notes");
+        assert_eq!(working_label("mcp__rune__something_new", None, 10), "Working");
+    }
+
     #[test]
     fn a_large_job_is_a_plan_first() {
         let reply = "@plan\nEight weeks from 3 km to 10 km, three runs a week.\n\n- New page: 10K Training\n- 8 week pages, Week 1 to Week 8\n1. 24 runs in the calendar\n";

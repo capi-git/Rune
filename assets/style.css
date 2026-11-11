@@ -5763,20 +5763,6 @@ body[data-dragging] iframe {
 .table-block td:focus-within {
   box-shadow: inset 0 0 0 1.5px var(--accent);
 }
-/* The buttons for the row and column of the cell with the caret. */
-.table-tools {
-  display: flex;
-  gap: 2px;
-  justify-content: flex-end;
-  height: 0;
-  overflow: hidden;
-  opacity: 0;
-  transition: opacity 120ms ease;
-}
-.table-block.editing .table-tools {
-  height: 26px;
-  opacity: 1;
-}
 
 /* ---------- page covers ---------- */
 .page-cover {
@@ -5863,8 +5849,7 @@ body[data-dragging] iframe {
 }
 @media (prefers-reduced-motion: reduce) {
   .cover-swatch,
-  .cover-tools,
-  .table-tools {
+  .cover-tools {
     transition: none;
   }
 }
@@ -6958,10 +6943,76 @@ body.ev-dragging .cal-col,
 body.ev-dragging .cal-event {
   cursor: grabbing;
 }
-/* On the page of a meeting that is over: which page to keep it in. */
-.place-bar .select {
-  max-width: 280px;
+/* On the page of a meeting that is over: where to keep it. Rune's own menu,
+   never the system's: every space, with its pages under it. */
+.place-pick {
+  position: relative;
+  flex: 0 1 280px;
+  min-width: 120px;
+}
+.place-field {
+  height: 28px;
+}
+.place-aside {
+  flex-shrink: 0;
+  max-width: 40%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text-3);
+  font-size: 12px;
+}
+.place-shade {
+  z-index: 59;
+}
+.place-menu {
+  -webkit-backdrop-filter: blur(24px);
+  backdrop-filter: blur(24px);
+  width: 300px;
+  max-width: min(300px, calc(100vw - 16px));
+  max-height: min(60vh, 420px);
+  overflow: hidden auto;
+  scrollbar-width: none;
+}
+.place-menu::-webkit-scrollbar {
+  display: none;
+}
+.place-row-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   min-width: 0;
+}
+.place-row-name .page-ico {
+  flex-shrink: 0;
+}
+.place-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* A line sets each space, and the top of the list, apart. */
+.place-row.place-space:not(:first-child),
+.place-row.place-top + .place-row,
+.pad-place.place-space:not(:first-child),
+.pad-place.place-top + .pad-place {
+  position: relative;
+  margin-top: 13px;
+}
+.place-row.place-space:not(:first-child)::before,
+.place-row.place-top + .place-row::before,
+.pad-place.place-space:not(:first-child)::before,
+.pad-place.place-top + .pad-place::before {
+  content: "";
+  position: absolute;
+  top: -7px;
+  right: 4px;
+  left: 4px;
+  height: 1px;
+  background: var(--sep);
+}
+.pad-place.place-top {
+  color: var(--text-2);
 }
 
 /* ---------- the calendar: a new event that is drawn, a chip that is carried ---------- */
@@ -7608,9 +7659,6 @@ body.ev-dragging .cal-event {
   background: var(--active);
   font-weight: 600;
 }
-.pad-place.quiet {
-  color: var(--text-2);
-}
 .pad-place .page-ico {
   flex-shrink: 0;
 }
@@ -7618,11 +7666,6 @@ body.ev-dragging .cal-event {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-.pad-list-sep {
-  height: 1px;
-  margin: 6px 4px;
-  background: var(--sep);
 }
 .pad-row {
   display: flex;
@@ -7905,6 +7948,54 @@ body.ev-dragging .cal-event {
   background: var(--text);
   border-color: transparent;
   color: var(--bg);
+}
+/* A picture that goes with a request: small, in the bar before the words. */
+.ai-shot {
+  position: relative;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--text) 16%, transparent);
+  background: var(--fill-3);
+}
+.ai-compose .ai-shot:first-child {
+  margin-left: 8px;
+}
+.ask-row .ai-shot {
+  width: 32px;
+  height: 32px;
+}
+.ai-shot img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.ai-shot-x {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  opacity: 0;
+  cursor: default;
+  transition: opacity 120ms ease-out;
+}
+.ai-shot:hover .ai-shot-x,
+.ai-shot-x:focus-visible {
+  opacity: 1;
+}
+/* How long the run goes on: a quiet clock before "Stop". */
+.ai-clock {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-3);
+  margin-right: 4px;
 }
 /* What the AI did with the tools of Rune: the same rows, each with a check. */
 .ai-did .ai-plan-row .ico {

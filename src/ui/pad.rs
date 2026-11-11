@@ -260,30 +260,49 @@ fn Foot(view: View, on: EventHandler<Command>) -> Element {
 #[component]
 fn PlaceList(view: View, on: EventHandler<Command>) -> Element {
     rsx! {
-        div { class: "pad-list", id: "pad-places", role: "listbox", "aria-label": "The page to keep the notes in",
-            button {
-                class: if view.here.is_empty() { "pad-place quiet active" } else { "pad-place quiet" },
-                role: "option",
-                "aria-selected": "{view.here.is_empty()}",
-                "data-home": "",
-                onclick: move |_| on.call(Command::Keep(String::new())),
-                "No page (top of the list)"
-            }
-            div { class: "pad-list-sep" }
+        div { class: "pad-list", id: "pad-places", role: "listbox", "aria-label": "The place to keep the notes in",
             for place in view.places.iter().cloned() {
                 button {
                     key: "{place.id}",
-                    class: if place.id == view.here { "pad-place active" } else { "pad-place" },
+                    class: "pad-place {place_kind(&place)}",
+                    class: if place.id == view.here.id { "active" },
                     role: "option",
-                    "aria-selected": "{place.id == view.here}",
+                    "aria-selected": "{place.id == view.here.id}",
                     "data-home": "{place.id}",
                     style: "padding-left: {10 + place.depth * 20}px",
                     onclick: move |_| on.call(Command::Keep(place.id.clone())),
-                    PageIcon { icon: place.icon.clone(), size: 15 }
+                    PlaceMark { place: place.clone() }
                     span { class: "pad-place-name", "{place.title}" }
                 }
             }
         }
+    }
+}
+
+/// The class of a row of a list of places: a space and the top of the list
+/// have a line that sets them apart from the pages.
+pub(super) fn place_kind(place: &pad::Place) -> &'static str {
+    match (&place.badge, place.id.is_empty()) {
+        (Some(_), _) => "place-space",
+        (None, true) => "place-top",
+        _ => "",
+    }
+}
+
+/// The mark before the name of a place: the badge of a space, the icon of a
+/// page, nothing for the top of the list.
+#[component]
+pub(super) fn PlaceMark(place: pad::Place) -> Element {
+    if let Some((initial, color)) = &place.badge {
+        return rsx! {
+            span { class: "space-badge ed-space-badge", style: "--c: var(--icon-{color}, var(--accent));", "{initial}" }
+        };
+    }
+    if place.id.is_empty() {
+        return rsx! {};
+    }
+    rsx! {
+        PageIcon { icon: place.icon.clone(), size: 15 }
     }
 }
 
@@ -398,10 +417,11 @@ pub fn PadCard(view: View, on: EventHandler<Command>, page: EventHandler<serde_j
                             let open = !listing();
                             listing.set(open);
                         },
-                        if !view.here.is_empty() {
-                            PageIcon { icon: view.here_icon.clone(), size: 15 }
+                        PlaceMark { place: view.here.clone() }
+                        span { class: "pad-pick-name", id: "pad-keep-name", "{view.here.title}" }
+                        if !view.here_space.is_empty() {
+                            span { class: "place-aside", "{view.here_space}" }
                         }
-                        span { class: "pad-pick-name", id: "pad-keep-name", if view.here.is_empty() { "No page (top of the list)" } else { "{view.here_title}" } }
                         span { class: "pad-chev", Icon { name: "chevron-down", size: 13 } }
                     }
                     div { class: "pad-row",

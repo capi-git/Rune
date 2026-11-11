@@ -64,6 +64,7 @@ pub fn TopRow() -> Element {
     };
     let pinned = ui.sidebar_open;
     let tab = ui.tab().clone();
+    let space = ui.space.clone();
     drop(pages);
     drop(ui);
     let single = shown.len() == 1;
@@ -94,7 +95,7 @@ pub fn TopRow() -> Element {
                     Icon { name: "chevron-right", size: 16 }
                 }
             }
-            div { class: if single { "tabs single" } else { "tabs track" },
+            div { class: if single { "tabs single" } else { "tabs track" }, "data-space": "{space}",
                 span { class: "tab-glider" }
                 for t in shown {
                     div {
@@ -215,6 +216,8 @@ pub fn PageBar(route: Route, pane: String, multi: bool) -> Element {
     let state = use_context::<AppState>();
     let ui = state.ui.read();
     let menu_open = ui.popover == Some(Popover::PageMenu { pane: pane.clone() });
+    // The pane that shows rows of tables opened at the side.
+    let is_peek = ui.tab().peek.as_deref() == Some(pane.as_str());
     drop(ui);
 
     let page_id = match &route {
@@ -253,6 +256,13 @@ pub fn PageBar(route: Route, pane: String, multi: bool) -> Element {
     } else {
         None
     };
+    // A row's page sits in its table: the crumb before it is the table.
+    if let Some(row) = page_id.as_deref().and_then(|id| state.row_ref(id)).filter(|row| !row.table.name.is_empty()) {
+        if let Some(at) = crumbs.len().checked_sub(2) {
+            crumbs[at].1 = (!row.table.icon.is_empty()).then(|| row.table.icon.clone());
+            crumbs[at].2 = row.table.name.clone();
+        }
+    }
     let crumb_count = crumbs.len();
 
     rsx! {
@@ -260,6 +270,32 @@ pub fn PageBar(route: Route, pane: String, multi: bool) -> Element {
             class: "pagebar",
             draggable: if multi { "true" } else { "false" },
             "data-pane-drag": "{pane}",
+            if is_peek {
+                button {
+                    class: "icon-btn peek-btn",
+                    title: "Close the side page",
+                    "aria-label": "Close the side page",
+                    "data-peek": "close",
+                    onclick: {
+                        let pane = pane.clone();
+                        move |_| state.close_pane(Some(&pane))
+                    },
+                    Icon { name: "chevrons-right", size: 16 }
+                }
+                if let Some(id) = page_id.clone() {
+                    button {
+                        class: "icon-btn peek-btn",
+                        title: "Open in a tab of its own",
+                        "aria-label": "Open in a tab of its own",
+                        "data-peek": "full",
+                        onclick: {
+                            let pane = pane.clone();
+                            move |_| state.peek_to_tab(&pane, &id)
+                        },
+                        Icon { name: "expand", size: 15 }
+                    }
+                }
+            }
             div { class: "crumbs",
                 if route == Route::Home {
                     span { class: "crumb current", Icon { name: "home", size: 14 } span { "Home" } }

@@ -7,7 +7,7 @@
 //! the prompt on stdin and streams the reply back. Dropping the receiver kills
 //! the process.
 
-use super::{AiEvent, ChatMessage, Provider, Tools};
+use super::{AiEvent, ChatMessage, Picture, Provider, Tools};
 use futures_channel::mpsc::UnboundedSender;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -284,6 +284,33 @@ pub fn tools_config(tools: &Tools) -> String {
     serde_json::json!({ "mcpServers": { super::TOOLS_NAME: { "command": program, "args": ["--mcp"], "env": env } } }).to_string()
 }
 
+/// One message for Claude Code (`--input-format stream-json`): the pictures,
+/// then the words.
+pub fn claude_message(text: &str, pictures: &[Picture]) -> String {
+    let mut content: Vec<Value> = pictures
+        .iter()
+        .map(|p| serde_json::json!({ "type": "image", "source": { "type": "base64", "media_type": p.media, "data": p.data } }))
+        .collect();
+    content.push(serde_json::json!({ "type": "text", "text": text }));
+    serde_json::json!({ "type": "user", "message": { "role": "user", "content": content } }).to_string() + "\n"
+}
+
+/// The pictures as files in `dir` (for Codex): the paths of the ones that
+/// could be written.
+fn picture_files(dir: &Path, pictures: &[Picture]) -> Vec<String> {
+    use base64::Engine;
+    let mut files = Vec::new();
+    for (i, p) in pictures.iter().enumerate() {
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(p.data.trim()) else { continue };
+        let kind = p.media.rsplit('/').next().unwrap_or("png").replace("jpeg", "jpg");
+        let path = dir.join(format!("picture-{}.{kind}", i + 1));
+        if std::fs::write(&path, bytes).is_ok() {
+            files.push(path.display().to_string());
+        }
+    }
+    files
+}
+
 /// Codex runs in a read-only sandbox in an empty folder, prints JSON events
 /// and keeps no session files. The prompt is read from stdin ("-").
 pub fn codex_args(dir: &Path, model: &str, effort: &str, optional: bool, tools: Option<&Tools>) -> Vec<String> {
@@ -353,6 +380,9 @@ pub enum Line {
     Delta(String),
     /// The AI used tools: the name of each, and what it gave it.
     Steps(Vec<(String, Value)>),
+    /// The AI is writing what it gives to a tool: the tool, the name of the
+    /// page when it is known, and how many characters so far.
+    Working(String, Option<String>, usize),
     /// The tool reported a failure.
     Fail(String),
     /// The tool finished its turn successfully.
@@ -363,8 +393,32 @@ pub enum Line {
 /// Claude Code `--output-format stream-json` lines.
 #[derive(Default)]
 pub struct ClaudeParser {
+    /// The tool call that is being written now, what it is given so far,
+    /// and at what length the app was last told.
+    tool: Option<String>,
+    tool_input: String,
+    tool_said: usize,
     streamed_current: bool,
     emitted: bool,
+}
+
+/// The "title" in the start of a JSON text that is not whole yet.
+fn title_in(partial: &str) -> Option<String> {
+    let rest = partial.split_once("\"title\"")?.1.trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?;
+    let mut out = String::new();
+    let mut chars = rest.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return Some(out),
+            '\\' => match chars.next()? {
+                'n' | 't' => out.push(' '),
+                'u' => return None,
+                other => out.push(other),
+            },
+            c => out.push(c),
+        }
+    }
+    None
 }
 
 impl ClaudeParser {
@@ -376,6 +430,31 @@ impl ClaudeParser {
                 match event["type"].as_str() {
                     Some("message_start") => {
                         self.streamed_current = false;
+                        Line::Ignore
+                    }
+                    // A tool call starts: its name is known, what it is
+                    // given comes in pieces (a long page takes a while).
+                    Some("content_block_start") if event["content_block"]["type"] == "tool_use" => {
+                        self.tool = event["content_block"]["name"].as_str().map(str::to_string);
+                        self.tool_input.clear();
+                        self.tool_said = 0;
+                        match &self.tool {
+                            Some(name) => Line::Working(name.clone(), None, 0),
+                            None => Line::Ignore,
+                        }
+                    }
+                    Some("content_block_delta") if event["delta"]["type"] == "input_json_delta" => {
+                        let Some(name) = self.tool.clone() else { return Line::Ignore };
+                        self.tool_input.push_str(event["delta"]["partial_json"].as_str().unwrap_or(""));
+                        // Not at every piece: every few hundred characters.
+                        if self.tool_input.len() < self.tool_said + 300 {
+                            return Line::Ignore;
+                        }
+                        self.tool_said = self.tool_input.len();
+                        Line::Working(name, title_in(&self.tool_input), self.tool_input.len())
+                    }
+                    Some("content_block_stop") => {
+                        self.tool = None;
                         Line::Ignore
                     }
                     Some("content_block_delta") if event["delta"]["type"] == "text_delta" => {
@@ -646,7 +725,7 @@ enum Attempt {
 }
 
 /// Run one request through an installed tool, streaming its reply into `tx`.
-pub async fn run(provider: Provider, model: &str, effort: &str, messages: &[ChatMessage], tools: Option<&Tools>, tx: &UnboundedSender<AiEvent>) -> Result<(), String> {
+pub async fn run(provider: Provider, model: &str, effort: &str, messages: &[ChatMessage], tools: Option<&Tools>, pictures: &[Picture], tx: &UnboundedSender<AiEvent>) -> Result<(), String> {
     let path = {
         let (otx, orx) = futures_channel::oneshot::channel();
         super::runtime().spawn_blocking(move || {
@@ -666,7 +745,7 @@ pub async fn run(provider: Provider, model: &str, effort: &str, messages: &[Chat
 
     let mut optional = true;
     loop {
-        match attempt(provider, &path, model, effort, &system, &user, optional, tools, tx).await {
+        match attempt(provider, &path, model, effort, &system, &user, optional, tools, pictures, tx).await {
             Attempt::Done | Attempt::Stopped => return Ok(()),
             Attempt::Failed(e) => return Err(e),
             Attempt::UnknownFlag(flag) => {
@@ -696,15 +775,44 @@ async fn attempt(
     user: &str,
     optional: bool,
     tools: Option<&Tools>,
+    pictures: &[Picture],
     tx: &UnboundedSender<AiEvent>,
 ) -> Attempt {
     let dir = match TempDir::new() {
         Ok(d) => d,
         Err(e) => return Attempt::Failed(e),
     };
+    // With pictures, the request says so.
+    let said;
+    let user = if pictures.is_empty() {
+        user
+    } else {
+        said = format!("{user}\n\n(With this request the person gave {} picture{}: look at {}.)", pictures.len(), if pictures.len() == 1 { "" } else { "s" }, if pictures.len() == 1 { "it" } else { "them" });
+        said.as_str()
+    };
     let (args, input, mut parser) = match provider {
-        Provider::ClaudeCode => (claude_args(system, model, effort, optional, tools), user.to_string(), Parser::Claude(ClaudeParser::default())),
-        _ => (codex_args(&dir.0, model, effort, optional, tools), codex_prompt(system, user, tools.is_some()), Parser::Codex(CodexParser::default())),
+        Provider::ClaudeCode => {
+            let mut args = claude_args(system, model, effort, optional, tools);
+            // Claude Code takes pictures in a message, not in plain words.
+            let input = if pictures.is_empty() {
+                user.to_string()
+            } else {
+                args.extend(["--input-format".into(), "stream-json".into()]);
+                claude_message(user, pictures)
+            };
+            (args, input, Parser::Claude(ClaudeParser::default()))
+        }
+        _ => {
+            let mut args = codex_args(&dir.0, model, effort, optional, tools);
+            // Codex takes pictures as files.
+            let files = picture_files(&dir.0, pictures);
+            let at = args.len().saturating_sub(1);
+            for file in files.into_iter().rev() {
+                args.insert(at, file);
+                args.insert(at, "-i".into());
+            }
+            (args, codex_prompt(system, user, tools.is_some()), Parser::Codex(CodexParser::default()))
+        }
     };
 
     let mut cmd = tokio::process::Command::new(path);
@@ -766,6 +874,12 @@ async fn attempt(
                             emitted = true;
                             if tx.unbounded_send(AiEvent::Delta(text)).is_err() {
                                 return Attempt::Stopped; // the child is killed when dropped
+                            }
+                        }
+                        Line::Working(tool, title, chars) => {
+                            emitted = true;
+                            if tx.unbounded_send(AiEvent::Working { tool, title, chars }).is_err() {
+                                return Attempt::Stopped;
                             }
                         }
                         Line::Steps(steps) => {
@@ -967,6 +1081,17 @@ mod tests {
         let mut parser = ClaudeParser::default();
         let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"mcp__rune__create_page","input":{"title":"Fitness"}}]}}"#;
         assert!(matches!(parser.line(line), Line::Steps(steps) if steps.len() == 1 && steps[0].0 == "mcp__rune__create_page" && steps[0].1["title"] == "Fitness"));
+        // While it writes what it gives to a tool: the tool at once, then how far it is, with the name of the page.
+        let mut parser = ClaudeParser::default();
+        let start = r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"t1","name":"mcp__rune__create_page","input":{}}}}"#;
+        assert!(matches!(parser.line(start), Line::Working(tool, None, 0) if tool == "mcp__rune__create_page"));
+        let piece = |text: &str| serde_json::json!({"type": "stream_event", "event": {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": text}}}).to_string();
+        assert!(matches!(parser.line(&piece("{\"title\": \"Trading jour")), Line::Ignore));
+        let long = format!("nal\", \"markdown\": \"{}", "x".repeat(400));
+        assert!(matches!(parser.line(&piece(&long)), Line::Working(tool, Some(title), chars) if tool == "mcp__rune__create_page" && title == "Trading journal" && chars > 400));
+        assert!(matches!(parser.line(&piece("y")), Line::Ignore));
+        assert_eq!(title_in("{\"title\":\"A \\\"good\\\" day\",\"mark"), Some("A \"good\" day".to_string()));
+        assert_eq!(title_in("{\"title\":\"Not whole"), None);
         assert!(b.windows(2).any(|w| w[0] == "--effort" && w[1] == "high"));
         assert!(!b.contains(&"--safe-mode".to_string()) && b.contains(&"--tools".to_string()));
         assert!(b.windows(2).any(|w| w[0] == "--model" && w[1] == "sonnet"));
@@ -983,6 +1108,19 @@ mod tests {
         assert!(matches!(cp.line(started), Line::Steps(steps) if steps[0].0 == "mcp__rune__create_page" && steps[0].1["title"] == "Fitness"));
         assert!(matches!(cp.line(&started.replace("item.started", "item.completed")), Line::Ignore));
         assert!(codex_prompt("Be brief.", "Hello", true).contains("tools named rune") && codex_prompt("Be brief.", "Hello", false).contains("Answer directly"));
+        // A picture goes to Claude Code in a message: the picture first, then the words.
+        let shot = Picture { id: "p1".into(), media: "image/png".into(), data: "AAAA".into() };
+        let message: Value = serde_json::from_str(&claude_message("What is this?", &[shot.clone()])).unwrap();
+        assert_eq!(message["type"], "user");
+        assert_eq!(message["message"]["content"][0]["source"]["media_type"], "image/png");
+        assert_eq!(message["message"]["content"][0]["source"]["data"], "AAAA");
+        assert_eq!(message["message"]["content"][1]["text"], "What is this?");
+        // …and to Codex as a file.
+        let dir = std::env::temp_dir().join(format!("n2-pictures-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let files = picture_files(&dir, &[shot]);
+        assert!(files.len() == 1 && files[0].ends_with("picture-1.png") && std::fs::read(&files[0]).unwrap() == vec![0, 0, 0]);
+        let _ = std::fs::remove_dir_all(&dir);
         assert!(!c.iter().any(|x| x.contains("reasoning_effort")));
         let d = codex_args(Path::new("/tmp/x"), "", "max", true, None);
         assert!(d.windows(2).any(|w| w[0] == "-c" && w[1] == "model_reasoning_effort=\"high\"") && d.last().map(String::as_str) == Some("-"));
@@ -1087,7 +1225,7 @@ mod tests {
         let messages = build_agent_messages(&here, "Workout Plan", "# Workout Plan\n\nThree days a week.", asked, "2026-11-10 17:30, Tuesday");
         let prefs = super::super::Prefs { provider: Some(Provider::ClaudeCode), ..Default::default() };
         let started = Instant::now();
-        let rx = start_with(prefs, messages, Some(Tools { journal: journal.clone() }));
+        let rx = start_with(prefs, messages, Some(Tools { journal: journal.clone() }), Vec::new());
         let events: Vec<AiEvent> = super::super::runtime().block_on(futures_util::StreamExt::collect(rx));
         let steps: Vec<String> = events
             .iter()
@@ -1122,6 +1260,162 @@ mod tests {
         assert!(pages[&fitness].trashed && pages.values().filter(|p| p.title.starts_with("Run log")).all(|p| p.parent_id.is_none()));
         assert!(store.load_events().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The real tool asked for a tracker: the table it makes must be a
+    /// database (kinds, coloured options, money, totals, a name), not a
+    /// plain grid. `N2_ASK` changes the request; `N2_KEEP` names a folder
+    /// to keep the notes in (to look at them in the app).
+    #[test]
+    #[ignore = "calls the installed AI tools"]
+    fn live_agent_table() {
+        use super::super::{build_agent_messages, start_with, Tools};
+        let dir = std::env::var_os("N2_KEEP").map(std::path::PathBuf::from).unwrap_or_else(|| std::env::temp_dir().join(format!("n2-live-table-{}", std::process::id())));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("ws.db");
+        let journal = dir.join("run.jsonl");
+        let program = std::env::current_dir().unwrap().join("target/debug/notion2");
+        assert!(program.exists(), "build the app first: {}", program.display());
+        std::env::set_var("NOTION2_DB", &db);
+        std::env::set_var("NOTION2_TOOLS_PROGRAM", &program);
+        let store = crate::store::Store::open(db.clone()).unwrap();
+        let mut server = crate::mcp::Server::new(store);
+        let id_of = |v: serde_json::Value| serde_json::from_str::<Value>(v["content"][0]["text"].as_str().unwrap()).unwrap()["id"].as_str().unwrap().to_string();
+        let here = id_of(server.tool("create_page", &serde_json::json!({ "title": "Home", "markdown": "My notes." })));
+        drop(server);
+
+        let asked = std::env::var("N2_ASK").unwrap_or_else(|_| "Make me a trading journal to log my trades.".to_string());
+        let messages = build_agent_messages(&here, "Home", "# Home\n\nMy notes.", &asked, "2026-11-11 09:30, Wednesday");
+        let prefs = super::super::Prefs { provider: Some(Provider::ClaudeCode), ..Default::default() };
+        let started = Instant::now();
+        let rx = start_with(prefs, messages, Some(Tools { journal }), Vec::new());
+        let events: Vec<AiEvent> = super::super::runtime().block_on(futures_util::StreamExt::collect(rx));
+        let text: String = events.iter().filter_map(|e| if let AiEvent::Delta(t) = e { Some(t.as_str()) } else { None }).collect();
+        assert_eq!(events.last(), Some(&AiEvent::Done), "{events:?}");
+        let store = crate::store::Store::open(db.clone()).unwrap();
+        let (pages, blocks) = store.load().unwrap();
+        let mut tables = Vec::new();
+        for page in pages.values().filter(|p| !p.trashed && p.id != here) {
+            let md = crate::markdown::from_blocks(&page.title, blocks.get(&page.id).map(Vec::as_slice).unwrap_or(&[]), |id| id.to_string());
+            eprintln!("===== {} =====\n{md}\n", page.title);
+            for block in blocks.get(&page.id).into_iter().flatten().filter(|b| b.kind == crate::model::BlockKind::Table) {
+                tables.push(crate::table::Table::parse(&block.data));
+            }
+        }
+        eprintln!("in {:.1}s\nanswer: {text}", started.elapsed().as_secs_f32());
+        // The pages a reply asks for are made by the app (see `split_pages`).
+        if let Some(body) = super::super::split_revision(&text) {
+            let (main, made) = super::super::split_pages(&body);
+            for md in std::iter::once(main).chain(made.into_iter().map(|(_, md)| md)) {
+                for block in crate::markdown::to_blocks(&md).into_iter().filter(|b| b.kind == crate::model::BlockKind::Table) {
+                    tables.push(crate::table::Table::parse(&block.data));
+                }
+            }
+        }
+        if let Some(keep) = std::env::var_os("N2_KEEP") {
+            let _ = std::fs::write(std::path::Path::new(&keep).join("answer.md"), &text);
+        }
+        let table = tables.first().expect("a table");
+        eprintln!("view: {:?}\nicon: {}", table.view, table.icon);
+        assert!(!table.name.is_empty(), "the table has a name");
+        assert!((0..table.columns()).any(|c| !table.column(c).options.is_empty() && table.column(c).options.iter().any(|o| o.color != crate::table::Color::Default)), "a choice column with colours");
+        assert!((0..table.columns()).any(|c| table.kind(c) == crate::table::Kind::Date), "a date column");
+        assert!(std::env::var_os("N2_ASK").is_some() || (0..table.columns()).any(|c| !table.column(c).format.is_empty()), "a money column");
+        assert!((0..table.columns()).any(|c| table.column(c).total.is_some()), "a total at the foot");
+    }
+
+    /// The real tool on one request, with the time of each thing it sends:
+    /// to see where a slow run spends its time. The request, the model and
+    /// the strength come from N2_LIVE_REQUEST, N2_LIVE_MODEL, N2_LIVE_EFFORT.
+    /// Build the app first (`cargo build`).
+    #[test]
+    #[ignore = "calls the installed AI tools"]
+    fn live_agent_timeline() {
+        use super::super::{build_agent_messages, start_with, Tools};
+        let dir = std::env::temp_dir().join(format!("n2-live-time-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("ws.db");
+        let journal = dir.join("run.jsonl");
+        let program = std::env::current_dir().unwrap().join("target/debug/notion2");
+        assert!(program.exists(), "build the app first: {}", program.display());
+        std::env::set_var("NOTION2_DB", &db);
+        std::env::set_var("NOTION2_TOOLS_PROGRAM", &program);
+        let store = crate::store::Store::open(db.clone()).unwrap();
+        let mut server = crate::mcp::Server::new(store);
+        let made = server.tool("create_page", &serde_json::json!({ "title": "" }));
+        let here = serde_json::from_str::<Value>(made["content"][0]["text"].as_str().unwrap()).unwrap()["id"].as_str().unwrap().to_string();
+        drop(server);
+        let asked = std::env::var("N2_LIVE_REQUEST").unwrap_or_else(|_| "create me a trading journal".into());
+        let model = std::env::var("N2_LIVE_MODEL").unwrap_or_default();
+        let effort = std::env::var("N2_LIVE_EFFORT").unwrap_or_default();
+        let messages = build_agent_messages(&here, "", "", &asked, "2026-11-10 19:50, Tuesday");
+        let prefs = super::super::Prefs { provider: Some(Provider::ClaudeCode), claude_model: model.clone(), effort: effort.clone(), ..Default::default() };
+        let started = Instant::now();
+        let mut rx = start_with(prefs, messages, Some(Tools { journal: journal.clone() }), Vec::new());
+        let mut text = String::new();
+        let mut first_text = None;
+        let mut steps = 0;
+        super::super::runtime().block_on(async {
+            while let Some(event) = futures_util::StreamExt::next(&mut rx).await {
+                let at = started.elapsed().as_secs_f32();
+                match event {
+                    AiEvent::Delta(t) => {
+                        if first_text.is_none() {
+                            first_text = Some(at);
+                            eprintln!("{at:6.1}s  first words");
+                        }
+                        text.push_str(&t);
+                    }
+                    AiEvent::Step(name, input) => {
+                        steps += 1;
+                        eprintln!("{at:6.1}s  step {steps}: {}", super::super::step_label(&name, &input, |_| None));
+                    }
+                    AiEvent::Working { tool, title, chars } => eprintln!("{at:6.1}s    {}", super::super::working_label(&tool, title.as_deref(), chars)),
+                    AiEvent::Done => eprintln!("{at:6.1}s  done"),
+                    AiEvent::Error(e) => eprintln!("{at:6.1}s  ERROR {e}"),
+                }
+            }
+        });
+        let changes = crate::mcp::read_journal(&journal);
+        eprintln!("model {model:?}, strength {effort:?}: {:.1}s in all, {steps} steps\nrecord: {}\nanswer:\n{}", started.elapsed().as_secs_f32(), crate::mcp::count_line(&changes), text.chars().take(1200).collect::<String>());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The real tool with a picture: it must say what is in it. The picture
+    /// is the file named by N2_LIVE_PICTURE (a PNG), the words that must be
+    /// in the answer are in N2_LIVE_EXPECT.
+    #[test]
+    #[ignore = "calls the installed AI tools"]
+    fn live_picture() {
+        use base64::Engine;
+        let file = std::env::var("N2_LIVE_PICTURE").expect("N2_LIVE_PICTURE names a PNG file");
+        let expect = std::env::var("N2_LIVE_EXPECT").unwrap_or_default();
+        let data = base64::engine::general_purpose::STANDARD.encode(std::fs::read(&file).unwrap());
+        let picture = Picture { id: "p1".into(), media: "image/png".into(), data };
+        let messages = super::super::build_messages(&super::super::AiAction::Ask, "# Notes", "", "What words are in the picture? Write them out.");
+        for provider in [Provider::ClaudeCode, Provider::Codex] {
+            if locate(provider).is_none() {
+                continue;
+            }
+            let prefs = super::super::Prefs { provider: Some(provider), ..Default::default() };
+            let started = Instant::now();
+            let rx = super::super::start_with(prefs, messages.clone(), None, vec![picture.clone()]);
+            let events: Vec<AiEvent> = super::super::runtime().block_on(futures_util::StreamExt::collect(rx));
+            let text: String = events
+                .iter()
+                .filter_map(|e| match e {
+                    AiEvent::Delta(t) => Some(t.as_str()),
+                    _ => None,
+                })
+                .collect();
+            eprintln!("{provider:?} in {:.1}s: {text} | last: {:?}", started.elapsed().as_secs_f32(), events.last());
+            if provider == Provider::ClaudeCode {
+                assert_eq!(events.last(), Some(&AiEvent::Done));
+                assert!(text.to_lowercase().contains(&expect.to_lowercase()), "{text}");
+            }
+        }
     }
 
     #[test]

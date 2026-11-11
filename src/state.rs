@@ -72,11 +72,34 @@ impl Pane {
     }
     /// Forget pages that are gone for good; an empty history goes Home.
     fn forget(&mut self, ids: &[Id]) {
-        self.history.retain(|r| !matches!(r, Route::Page(p) if ids.contains(p)));
+        let gone = |r: &Route| matches!(r, Route::Page(p) if ids.contains(p));
+        let before = self.history.iter().take(self.cursor).filter(|r| !gone(r)).count();
+        self.history.retain(|r| !gone(r));
         if self.history.is_empty() {
             self.history.push(Route::Home);
         }
-        self.cursor = self.cursor.min(self.history.len() - 1);
+        self.cursor = before.min(self.history.len() - 1);
+    }
+    /// Keep in the history only what belongs with the page on show: Back
+    /// then stays in its space. `fallback` is the space of a pane on Home or
+    /// the calendar.
+    fn keep_one_space(&mut self, pages: &HashMap<Id, Page>, fallback: &str) {
+        let space_of = |r: &Route| match r {
+            Route::Page(id) => pages.get(id).map(|p| p.space_id.clone()),
+            _ => None,
+        };
+        let home = space_of(self.route()).unwrap_or_else(|| fallback.to_string());
+        let at = self.cursor.min(self.history.len() - 1);
+        let (mut i, mut cursor) = (0, 0);
+        self.history.retain(|r| {
+            let keep = i == at || space_of(r).is_none_or(|s| s == home);
+            if keep && i < at {
+                cursor += 1;
+            }
+            i += 1;
+            keep
+        });
+        self.cursor = cursor;
     }
 }
 
@@ -94,6 +117,10 @@ pub struct Tab {
     /// share in the layout, so it opens at the size it had.
     #[serde(default)]
     pub folded: Vec<Id>,
+    /// The pane that shows the rows of tables opened at the side: the next
+    /// row opened that way takes its place there. Not kept from run to run.
+    #[serde(skip)]
+    pub peek: Option<Id>,
 }
 
 impl Tab {
@@ -101,7 +128,7 @@ impl Tab {
         Tab::with_pane(Pane::new(route))
     }
     pub fn with_pane(pane: Pane) -> Tab {
-        Tab { id: new_id(), layout: Layout::pane(&pane.id), focus: pane.id.clone(), panes: vec![pane], folded: Vec::new() }
+        Tab { id: new_id(), layout: Layout::pane(&pane.id), focus: pane.id.clone(), panes: vec![pane], folded: Vec::new(), peek: None }
     }
     /// The panes shown as rails.
     pub fn rails(&self) -> Vec<Id> {
@@ -236,7 +263,7 @@ impl From<SavedTab> for Tab {
         let layout = s.layout.filter(|l| l.fits(&ids)).unwrap_or_else(|| Layout::row(&ids));
         let focus = s.focus.filter(|f| ids.contains(f)).unwrap_or_else(|| ids[0].clone());
         let folded = s.folded.into_iter().filter(|f| ids.contains(f)).collect();
-        Tab { id: s.id, panes, layout, focus, folded }
+        Tab { id: s.id, panes, layout, focus, folded, peek: None }
     }
 }
 
@@ -293,6 +320,20 @@ pub enum Popover {
     Due { block_id: Id },
     /// The menu of a table's column: its kind, its total, its unit.
     TableColumn { block_id: Id, column: usize },
+    /// The menu of a table: its view, its columns, its filters.
+    TableMenu { block_id: Id },
+    /// The kinds a new column of a table can be.
+    TableKinds { block_id: Id },
+    /// The icons a table can have.
+    TableIcon { block_id: Id },
+    /// The menu of some rows of a table. These rows are picked while it is open.
+    TableRow { block_id: Id, rows: Vec<usize> },
+    /// What a filter of a table asks (or, with `sort`, a sort), open to change.
+    TableChip { block_id: Id, sort: bool, index: usize },
+    /// The colour rules of a table.
+    TablePaint { block_id: Id },
+    /// The rows of another table that a relation cell can name.
+    TableCell { block_id: Id, row: usize, column: usize },
     /// What a chart draws.
     Chart { block_id: Id },
 }
@@ -329,11 +370,64 @@ pub enum VoiceFor {
     Edit { page: Id, block: Id, start: usize, end: usize },
 }
 
+/// The tabs of one space, and which of them is in front.
+pub type TabSet = (Vec<Tab>, usize);
+
+/// The space of the page a tab shows. Home, the calendar and the graph are
+/// in no space of their own.
+fn tab_space(tab: &Tab, pages: &HashMap<Id, Page>) -> Option<Id> {
+    match tab.route() {
+        Route::Page(id) => pages.get(id).map(|p| p.space_id.clone()).filter(|s| !s.is_empty()),
+        _ => None,
+    }
+}
+
+/// Take pages that are gone out of saved tabs.
+fn forget_gone(tabs: &mut [Tab], pages: &HashMap<Id, Page>) {
+    for pane in tabs.iter_mut().flat_map(|t| t.panes.iter_mut()) {
+        let gone: Vec<Id> = pane
+            .history
+            .iter()
+            .filter_map(|r| match r {
+                Route::Page(id) if !pages.get(id).is_some_and(|p| !p.trashed) => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        pane.forget(&gone);
+    }
+}
+
+/// Tabs saved when all spaces shared one row: each goes to the space of its
+/// page. Gives the tabs of `space`, the one of them in front, and the others.
+fn sort_tabs_by_space(tabs: Vec<Tab>, active: usize, space: &str, pages: &HashMap<Id, Page>) -> (Vec<Tab>, usize, HashMap<Id, TabSet>) {
+    let front = tabs.get(active).map(|t| t.id.clone());
+    let mut here = Vec::new();
+    let mut others: HashMap<Id, TabSet> = HashMap::new();
+    for mut tab in tabs {
+        for pane in tab.panes.iter_mut() {
+            pane.keep_one_space(pages, space);
+        }
+        match tab_space(&tab, pages).filter(|s| s != space) {
+            Some(other) => {
+                let set = others.entry(other).or_default();
+                set.0.push(tab);
+                set.1 = set.0.len() - 1;
+            }
+            None => here.push(tab),
+        }
+    }
+    let active = front.and_then(|id| here.iter().position(|t: &Tab| t.id == id)).unwrap_or(0);
+    (here, active, others)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ui {
     pub tabs: Vec<Tab>,
     pub active: usize,
     pub closed: Vec<Tab>,
+    /// The tabs of the spaces that are not in front (`tabs` and `active` are
+    /// those of the space in front).
+    pub parked: HashMap<Id, TabSet>,
     pub sidebar_open: bool,
     /// Pinned sidebar width in pixels.
     pub sidebar_width: f64,
@@ -358,6 +452,46 @@ impl Ui {
     fn tab_mut(&mut self) -> &mut Tab {
         let i = self.active.min(self.tabs.len() - 1);
         &mut self.tabs[i]
+    }
+    /// Every open tab, also those of the spaces not in front.
+    fn every_tab_mut(&mut self) -> impl Iterator<Item = &mut Tab> {
+        self.tabs.iter_mut().chain(self.parked.values_mut().flat_map(|set| set.0.iter_mut()))
+    }
+    /// Put the tabs in front away and bring up those of another space, as
+    /// they were left. A space with no tabs gets one showing `first`; the
+    /// answer says whether it did.
+    fn show_tabs_of(&mut self, space: &str, pages: &HashMap<Id, Page>, first: Route) -> bool {
+        let left = std::mem::replace(&mut self.space, space.to_string());
+        let set = (std::mem::take(&mut self.tabs), self.active);
+        self.parked.insert(left, set);
+        let (tabs, active) = self.parked.remove(space).unwrap_or_default();
+        let front = tabs.get(active).map(|t| t.id.clone());
+        // A page moved to another space while its tab was put away: the tab
+        // went with it.
+        let mut kept = Vec::new();
+        for tab in tabs {
+            match tab_space(&tab, pages).filter(|s| !tab.is_split() && s != space) {
+                Some(other) => self.parked.entry(other).or_default().0.push(tab),
+                None => kept.push(tab),
+            }
+        }
+        let fresh = kept.is_empty();
+        if fresh {
+            kept.push(Tab::new(first));
+        }
+        self.active = front.and_then(|id| kept.iter().position(|t| t.id == id)).unwrap_or(0);
+        self.tabs = kept;
+        fresh
+    }
+    /// The tab in front goes to another space, which comes to the front
+    /// with that tab showing.
+    fn carry_tab_to(&mut self, space: &str, pages: &HashMap<Id, Page>) {
+        let tab = self.tabs.remove(self.active.min(self.tabs.len() - 1));
+        self.active = self.active.min(self.tabs.len().saturating_sub(1));
+        let id = tab.id.clone();
+        self.parked.entry(space.to_string()).or_default().0.push(tab);
+        self.show_tabs_of(space, pages, Route::Home);
+        self.active = self.tabs.iter().position(|t| t.id == id).unwrap_or(0);
     }
 }
 
@@ -393,6 +527,12 @@ pub struct AiSession {
     /// The plan for a large job that the person said yes to: the next run
     /// does the work.
     pub plan: Option<String>,
+    /// What the AI is writing for a tool now ("Writing the page “Plan” ·
+    /// 2,400 characters"), and when this run started (for its clock).
+    pub working: Option<String>,
+    pub started: i64,
+    /// Pictures that go with the request (screenshots pasted or dropped in).
+    pub pictures: Vec<ai::Picture>,
 }
 
 // ---------------------------------------------------------------------------
@@ -531,14 +671,24 @@ pub enum Bridge {
     /// ("root"): see `plan_page_move`.
     PageMove { page: String, #[serde(default)] target: Option<String>, mode: String },
     /// A row or column of a table added or taken out ("add-row",
-    /// "add-column", "remove-row", "remove-column"), at a cell.
+    /// "add-column", "remove-row", "remove-column"), at a cell; or a row
+    /// opened ("open-row"), moved to before the row `column` ("move-row"),
+    /// its menu asked for ("row-menu"), its nested rows folded ("fold-row").
     TableOp { page: String, id: String, op: String, row: usize, column: usize },
+    /// A cell of a table given other words (a card dragged to another
+    /// column of a board).
+    TableSet { page: String, id: String, row: usize, column: usize, text: String },
     /// A cover picture was dragged to show another part.
     CoverY { page: String, y: f64 },
     /// Where the frame of the video player is in the window.
     PlayerPlace { x: f64, y: f64, w: f64, h: f64 },
     /// The person moved the video player or gave it another size.
     PlayerDock { h: String, v: String, x: f64, y: f64, w: f64 },
+    /// The steps of the fingers on the sidebar and what was made of them
+    /// (numbers only), when the recorder is on: see `swipe_trace`.
+    SwipeTrace { lines: String },
+    /// A picture pasted or dropped into the AI box (a data address).
+    AiImage { data: String },
     /// An event was dragged in the calendar: so many days and minutes later
     /// (or earlier), or its end so many minutes later.
     EventMove { id: String, days: i64, minutes: i64, grow: i64 },
@@ -584,7 +734,7 @@ pub const SIDEBAR_MAX: f64 = 320.0;
 
 // Typed tables and charts (state/tables.rs).
 mod tables;
-pub use tables::ChartSource;
+pub use tables::{stale_row_titles, written_row_pages, ChartSource, Open};
 
 mod erased {
     pub trait Json {
@@ -645,6 +795,8 @@ pub struct AppState {
     /// The side the list of a space comes in from when the space changes:
     /// 1 from the right (a space after this one), -1 from the left, 0 none.
     pub space_slide: Signal<i8>,
+    /// Pictures for the box that asks all the notes (see `ai_add_picture`).
+    pub ask_pictures: Signal<Vec<ai::Picture>>,
     /// Is an AI tool connected? Every part of the AI shows only then
     /// (see `ai::shown`); Settings is where a person connects one.
     pub ai_on: Signal<bool>,
@@ -817,8 +969,11 @@ fn remember(ui: &mut Ui, pages: &HashMap<Id, Page>, route: &Route) {
         ui.recent.retain(|r| r != id);
         ui.recent.insert(0, id.clone());
         ui.recent.truncate(20);
-        for a in ancestors(pages, id) {
-            ui.expanded.insert(a.id);
+        // (The page of a row is not in the sidebar: its parent stays as it is.)
+        if pages.get(id).is_none_or(|p| p.row_of.is_none()) {
+            for a in ancestors(pages, id) {
+                ui.expanded.insert(a.id);
+            }
         }
     }
 }
@@ -832,7 +987,8 @@ pub fn roots_in(pages: &HashMap<Id, Page>, space: &str) -> Vec<Page> {
 pub fn children_of(pages: &HashMap<Id, Page>, parent: Option<&str>) -> Vec<Page> {
     let mut out: Vec<Page> = pages
         .values()
-        .filter(|p| !p.trashed && p.parent_id.as_deref() == parent)
+        // (A page that is a row of a table opens from its row, not from here.)
+        .filter(|p| !p.trashed && p.row_of.is_none() && p.parent_id.as_deref() == parent)
         .cloned()
         .collect();
     out.sort_by(|a, b| a.position.total_cmp(&b.position).then(a.created_at.cmp(&b.created_at)));
@@ -888,6 +1044,66 @@ pub fn plan_page_move(pages: &HashMap<Id, Page>, space: &str, id: &str, target: 
     }
     Some(plan)
 }
+
+/// The rows of the list to choose where a page is kept. With several
+/// spaces: each space, which is a choice itself (the top of its list), with
+/// its pages under it. With one space there is nothing to tell apart: a row
+/// for the top of the list, then the pages. Left out: the page itself, what
+/// is inside it, the notes of meetings (`meetings`) and the Trash.
+pub fn places_to_keep(pages: &HashMap<Id, Page>, spaces: &[Space], page: &str, meetings: &[Id]) -> Vec<crate::pad::Place> {
+    use crate::pad::Place;
+    type Kids<'a> = HashMap<Option<&'a str>, Vec<&'a Page>>;
+    fn walk(kids: &Kids, list: &[&Page], depth: usize, page: &str, meetings: &[Id], out: &mut Vec<Place>) {
+        for p in list.iter().filter(|p| p.id != page) {
+            let shown = !meetings.contains(&p.id);
+            if shown {
+                out.push(Place { id: p.id.clone(), title: p.display_title().to_string(), depth, icon: p.icon.clone(), badge: None });
+            }
+            if let Some(inner) = kids.get(&Some(p.id.as_str())) {
+                walk(kids, inner, depth + usize::from(shown), page, meetings, out);
+            }
+        }
+    }
+    let mut kids: Kids = HashMap::new();
+    for p in pages.values().filter(|p| !p.trashed) {
+        kids.entry(p.parent_id.as_deref()).or_default().push(p);
+    }
+    for list in kids.values_mut() {
+        list.sort_by(|a, b| a.position.total_cmp(&b.position).then(a.created_at.cmp(&b.created_at)));
+    }
+    let many = spaces.len() > 1;
+    let mut out = Vec::new();
+    for space in spaces {
+        out.push(if many {
+            Place { id: space.id.clone(), title: space.display_name().to_string(), depth: 0, icon: None, badge: Some((space.initial(), space.color.clone())) }
+        } else {
+            Place { id: String::new(), title: NO_PAGE.to_string(), depth: 0, icon: None, badge: None }
+        });
+        let roots: Vec<&Page> = kids.get(&None).into_iter().flatten().copied().filter(|p| p.space_id == space.id).collect();
+        walk(&kids, &roots, usize::from(many), page, meetings, &mut out);
+    }
+    out
+}
+
+/// The row that says where a page is kept now, and the name of its space
+/// when there are several and the row does not say it.
+pub fn place_of(pages: &HashMap<Id, Page>, spaces: &[Space], page: &str) -> (crate::pad::Place, String) {
+    use crate::pad::Place;
+    let this = pages.get(page);
+    let space = this.and_then(|p| spaces.iter().find(|s| s.id == p.space_id));
+    let many = spaces.len() > 1;
+    if let Some(home) = this.and_then(|p| p.parent_id.as_ref()).and_then(|id| pages.get(id)) {
+        let place = Place { id: home.id.clone(), title: home.display_title().to_string(), depth: 0, icon: home.icon.clone(), badge: None };
+        return (place, space.filter(|_| many).map(|s| s.display_name().to_string()).unwrap_or_default());
+    }
+    match space.filter(|_| many) {
+        Some(s) => (Place { id: s.id.clone(), title: s.display_name().to_string(), depth: 0, icon: None, badge: Some((s.initial(), s.color.clone())) }, String::new()),
+        None => (Place { id: String::new(), title: NO_PAGE.to_string(), depth: 0, icon: None, badge: None }, String::new()),
+    }
+}
+
+/// The name of the top of the list, when there is one space.
+const NO_PAGE: &str = "No page (top of the list)";
 
 /// One event on the line of the day (Home).
 #[derive(Clone, Debug, PartialEq)]
@@ -1445,12 +1661,100 @@ struct MeetingNotes {
     noticed: bool,
     /// Its time on the calendar, when an event was on as it started.
     span: Option<(i64, i64)>,
+    /// That event (with `span`, it says which meeting this is).
+    event: Option<Id>,
+    /// Its pad showed its last card (so the pad comes back if the meeting
+    /// goes on after all).
+    padded: bool,
+    /// The end stopped the listening (so it is offered again if the meeting
+    /// goes on after all).
+    cut: bool,
+    /// The app made the page by itself when the call started, and the
+    /// person has not said yes yet (Listen, Notes only, or a word typed).
+    /// A draft that is still empty goes when the person says no, or when
+    /// the meeting ends: no page is kept for a call they did not want notes of.
+    draft: bool,
 }
 
-/// A meeting that ended this recently and starts again is the same meeting,
-/// and so is one that starts soon after its notes were made by hand.
-const SAME_MEETING_MS: i64 = 5 * when::MINUTE;
+/// The folder for the recorder of the sidebar swipe, and its two files: the
+/// marker that turns it on, and what it wrote.
+fn swipe_trace_folder() -> std::path::PathBuf {
+    dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("Rune")
+}
+
+/// Is the recorder of the sidebar swipe on? (When the file "swipe-log-on"
+/// is in the app's cache folder. It is for one fault that only the person's
+/// own trackpad shows; it keeps numbers only, and only on this Mac.)
+pub fn swipe_trace_on() -> bool {
+    swipe_trace_folder().join("swipe-log-on").exists()
+}
+
+/// Keep the steps of one swipe (see `Bridge::SwipeTrace`). The file starts
+/// again when it is large.
+fn swipe_trace(lines: &str) {
+    use std::io::Write;
+    if !swipe_trace_on() {
+        return;
+    }
+    let path = swipe_trace_folder().join("swipes.log");
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 400_000) {
+        let _ = std::fs::remove_file(&path);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(file, "--- {}\n{lines}", now_ms());
+    }
+}
+
+/// A call that is noticed again this soon after it went quiet is the same
+/// meeting, with the same page; and so is one that starts soon after its
+/// notes were made by hand.
+const SAME_MEETING_MS: i64 = 20 * when::MINUTE;
 const JUST_MADE_MS: i64 = 15 * when::MINUTE;
+/// An event of the calendar that starts this close to now is the meeting
+/// that starts now.
+const NEXT_MEETING_MS: i64 = 10 * when::MINUTE;
+
+/// Whether a call noticed at `now` is the meeting whose notes were made
+/// last: one meeting has one page. `of`: the event those notes are of (its
+/// id, start and end), if they are of one. `quiet_since`: when that meeting
+/// was last seen. `on_now`: the event that is on now, or about to start.
+fn same_meeting(of: Option<&(Id, i64, i64)>, quiet_since: i64, now: i64, on_now: Option<&(Id, i64, i64)>) -> bool {
+    // Its own event is still on: the call went quiet, or the person left
+    // and came back.
+    if of.is_some_and(|(_, _, end)| now < *end) {
+        return true;
+    }
+    // Another event starts about now: this is the next meeting.
+    if let Some(next) = on_now {
+        let own = of.is_some_and(|e| e.0 == next.0 && e.1 == next.1);
+        if !own && (now - next.1).abs() <= NEXT_MEETING_MS {
+            return false;
+        }
+    }
+    now - quiet_since < SAME_MEETING_MS
+}
+
+/// The meeting of the last notes, as it is written down between runs of the
+/// app. A call can go on while the app is closed and opened again (an update
+/// does that): the same meeting is then known again, and gets no second page.
+#[derive(Serialize, Deserialize)]
+struct KeptMeeting {
+    page: Id,
+    stamp: Id,
+    started: i64,
+    ended: Option<i64>,
+    app: Option<String>,
+    noticed: bool,
+    span: Option<(i64, i64)>,
+    event: Option<Id>,
+    /// Its pad was on the screen, and the app listened to it, when this was written.
+    padded: bool,
+    listened: bool,
+    /// When this was written.
+    seen: i64,
+    #[serde(default)]
+    draft: bool,
+}
 
 thread_local! {
     static MEETING: std::cell::RefCell<Option<MeetingNotes>> = const { std::cell::RefCell::new(None) };
@@ -1459,6 +1763,11 @@ thread_local! {
     static MEETING_ALONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// The loop that lets the pad's questions go away by themselves is running.
     static PAD_WATCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// When the meeting was written down last, as one that goes on (`meeting_seen`).
+    static MEETING_KEPT: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+    /// The person said no to notes of the call that is on: it asks no more
+    /// until that call ends.
+    static MEETING_DECLINED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// The pages made as meeting notes (the newest few hundred), wherever they
@@ -1569,6 +1878,24 @@ impl AppState {
     /// State for a window. The primary window restores its tabs; others open `route`.
     pub fn load(primary: bool, route: Option<Route>) -> AppState {
         let (mut pages, mut blocks) = store::with(|s| s.load()).unwrap_or_default();
+        // Pages of rows whose table or row went while the app was last open.
+        if primary {
+            let (keep, gone) = tables::lost_row_pages(&pages, &blocks);
+            for id in &keep {
+                if let Some(p) = pages.get_mut(id) {
+                    p.row_of = None;
+                    let p = p.clone();
+                    store::with(|s| s.save_page(&p));
+                }
+            }
+            for id in &gone {
+                pages.remove(id);
+                blocks.remove(id);
+            }
+            if !gone.is_empty() {
+                store::with(|s| s.delete_pages(&gone));
+            }
+        }
         let mut spaces = store::with(|s| s.load_spaces()).unwrap_or_default();
         if spaces.is_empty() {
             spaces.push(Space::new("My Space", "blue", 1.0));
@@ -1587,22 +1914,35 @@ impl AppState {
                 .or_else(|_| serde_json::from_str::<(Vec<Tab>, usize, serde_json::Value)>(&s).map(|t| (t.0, t.1)))
                 .ok()
         });
-        let valid = |r: &Route| match r {
-            Route::Home | Route::Calendar | Route::Graph => true,
-            Route::Page(id) => pages.get(id).is_some_and(|p| !p.trashed),
-        };
         let saved_tabs = if primary && route.is_none() { saved_tabs } else { None };
+        let saved_sets: Option<HashMap<Id, TabSet>> = store::setting("space_tabs").and_then(|s| serde_json::from_str(&s).ok());
+        let mut parked: HashMap<Id, TabSet> = HashMap::new();
         let (tabs, active) = match saved_tabs {
             _ if route.is_some() => (vec![Tab::new(route.unwrap_or(Route::Home))], 0),
-            Some((tabs, active)) if !tabs.is_empty() && tabs.iter().all(|t| t.panes.iter().all(|p| p.history.iter().all(valid))) => {
-                let active = active.min(tabs.len() - 1);
-                (tabs, active)
+            Some((mut tabs, active)) if !tabs.is_empty() => {
+                forget_gone(&mut tabs, &pages);
+                match saved_sets {
+                    Some(sets) => {
+                        parked = sets;
+                        let active = active.min(tabs.len() - 1);
+                        (tabs, active)
+                    }
+                    None => {
+                        let (here, active, others) = sort_tabs_by_space(tabs, active, &space, &pages);
+                        parked = others;
+                        if here.is_empty() { (vec![Tab::new(Route::Home)], 0) } else { (here, active) }
+                    }
+                }
             }
             _ => {
                 let first = roots_in(&pages, &space).first().map(|p| Route::Page(p.id.clone())).unwrap_or(Route::Home);
                 (vec![Tab::new(first)], 0)
             }
         };
+        parked.retain(|id, _| *id != space && spaces.iter().any(|s| &s.id == id));
+        for set in parked.values_mut() {
+            forget_gone(&mut set.0, &pages);
+        }
         let expanded: HashSet<Id> = store::setting("expanded")
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
@@ -1610,6 +1950,7 @@ impl AppState {
             tabs,
             active,
             closed: Vec::new(),
+            parked,
             sidebar_open: store::setting("sidebar_open").map(|v| v != "0").unwrap_or(true),
             sidebar_width: store::setting("sidebar_width")
                 .and_then(|w| w.parse::<f64>().ok())
@@ -1663,6 +2004,7 @@ impl AppState {
             settings_first: Signal::new(None),
             ai_done: Signal::new(None),
             ai_on: Signal::new(ai::shown()),
+            ask_pictures: Signal::new(Vec::new()),
             player_dock: Signal::new(store::setting("player_dock").and_then(|s| serde_json::from_str::<DockPlace>(&s).ok()).unwrap_or_default().tidy()),
             day_page: Signal::new(None),
             pad: Signal::new(None),
@@ -1771,6 +2113,7 @@ impl AppState {
         ];
         if self.win.primary {
             pairs.push(("tabs", serde_json::to_string(&(&ui.tabs, ui.active)).unwrap_or_default()));
+            pairs.push(("space_tabs", serde_json::to_string(&ui.parked).unwrap_or_default()));
         }
         store::set_settings(&pairs);
     }
@@ -2194,7 +2537,10 @@ impl AppState {
         if let Some(p) = self.pages.write().get_mut(&page) {
             p.title = e.display_title().to_string();
             p.icon = Some(format!("calendar:{}", e.color));
-            p.space_id = e.space_id.clone();
+            // (Kept in a page: the space of that page, which may be another.)
+            if home.is_none() {
+                p.space_id = e.space_id.clone();
+            }
         }
         self.save_page(&page);
         remember_meeting_name(&page, e.display_title());
@@ -2242,8 +2588,9 @@ impl AppState {
         // meeting watcher sees it start, it makes no second page.
         if MEETING.with(|m| m.borrow().as_ref().is_none_or(|n| n.page != page)) {
             let stamp = self.blocks.peek().get(&page).and_then(|b| b.first()).map(|b| b.id.clone()).unwrap_or_default();
-            MEETING.with(|m| *m.borrow_mut() = Some(MeetingNotes { page: page.clone(), stamp, started: now_ms(), ended: None, app: None, noticed: false, span: (!e.all_day).then_some((e.start, e.end)) }));
+            MEETING.with(|m| *m.borrow_mut() = Some(MeetingNotes { page: page.clone(), stamp, started: now_ms(), ended: None, app: None, noticed: false, span: (!e.all_day).then_some((e.start, e.end)), event: (!e.all_day).then(|| e.id.clone()), padded: false, cut: false, draft: false }));
             remember_meeting_page(&page);
+            self.keep_meeting();
         }
         // In the day view the notes are at the right of the day; elsewhere the page opens.
         let in_day_view = self.cal.peek().view == CalView::Day && *self.ui.peek().tab().route() == Route::Calendar;
@@ -2608,17 +2955,33 @@ impl AppState {
         self.save_spaces();
     }
 
-    /// Show another space: its sidebar, and its Home (or the page you were
-    /// last on there).
+    /// Show another space: its sidebar and its own tabs, as they were left.
+    /// A space with no tabs yet starts on the page you were last on there,
+    /// or its Home.
     pub fn switch_space(mut self, id: &str) {
         self.set_popover(None);
         if self.ui.peek().space == id {
             return;
         }
+        self.clear_slash();
         let last = {
             let pages = self.pages.peek();
             self.ui.peek().recent.iter().find(|r| pages.get(*r).is_some_and(|p| p.space_id == id && !p.trashed)).cloned()
         };
+        self.enter_space(id, last.map(Route::Page).unwrap_or(Route::Home));
+        {
+            let pages = self.pages.peek();
+            let mut ui = self.ui.write();
+            ui.modal = None;
+            let route = ui.tab().route().clone();
+            remember(&mut ui, &pages, &route);
+        }
+        self.save_ui();
+    }
+
+    /// Bring a space to the front with its tabs. `first` is the tab of a
+    /// space with none yet; the answer says whether it was made.
+    fn enter_space(mut self, id: &str, first: Route) -> bool {
         // Its list comes in from the side it is on (see the dots at the foot
         // of the sidebar). The mark is taken away when the move is over.
         let slide = {
@@ -2637,11 +3000,28 @@ impl AppState {
                 mark.set(0);
             }
         });
-        self.ui.write().space = id.to_string();
+        let fresh = {
+            let pages = self.pages.peek();
+            self.ui.write().show_tabs_of(id, &pages, first)
+        };
         if self.win.primary {
             store::set_setting("space", id);
         }
-        self.navigate(last.map(Route::Page).unwrap_or(Route::Home));
+        fresh
+    }
+
+    /// A page of another space is about to open: that space comes to the
+    /// front first, so the page gets its tab among the tabs of its own
+    /// space. The answer says whether a tab showing it was made on the way.
+    fn enter_space_of(self, route: &Route) -> bool {
+        let space = match route {
+            Route::Page(id) => self.pages.peek().get(id).map(|p| p.space_id.clone()).filter(|s| !s.is_empty()),
+            _ => None,
+        };
+        match space {
+            Some(space) if self.ui.peek().space != space => self.enter_space(&space, route.clone()),
+            _ => false,
+        }
     }
 
     /// The space after this one (1) or before it (-1), in the order of the
@@ -2690,19 +3070,31 @@ impl AppState {
         sync::others(self.win.key, SyncMsg::Spaces(others));
         self.set_modal(None);
         self.switch_space(&into);
+        self.ui.write().parked.remove(&id);
         self.toast("Space deleted");
     }
 
-    /// Keep the sidebar on the space of the page being shown.
+    /// A tab goes with the page it shows: when the page in front is in
+    /// another space (it was moved there, or Back led there), the tab moves
+    /// to that space, and the space comes to the front. A tab that shows
+    /// several pages stays where it is.
     pub fn follow_route_space(mut self) {
-        let Route::Page(id) = self.ui.peek().tab().route().clone() else { return };
-        let Some(space) = self.pages.peek().get(&id).map(|p| p.space_id.clone()) else { return };
-        if !space.is_empty() && self.ui.peek().space != space {
-            self.ui.write().space = space.clone();
-            if self.win.primary {
-                store::set_setting("space", &space);
+        let space = {
+            let ui = self.ui.peek();
+            let tab = ui.tab();
+            match tab_space(tab, &self.pages.peek()) {
+                Some(space) if !tab.is_split() && ui.space != space => space,
+                _ => return,
             }
+        };
+        {
+            let pages = self.pages.peek();
+            self.ui.write().carry_tab_to(&space, &pages);
         }
+        if self.win.primary {
+            store::set_setting("space", &space);
+        }
+        self.save_ui();
     }
 
     /// Give a page to a chat in Aven: handed over as a file where the
@@ -2821,6 +3213,12 @@ impl AppState {
     // ----- navigation ----------------------------------------------------
 
     pub fn navigate(mut self, route: Route) {
+        if let Route::Page(id) = &route {
+            // A page of another space opens among the tabs of its space.
+            if self.pages.peek().get(id).is_some_and(|p| !p.space_id.is_empty() && p.space_id != self.ui.peek().space) {
+                return self.open_page(id);
+            }
+        }
         self.clear_slash();
         {
             let pages = self.pages.peek();
@@ -3159,11 +3557,14 @@ impl AppState {
     /// Open in a new tab at the end (always a new one).
     pub fn open_in_new_tab(mut self, route: Route) {
         self.clear_slash();
+        let made = self.enter_space_of(&route);
         {
             let pages = self.pages.peek();
             let mut ui = self.ui.write();
             remember(&mut ui, &pages, &route);
-            ui.tabs.push(Tab::new(route));
+            if !made {
+                ui.tabs.push(Tab::new(route));
+            }
             ui.active = ui.tabs.len() - 1;
             ui.popover = None;
             ui.modal = None;
@@ -3176,6 +3577,7 @@ impl AppState {
     /// paired freely. If a tab already shows it, that tab comes forward.
     pub fn open_page(self, id: &str) {
         let route = Route::Page(id.to_string());
+        self.enter_space_of(&route);
         let found = {
             let ui = self.ui.peek();
             // The tab in front first, then the others.
@@ -3276,7 +3678,7 @@ impl AppState {
             if index >= ui.tabs.len() {
                 return;
             }
-            if ui.tabs.len() == 1 && !self.win.primary {
+            if ui.tabs.len() == 1 && !self.win.primary && ui.parked.values().all(|set| set.0.is_empty()) {
                 drop(ui);
                 dioxus::desktop::window().close();
                 return;
@@ -3381,14 +3783,24 @@ impl AppState {
     /// Move a page, with all the pages inside it, to another place of the
     /// sidebar (see `plan_page_move`). The page it goes into opens, so the
     /// moved page is in view.
-    pub fn move_page(mut self, id: &str, target: Option<&str>, mode: &str) {
+    pub fn move_page(self, id: &str, target: Option<&str>, mode: &str) {
         let space = self.ui.peek().space.clone();
-        let Some((parent, position, space)) = plan_page_move(&self.pages.peek(), &space, id, target, mode) else { return };
+        self.move_page_in(&space, id, target, mode);
+    }
+
+    /// `move_page`, with "root" meaning the top of the list of `space`.
+    fn move_page_in(mut self, space: &str, id: &str, target: Option<&str>, mode: &str) {
+        let was = self.pages.peek().get(id).map(|p| p.space_id.clone());
+        let Some((parent, position, space)) = plan_page_move(&self.pages.peek(), space, id, target, mode) else { return };
         let inside = descendants(&self.pages.peek(), id);
         let mut changed = vec![id.to_string()];
         {
             let mut pages = self.pages.write();
             if let Some(p) = pages.get_mut(id) {
+                // (The page of a row that goes to another page is a page like any other there.)
+                if p.parent_id != parent {
+                    p.row_of = None;
+                }
                 p.parent_id = parent.clone();
                 p.position = position;
             }
@@ -3436,6 +3848,10 @@ impl AppState {
             }
             let name = self.page_title(parent);
             self.toast(format!("Moved into {name}"));
+        } else if was.as_deref() != Some(space.as_str()) {
+            if let Some(name) = self.spaces.peek().iter().find(|s| s.id == space).map(|s| s.display_name().to_string()) {
+                self.toast(format!("Moved to {name}"));
+            }
         }
     }
 
@@ -3480,6 +3896,8 @@ impl AppState {
                 self.set_blocks(&page, bs, true);
             }
         }
+        // The name of a page that is a row is the first cell of its row.
+        self.name_row_cell(id);
     }
 
     /// Set a page's icon. Leaves the picker open so a colour can follow.
@@ -3541,6 +3959,7 @@ impl AppState {
 
     pub fn restore_page(self, id: &str) {
         self.set_trashed(id, false);
+        self.unrow_if_lost(id);
         self.toast("Page restored");
     }
 
@@ -3561,6 +3980,7 @@ impl AppState {
             if !trashed && parent_gone {
                 if let Some(p) = pages.get_mut(id) {
                     p.parent_id = None;
+                    p.row_of = None;
                 }
             }
         }
@@ -3568,15 +3988,33 @@ impl AppState {
             self.save_page(pid);
         }
         if trashed {
+            self.stop_hearing(&ids);
             self.leave_pages(&ids);
         }
+    }
+
+    /// A page that is listened to goes to the Trash, or is deleted: the
+    /// listening stops at once. Nothing on the screen would say any more
+    /// that the app listens, and there is no page to write in.
+    fn stop_hearing(mut self, ids: &[Id]) {
+        if !self.listening.peek().as_ref().is_some_and(|l| ids.contains(&l.page)) {
+            return;
+        }
+        if let Some(l) = self.listening.write().as_mut() {
+            l.stopping = true;
+        }
+        LISTENER.with(|l| {
+            if let Some(listener) = l.borrow_mut().as_mut() {
+                listener.end();
+            }
+        });
     }
 
     /// Tabs showing pages that are gone go back to Home.
     fn leave_pages(mut self, ids: &[Id]) {
         {
             let mut ui = self.ui.write();
-            for tab in ui.tabs.iter_mut() {
+            for tab in ui.every_tab_mut() {
                 let gone: Vec<Id> = tab
                     .panes
                     .iter()
@@ -3599,6 +4037,7 @@ impl AppState {
 
     pub fn delete_forever(mut self, id: &str) {
         let ids = descendants(&self.pages.peek(), id);
+        self.stop_hearing(&ids);
         {
             let mut pages = self.pages.write();
             let mut blocks = self.blocks.write();
@@ -3612,7 +4051,7 @@ impl AppState {
         {
             let mut guard = self.ui.write();
             let ui = &mut *guard;
-            for tab in ui.tabs.iter_mut().chain(ui.closed.iter_mut()) {
+            for tab in ui.tabs.iter_mut().chain(ui.closed.iter_mut()).chain(ui.parked.values_mut().flat_map(|set| set.0.iter_mut())) {
                 for pane in tab.panes.iter_mut() {
                     pane.forget(&ids);
                 }
@@ -3691,6 +4130,11 @@ impl AppState {
                 .map(|b| b.id.clone())
                 .collect()
         };
+        // Rows or a table that went with this change take the pages of
+        // their rows along. (Typing takes no row out.)
+        if origin == Origin::Other {
+            self.drop_lost_row_pages(&before, &after);
+        }
         {
             let mut h = self.history.write();
             if typing.is_none() {
@@ -3755,6 +4199,9 @@ impl AppState {
             }
         }
         document::eval(&format!("document.body.dataset.ai = '{}'", if on { 1 } else { 0 }));
+        if swipe_trace_on() {
+            document::eval("document.body.dataset.swipeLog = '1'");
+        }
     }
 
     /// Plain voice: have the Mac's Dictation type what is said into the text
@@ -3927,6 +4374,7 @@ impl AppState {
             while let Some(event) = rx.next().await {
                 match event {
                     AiEvent::Step(..) => {}
+                    AiEvent::Working { .. } => {}
                     AiEvent::Delta(text) => {
                         reply.push_str(&text);
                         if now_ms() - shown_at > 200 && !voice::may_be_directives(&reply) {
@@ -4051,6 +4499,7 @@ impl AppState {
             while let Some(event) = rx.next().await {
                 match event {
                     AiEvent::Step(..) => {}
+                    AiEvent::Working { .. } => {}
                     AiEvent::Delta(text) => {
                         reply.push_str(&text);
                         // The page is made when the first text for it is here.
@@ -4188,6 +4637,7 @@ impl AppState {
             while let Some(event) = rx.next().await {
                 match event {
                     AiEvent::Step(..) => {}
+                    AiEvent::Working { .. } => {}
                     AiEvent::Delta(text) => reply.push_str(&text),
                     AiEvent::Done => break,
                     AiEvent::Error(e) => return self.toast(format!("Couldn't change the text. {e}")),
@@ -4225,6 +4675,7 @@ impl AppState {
             while let Some(event) = rx.next().await {
                 match event {
                     AiEvent::Step(..) => {}
+                    AiEvent::Working { .. } => {}
                     AiEvent::Delta(text) => reply.push_str(&text),
                     AiEvent::Done => break,
                     AiEvent::Error(e) => {
@@ -4259,23 +4710,6 @@ impl AppState {
             && page.parent_id.as_ref().and_then(|p| pages.get(p)).is_some_and(|p| p.title == "Meeting notes")
     }
 
-    /// Every page of this space in sidebar order, with how deep it sits
-    /// (for a list to pick a page from).
-    pub fn page_outline(&self) -> Vec<(Id, String, usize)> {
-        fn walk(pages: &HashMap<Id, Page>, list: Vec<Page>, depth: usize, out: &mut Vec<(Id, String, usize)>) {
-            for p in list {
-                out.push((p.id.clone(), p.display_title().to_string(), depth));
-                if depth < 3 && out.len() < 300 {
-                    walk(pages, children_of(pages, Some(&p.id)), depth + 1, out);
-                }
-            }
-        }
-        let pages = self.pages.peek();
-        let mut out = Vec::new();
-        walk(&pages, roots_in(&pages, &self.ui.peek().space), 0, &mut out);
-        out
-    }
-
     // ----- listening to a meeting (see listen.rs) --------------------------
 
     /// Listen to the meeting whose notes page is `page`: the microphone and
@@ -4286,6 +4720,7 @@ impl AppState {
         if self.listening.peek().is_some() {
             return self.toast("Already listening");
         }
+        self.confirm_meeting(page);
         self.listen_offer.set(None);
         let (listener, mut heard) = match crate::listen::start(true) {
             Ok(started) => started,
@@ -4317,7 +4752,12 @@ impl AppState {
                 words[words.len().saturating_sub(9)..].join(" ")
             };
             let mut transcript = crate::listen::Transcript::default();
-            let mut toggle: Option<Id> = None;
+            // Words heard in this page before (Stop and then Listen again, or
+            // a meeting that went on after it was said to be over) stay: the
+            // new ones go on under them in the same toggle, after a line
+            // that says when.
+            let (mut toggle, kept) = self.blocks.peek().get(&page).map(|bs| crate::listen::transcript_so_far(bs)).unwrap_or((None, 0));
+            let again = (kept > 0).then(|| crate::listen::again_line(&when::time_label(started)));
             let mut written_at = now_ms();
             let mut problem = None;
             while let Some(event) = heard.next().await {
@@ -4341,7 +4781,7 @@ impl AppState {
                         // Into the page now and then, so nothing is lost if the app closes.
                         if now_ms() - written_at > 20_000 {
                             written_at = now_ms();
-                            self.write_transcript(&page, &mut toggle, &transcript);
+                            self.write_transcript(&page, &mut toggle, kept, again.as_ref(), &transcript);
                         }
                     }
                     Heard::Note(message) => {
@@ -4356,8 +4796,13 @@ impl AppState {
                 }
             }
             LISTENER.with(|l| l.borrow_mut().take());
-            self.write_transcript(&page, &mut toggle, &transcript);
+            self.write_transcript(&page, &mut toggle, kept, again.as_ref(), &transcript);
             self.listening.set(None);
+            // The page went to the Trash, or was deleted, while the app
+            // listened: there is no page to write the notes in.
+            if !self.pages.peek().get(&page).is_some_and(|p| !p.trashed) {
+                return self.toast("Stopped listening");
+            }
             if let Some(message) = problem {
                 self.pad_problem(&page, &message);
                 self.pad_status(&page, "", false);
@@ -4384,6 +4829,7 @@ impl AppState {
             while let Some(event) = rx.next().await {
                 match event {
                     AiEvent::Step(..) => {}
+                    AiEvent::Working { .. } => {}
                     AiEvent::Delta(text) => reply.push_str(&text),
                     AiEvent::Done => break,
                     AiEvent::Error(e) => {
@@ -4411,21 +4857,38 @@ impl AppState {
         });
     }
 
-    /// Put the transcript so far into the page (inside its "Transcript" toggle).
-    fn write_transcript(self, page: &str, toggle: &mut Option<Id>, transcript: &crate::listen::Transcript) {
+    /// Put the transcript so far into the page (inside its "Transcript"
+    /// toggle). `kept`: the lines that were in the toggle before this time of
+    /// listening; they stay, and `again` (a line that says when the app
+    /// started to listen again) comes between them and the new ones.
+    fn write_transcript(self, page: &str, toggle: &mut Option<Id>, kept: usize, again: Option<&Block>, transcript: &crate::listen::Transcript) {
         let Some(mut blocks) = self.blocks.peek().get(page).cloned() else { return };
-        crate::listen::put_transcript(&mut blocks, toggle, transcript.blocks());
+        let mut lines = transcript.blocks();
+        if lines.is_empty() {
+            return;
+        }
+        if let Some(again) = again {
+            lines.insert(0, again.clone());
+        }
+        crate::listen::put_transcript(&mut blocks, toggle, kept, lines);
         self.set_blocks(page, blocks, true);
     }
 
     /// Stop listening. The last words are finished first; then the notes are written.
     pub fn stop_listening(mut self) {
         let Some(started) = self.listening.peek().as_ref().map(|l| l.started) else { return };
-        // Stopped by hand: for the person the meeting is over, so the page of
-        // a meeting asks where to keep it.
+        // Stopped while its meeting goes on: a pause. The person may not
+        // want some part heard, and can press Listen again; the notes of
+        // what was heard are written now, in the same page, and the pad
+        // stays the notepad. The question where to keep the notes waits for
+        // the end of the meeting. With no meeting on (it is over, or these
+        // notes were made by hand) the person is done: the page asks.
         if let Some(page) = self.listening.peek().as_ref().map(|l| l.page.clone()).filter(|p| meeting_page_ids().contains(p)) {
-            self.ask_place(&page, now_ms());
-            self.pad_end(&page);
+            let goes_on = MEETING.with(|m| m.borrow().as_ref().is_some_and(|n| n.page == page && n.noticed && n.ended.is_none()));
+            if !goes_on {
+                self.ask_place(&page, now_ms());
+                self.pad_end(&page);
+            }
         }
         if let Some(l) = self.listening.write().as_mut() {
             l.stopping = true;
@@ -4637,27 +5100,28 @@ impl AppState {
         id
     }
 
+    /// The timed event of the calendar that is on now, or about to start
+    /// (the nearest by its start), if there is one.
+    fn meeting_event(&self, now: i64) -> Option<Event> {
+        // (A test run can ask for meetings that take no event.)
+        if MEETING_ALONE.with(std::cell::Cell::get) {
+            return None;
+        }
+        let space = self.ui.peek().space.clone();
+        let events = self.events.peek();
+        let mut on = repeat::expand(events.values().filter(|e| !e.all_day), now - 5 * when::MINUTE, now + 10 * when::MINUTE);
+        // The calendars of this Mac too, when the person has turned them on.
+        on.extend(self.mac_events(&space, now - 5 * when::MINUTE, now + 10 * when::MINUTE).into_iter().filter(|e| !e.all_day));
+        on.sort_by_key(|e| (e.start - now).abs());
+        on.into_iter().next()
+    }
+
     /// Make a notes page for a meeting that starts now and open it: named
     /// after the calendar event on now (if there is one) and the date, with
     /// the date and time as its first line, under "Meeting notes".
     pub fn make_meeting_notes(mut self, app: Option<&'static str>) -> Id {
         let now = now_ms();
-        let space = self.ui.peek().space.clone();
-        // The timed event on the calendar now, or about to start.
-        let event = if MEETING_ALONE.with(std::cell::Cell::get) {
-            None
-        } else {
-            let events = self.events.peek();
-            let mut on = repeat::expand(
-                events.values().filter(|e| !e.all_day),
-                now - 5 * when::MINUTE,
-                now + 10 * when::MINUTE,
-            );
-            // The calendars of this Mac too, when the person has turned them on.
-            on.extend(self.mac_events(&space, now - 5 * when::MINUTE, now + 10 * when::MINUTE).into_iter().filter(|e| !e.all_day));
-            on.sort_by_key(|e| (e.start - now).abs());
-            on.into_iter().next()
-        };
+        let event = self.meeting_event(now);
         let plain_name = match (&event, app) {
             (Some(e), _) => e.display_title().to_string(),
             (None, Some(app)) => crate::meeting::call_app_named(app).map(|a| a.title.to_string()).unwrap_or_else(|| format!("{app} meeting")),
@@ -4731,6 +5195,9 @@ impl AppState {
             self.toast(format!("These notes are in “{home}”, as before"));
         }
         let span = event.as_ref().map(|e| (e.start, e.end));
+        let event_id = event.as_ref().map(|e| e.id.clone());
+        // Made because a call started (not by the person): a draft until they say yes.
+        let draft = app.is_some();
         // A one-off event of the app with no notes page yet gets this one.
         if let Some(e) = event.filter(|e| e.repeat.is_none() && e.page_id.is_none() && !e.id.starts_with(crate::maccal::PREFIX)) {
             let page = id.clone();
@@ -4741,10 +5208,122 @@ impl AppState {
         if crate::listen::available() && self.listening.peek().is_none() {
             self.listen_offer.set(Some(id.clone()));
         }
-        MEETING.with(|m| *m.borrow_mut() = Some(MeetingNotes { page: id.clone(), stamp: stamp_id, started: now, ended: None, app, noticed: app.is_some(), span }));
-        self.open_in_new_tab(Route::Page(id.clone()));
-        self.focus(Caret::start(&note_id));
+        MEETING.with(|m| *m.borrow_mut() = Some(MeetingNotes { page: id.clone(), stamp: stamp_id, started: now, ended: None, app, noticed: app.is_some(), span, event: event_id, padded: false, cut: false, draft }));
+        self.keep_meeting();
+        // A draft is asked about by the pad: its page opens when the person
+        // says yes (with no pad, the page itself asks).
+        if !draft || !crate::pad::enabled() {
+            self.open_in_new_tab(Route::Page(id.clone()));
+            self.focus(Caret::start(&note_id));
+        }
         id
+    }
+
+    /// Whether `page` is the notes of the meeting on now and still a draft.
+    pub fn meeting_draft(&self, page: &str) -> bool {
+        MEETING.with(|m| m.borrow().as_ref().is_some_and(|n| n.page == page && n.draft))
+    }
+
+    /// The person said yes to the notes of the meeting (Listen, Notes only,
+    /// a line typed): its page is kept, and opens if it is not open yet.
+    fn confirm_meeting(self, page: &str) {
+        let was = MEETING.with(|m| {
+            let mut m = m.borrow_mut();
+            match m.as_mut() {
+                Some(n) if n.page == page && n.draft => {
+                    n.draft = false;
+                    true
+                }
+                _ => false,
+            }
+        });
+        if !was {
+            return;
+        }
+        self.keep_meeting();
+        let open = self.ui.peek().tabs.iter().any(|t| t.panes.iter().any(|p| *p.route() == Route::Page(page.to_string())));
+        if !open && self.pages.peek().contains_key(page) {
+            self.open_in_new_tab(Route::Page(page.to_string()));
+        }
+    }
+
+    /// Nothing is in the notes page of a meeting but what the app put there.
+    fn meeting_untouched(&self, page: &str) -> bool {
+        if !children_of(&self.pages.peek(), Some(&page.to_string())).is_empty() {
+            return false;
+        }
+        let blocks = self.blocks.peek();
+        let Some(bs) = blocks.get(page) else { return true };
+        bs.iter().enumerate().all(|(i, b)| {
+            let words = b.plain_text();
+            let words = words.trim();
+            match b.kind {
+                // (The first line is the date line the app wrote.)
+                BlockKind::Text if i == 0 => true,
+                BlockKind::Heading2 => words == "Notes" || words == "Action items",
+                BlockKind::Text | BlockKind::Bulleted | BlockKind::Todo => words.is_empty(),
+                _ => false,
+            }
+        })
+    }
+
+    /// The person said no to notes of the meeting (the × of the pad, "Not
+    /// now" on the page), or it ended with no yes: an empty draft goes for
+    /// good, with its line in the page that holds it. A draft with something
+    /// in it is kept. Says whether the page went.
+    pub fn drop_meeting_draft(mut self, page: &str) -> bool {
+        if !self.meeting_draft(page) {
+            return false;
+        }
+        if !self.meeting_untouched(page) || self.listening.peek().as_ref().is_some_and(|l| l.page == page) {
+            self.confirm_meeting(page);
+            return false;
+        }
+        let event = MEETING.with(|m| m.borrow_mut().take().and_then(|n| n.event));
+        store::set_setting("meeting_last", "");
+        if self.listen_offer.peek().as_deref() == Some(page) {
+            self.listen_offer.set(None);
+        }
+        if self.pad.peek().as_ref().is_some_and(|p| p.page == page) {
+            self.close_pad();
+        }
+        self.place_done(page);
+        if let Some(e) = event.filter(|e| self.events.peek().get(e).is_some_and(|ev| ev.page_id.as_deref() == Some(page))) {
+            self.update_event(&e, |ev| ev.page_id = None);
+        }
+        let parent = self.pages.peek().get(page).and_then(|p| p.parent_id.clone());
+        if let Some(parent) = parent.filter(|p| self.blocks.peek().get(p).is_some_and(|bs| bs.iter().any(|b| b.kind == BlockKind::PageLink && b.text == page))) {
+            let gone = page.to_string();
+            self.edit_blocks(&parent, move |bs| bs.retain(|b| !(b.kind == BlockKind::PageLink && b.text == gone)));
+        }
+        // A tab that was opened for the draft alone goes with it (not to
+        // the closed tabs: there is nothing in it to open again).
+        {
+            let gone = Route::Page(page.to_string());
+            let only = |t: &Tab| t.panes.iter().all(|p| p.history.iter().all(|r| *r == gone));
+            let mut ui = self.ui.write();
+            if ui.tabs.iter().any(only) {
+                let active = ui.tabs.get(ui.active).map(|t| t.id.clone());
+                ui.tabs.retain(|t| !only(t));
+                if ui.tabs.is_empty() {
+                    ui.tabs.push(Tab::new(Route::Home));
+                }
+                let last = ui.tabs.len() - 1;
+                ui.active = active.and_then(|id| ui.tabs.iter().position(|t| t.id == id)).unwrap_or(last);
+            }
+        }
+        self.delete_forever(page);
+        true
+    }
+
+    /// "Not now" on the question of a meeting's page.
+    pub fn decline_listen(mut self, page: &str) {
+        if self.listen_offer.peek().as_deref() == Some(page) {
+            self.listen_offer.set(None);
+        }
+        if self.drop_meeting_draft(page) {
+            MEETING_DECLINED.with(|d| d.set(true));
+        }
     }
 
     /// Write the date line of the last meeting's notes again (when it ends,
@@ -4768,18 +5347,73 @@ impl AppState {
         });
     }
 
-    /// A Teams meeting started: make its notes page and say so with a
-    /// notification (the app is usually behind the meeting).
-    pub fn meeting_started(self, app: &'static str) {
+    /// Write the meeting of the last notes down for the next run of the app
+    /// (see `KeptMeeting`).
+    fn keep_meeting(self) {
+        let kept = MEETING.with(|m| {
+            m.borrow().as_ref().map(|n| KeptMeeting {
+                page: n.page.clone(),
+                stamp: n.stamp.clone(),
+                started: n.started,
+                ended: n.ended,
+                app: n.app.map(str::to_string),
+                noticed: n.noticed,
+                span: n.span,
+                event: n.event.clone(),
+                padded: n.padded || self.pad.peek().as_ref().is_some_and(|p| p.page == n.page),
+                listened: n.cut || self.listening.peek().as_ref().is_some_and(|l| l.page == n.page),
+                seen: now_ms(),
+                draft: n.draft,
+            })
+        });
+        store::set_setting("meeting_last", &kept.and_then(|k| serde_json::to_string(&k).ok()).unwrap_or_default());
+    }
+
+    /// The meeting goes on (the watcher still sees it): written down now and
+    /// then, so that the next run of the app knows until when it was seen.
+    pub fn meeting_seen(self) {
+        let due = MEETING.with(|m| m.borrow().as_ref().is_some_and(|n| n.ended.is_none()))
+            && MEETING_KEPT.with(|at| now_ms() - at.get() >= 30_000);
+        if due {
+            MEETING_KEPT.with(|at| at.set(now_ms()));
+            self.keep_meeting();
+        }
+    }
+
+    /// As the app opens: take up the meeting that an earlier run wrote down.
+    /// One that was on then counts as quiet since the last time it was seen;
+    /// a call that is noticed soon after is that meeting (see `same_meeting`).
+    /// Gives the program of a meeting that was on then, less than an hour
+    /// ago, for the watcher (`Watch::after`).
+    pub fn recall_meeting(self) -> Option<&'static str> {
+        if MEETING.with(|m| m.borrow().is_some()) {
+            return None;
+        }
+        let k = store::setting("meeting_last").and_then(|s| serde_json::from_str::<KeptMeeting>(&s).ok())?;
+        let app = k.app.as_deref().and_then(crate::meeting::call_app_named).map(|a| a.name);
+        let was_on = k.ended.is_none() && now_ms() - k.seen < when::HOUR;
+        let ended = Some(k.ended.unwrap_or(k.seen).max(k.started));
+        MEETING.with(|m| {
+            *m.borrow_mut() = Some(MeetingNotes { page: k.page, stamp: k.stamp, started: k.started, ended, app, noticed: k.noticed, span: k.span, event: k.event, padded: k.padded, cut: k.listened && k.ended.is_none(), draft: k.draft })
+        });
+        app.filter(|_| was_on)
+    }
+
+    /// A call is noticed. When it is the meeting whose notes were made last
+    /// (see `same_meeting`), that meeting carries on with the same page, and
+    /// what its end did is taken back. Says whether it is.
+    fn carry_on_meeting(self) -> bool {
         let now = now_ms();
-        // The same meeting carrying on (a short gap, or notes made by hand
-        // just before it): no second page.
+        let on_now = self.meeting_event(now).map(|e| (e.id.clone(), e.start, e.end));
         let carried_on = MEETING.with(|m| {
             let mut m = m.borrow_mut();
             let n = m.as_mut()?;
+            let of = n.event.clone().zip(n.span).map(|(id, (start, end))| (id, start, end));
             let same = match n.ended {
-                Some(end) => now - end < SAME_MEETING_MS,
-                None => now - n.started < JUST_MADE_MS,
+                Some(end) => same_meeting(of.as_ref(), end, now, on_now.as_ref()),
+                // Notes made by hand, or by joining from the calendar, just
+                // before the call (or for an event that is still on).
+                None => now - n.started < JUST_MADE_MS || of.as_ref().is_some_and(|(_, _, end)| now < *end),
             };
             // Notes made by hand, or by joining from the calendar, that the
             // watcher sees for the first time now.
@@ -4787,14 +5421,83 @@ impl AppState {
             if same {
                 n.noticed = true;
             }
-            same.then(|| (n.ended.take(), first_seen, n.page.clone()))
+            same.then(|| (n.ended.take(), first_seen, n.page.clone(), std::mem::take(&mut n.cut), std::mem::take(&mut n.padded)))
         });
-        if let Some((was_ended, first_seen, page)) = carried_on {
-            self.restamp_meeting(was_ended);
-            // The app is behind the meeting now: its pad asks on the screen.
-            if first_seen && self.pad.peek().is_none() {
-                self.open_pad(&page);
-            }
+        let Some((was_ended, first_seen, page, cut, padded)) = carried_on else { return false };
+        self.restamp_meeting(was_ended);
+        // The app is behind the meeting now: its pad asks on the screen.
+        if first_seen && self.pad.peek().is_none() {
+            self.open_pad(&page);
+        }
+        if was_ended.is_some() {
+            self.meeting_goes_on(&page, cut, padded);
+        }
+        self.keep_meeting();
+        true
+    }
+
+    /// A meeting that was taken as over goes on (the call went quiet for a
+    /// while, passed to another program, or the app was closed and opened
+    /// again): what its end did is taken back. Its date line has lost the
+    /// end already (`restamp_meeting`), and its page asks for no place while
+    /// the meeting is on (`asks_place`). A page that the person put in the
+    /// Trash stays there: this meeting gets no other page.
+    fn meeting_goes_on(mut self, page: &str, cut: bool, padded: bool) {
+        use crate::pad::{Form, Pad};
+        if !self.pages.peek().get(page).is_some_and(|p| !p.trashed) {
+            return;
+        }
+        let now = now_ms();
+        // The end stopped the listening. It does not start again by itself
+        // (the app listens only when the person says so): the pad and the
+        // page say that it stopped, and offer it with one press.
+        let listens = self.listening.peek().as_ref().is_some_and(|l| l.page == page && !l.stopping);
+        let offer = cut && !listens && crate::listen::available();
+        let says = if offer { "Listening stopped. Press Listen to go on." } else { "" };
+        if self.pad.peek().as_ref().is_some_and(|p| p.page == page) {
+            self.change_pad(|p| {
+                if matches!(p.form, Form::End | Form::Kept) {
+                    p.turn(if offer { Form::Open } else { p.was }, now);
+                }
+                p.ended = None;
+                if offer {
+                    p.problem = says.to_string();
+                }
+            });
+        } else if padded && self.pad.peek().is_none() && crate::pad::enabled() {
+            // Its pad has gone since the end: it comes back.
+            let (started, span) = MEETING.with(|m| m.borrow().as_ref().filter(|n| n.page == page).map(|n| (n.started, n.span))).unwrap_or((now, None));
+            let mut pad = Pad::new(page, if offer { Form::Open } else { Form::Small }, now, span);
+            pad.started = started;
+            pad.used = true;
+            pad.heard = cut;
+            pad.problem = says.to_string();
+            self.pad.set(Some(pad));
+            self.watch_pad();
+        }
+        if offer {
+            self.listen_offer.set(Some(page.to_string()));
+        }
+    }
+
+    /// After an end, the program the meeting was in plays sound again with
+    /// no microphone in use (the person is muted). True when that is the
+    /// meeting of the last notes carrying on; sound alone never makes the
+    /// notes of a new meeting.
+    pub fn meeting_back(self) -> bool {
+        match MEETING.with(|m| m.borrow().as_ref().map(|n| n.ended.is_some())) {
+            Some(true) => self.carry_on_meeting(),
+            // The app had not taken it as over.
+            Some(false) => true,
+            None => false,
+        }
+    }
+
+    /// A call started (the watcher saw its microphone in use): make its
+    /// notes page, unless it is the meeting of the last notes that carries
+    /// on, and show its pad (the app is usually behind the meeting).
+    pub fn meeting_started(self, app: &'static str) {
+        if self.carry_on_meeting() || MEETING_DECLINED.with(|d| d.get()) {
             return;
         }
         let id = self.make_meeting_notes(Some(app));
@@ -4817,7 +5520,7 @@ impl AppState {
                 allowed = crate::notify::request_permission().await;
             }
             if allowed == crate::notify::Permission::Allowed {
-                crate::notify::show_now(&format!("page:{id}"), "Meeting notes are ready", &title).await;
+                crate::notify::show_now(&format!("page:{id}"), "A call started", &format!("Open “{title}” and press Listen or write a note to keep notes of it.")).await;
             }
         });
     }
@@ -4848,12 +5551,14 @@ impl AppState {
         });
     }
 
-    /// The pages a meeting's notes can be kept in: every page of the space
-    /// but the notes of meetings themselves, this page and what is inside it.
-    pub fn meeting_places(&self, page: &str) -> Vec<(Id, String, usize)> {
-        let meetings = meeting_page_ids();
-        let inside = if page.is_empty() { Vec::new() } else { descendants(&self.pages.peek(), page) };
-        self.page_outline().into_iter().filter(|(id, _, _)| id != page && !inside.contains(id) && !meetings.contains(id)).collect()
+    /// The places a page can be kept in, in every space (see `places_to_keep`).
+    pub fn meeting_places(&self, page: &str) -> Vec<crate::pad::Place> {
+        places_to_keep(&self.pages.read(), &self.spaces.read(), page, &meeting_page_ids())
+    }
+
+    /// Where a page is kept now (see `place_of`).
+    pub fn page_place(&self, page: &str) -> (crate::pad::Place, String) {
+        place_of(&self.pages.read(), &self.spaces.read(), page)
     }
 
     /// Whether a page is the notes of a meeting, or of an event of the calendar.
@@ -4863,12 +5568,13 @@ impl AppState {
             || self.mac_cal.peek().pages.values().any(|p| p == id)
     }
 
-    /// Keep a page in `home` ("": in no page, at the top of the list). Asked
-    /// on the page of a meeting when the meeting is over, and by "Move to…".
+    /// Keep a page in `home`: a page of any space, a space (the top of its
+    /// list), or "" (the top of the list of the space it is in). Asked on
+    /// the page of a meeting when the meeting is over, and by "Move to…".
     /// The line of a meeting's notes goes from the page it was in to that
-    /// page, with it.
+    /// page, with it. The sidebar goes with a page that is on the screen.
     pub fn keep_page_in(self, page: &str, home: &str) {
-        let from = self.pages.peek().get(page).and_then(|p| p.parent_id.clone());
+        let Some((from, own)) = self.pages.peek().get(page).map(|p| (p.parent_id.clone(), p.space_id.clone())) else { return };
         let notes = self.is_notes_page(page);
         let unlink = |from: &Option<Id>| {
             if let (true, Some(from)) = (notes, from) {
@@ -4880,10 +5586,12 @@ impl AppState {
         let name = self.meeting_name(page).filter(|_| notes);
         // A meeting with no event on the calendar is known by its day and its time.
         let slot = slot_pages().into_iter().rev().find(|(p, ..)| p == page).filter(|_| notes && name.is_none());
-        if home.is_empty() {
-            if from.is_some() {
+        let top_of = if home.is_empty() { Some(own.clone()) } else { self.spaces.peek().iter().find(|s| s.id == home).map(|s| s.id.clone()) };
+        if let Some(space) = top_of {
+            if from.is_some() || space != own {
                 unlink(&from);
-                self.move_page(page, None, "root");
+                self.move_page_in(&space, page, None, "root");
+                self.follow_route_space();
             }
             if let Some(name) = &name {
                 set_meeting_home(name, None);
@@ -4915,6 +5623,7 @@ impl AppState {
         unlink(&from);
         if !notes {
             self.move_page(page, Some(home), "into");
+            self.follow_route_space();
             return;
         }
         // The newest first, as where it came from.
@@ -4924,6 +5633,7 @@ impl AppState {
             None => self.move_page(page, Some(home), "into"),
         }
         self.link_meeting_in(home, page);
+        self.follow_route_space();
     }
 
     /// The name of the meeting that a notes page is of, when it has one
@@ -4933,10 +5643,10 @@ impl AppState {
     }
 
     /// The page that the notes of meetings of this name are kept in: the
-    /// person chose it on the notes of one of them, and it is still there.
+    /// person chose it on the notes of one of them, and it is still there
+    /// (in any space).
     fn meeting_home(&self, name: &str) -> Option<Id> {
-        let space = self.ui.peek().space.clone();
-        meeting_homes().get(&name.trim().to_lowercase()).filter(|id| self.pages.peek().get(*id).is_some_and(|p| !p.trashed && p.space_id == space)).cloned()
+        meeting_homes().get(&name.trim().to_lowercase()).filter(|id| self.pages.peek().get(*id).is_some_and(|p| !p.trashed)).cloned()
     }
 
     /// The name of this page's meeting, when the notes of the next meeting
@@ -4948,11 +5658,10 @@ impl AppState {
     }
 
     /// What is known about a meeting at this day and time, with the pages
-    /// that are gone (or in another space) left out.
+    /// that are gone left out.
     fn slot_found(&self, slots: &[crate::slots::Slot], day: u32, minute: i64) -> crate::slots::Found {
-        let space = self.ui.peek().space.clone();
         let pages = self.pages.peek();
-        let live = |i: &usize| pages.get(&slots[*i].home).is_some_and(|p| !p.trashed && p.space_id == space);
+        let live = |i: &usize| pages.get(&slots[*i].home).is_some_and(|p| !p.trashed);
         match crate::slots::find(slots, day, minute) {
             crate::slots::Found::Keep(i) if live(&i) => crate::slots::Found::Keep(i),
             crate::slots::Found::Propose(list) => {
@@ -5051,6 +5760,12 @@ impl AppState {
 
     /// The meeting ended at `at`: its date line gets the end time and length.
     pub fn meeting_ended(mut self, at: i64) {
+        MEETING_DECLINED.with(|d| d.set(false));
+        if let Some(page) = MEETING.with(|m| m.borrow().as_ref().filter(|n| n.draft && n.ended.is_none()).map(|n| n.page.clone())) {
+            if self.drop_meeting_draft(&page) {
+                return;
+            }
+        }
         let open = MEETING.with(|m| {
             let mut m = m.borrow_mut();
             match m.as_mut() {
@@ -5065,7 +5780,8 @@ impl AppState {
             self.restamp_meeting(None);
             // Listening to this meeting: it is over, so write the notes. (No
             // spoken recap is asked for then.)
-            let page = MEETING.with(|m| m.borrow().as_ref().map(|n| n.page.clone()));
+            // (A page that the person put in the Trash, or deleted, asks nothing.)
+            let page = MEETING.with(|m| m.borrow().as_ref().map(|n| n.page.clone())).filter(|p| self.pages.peek().get(p).is_some_and(|p| !p.trashed));
             // The meeting is over: its page asks where to keep it (its pad
             // does, while that is on the screen).
             if let Some(page) = &page {
@@ -5076,13 +5792,21 @@ impl AppState {
                 self.listen_offer.set(None);
             }
             if self.listening.peek().as_ref().map(|l| &l.page) == page.as_ref() && page.is_some() {
+                // (If the meeting goes on after all, listening is offered again.)
+                MEETING.with(|m| {
+                    if let Some(n) = m.borrow_mut().as_mut() {
+                        n.cut = true;
+                    }
+                });
+                self.keep_meeting();
                 self.stop_listening();
                 return;
             }
+            self.keep_meeting();
             // Offer to take a spoken recap (the notification opens the box).
             // The AI writes it, so only when there is one.
             // (Not while the pad shows that the meeting is over: one message is enough.)
-            if let Some(page) = MEETING.with(|m| m.borrow().as_ref().map(|n| n.page.clone())).filter(|_| ai::has_ai() && self.pad.peek().is_none()) {
+            if let Some(page) = page.filter(|_| ai::has_ai() && self.pad.peek().is_none()) {
                 spawn_forever(async move {
                     if crate::notify::permission().await == crate::notify::Permission::Allowed {
                         crate::notify::show_now(&format!("recap:{page}"), "The meeting ended", "Click to speak a short recap. The AI writes the notes and action items.").await;
@@ -5172,11 +5896,17 @@ impl AppState {
                     self.start_listening(&page);
                 }
             }
-            Command::NotesOnly | Command::Open => self.change_pad(|p| p.turn(Form::Open, now)),
+            Command::NotesOnly | Command::Open => {
+                self.confirm_meeting(&page);
+                self.change_pad(|p| p.turn(Form::Open, now));
+            }
             Command::Small => self.change_pad(|p| p.turn(Form::Small, now)),
             // Never while it listens: the pad is the sign that it does.
             Command::NotNow => {
                 if !listens {
+                    if self.drop_meeting_draft(&page) {
+                        MEETING_DECLINED.with(|d| d.set(true));
+                    }
                     self.close_pad();
                 }
             }
@@ -5207,7 +5937,9 @@ impl AppState {
     /// are, for a moment, and the page asks no more.
     fn pad_kept(self, page: &str) {
         self.place_done(page);
-        let kept = self.pages.peek().get(page).and_then(|p| p.parent_id.clone()).map(|home| self.page_title(&home)).unwrap_or_default();
+        // (With several spaces, the top of a list is the space.)
+        let (place, _) = place_of(&self.pages.peek(), &self.spaces.peek(), page);
+        let kept = if place.id.is_empty() { String::new() } else { place.title };
         let now = now_ms();
         self.change_pad(|p| {
             p.kept = kept;
@@ -5223,6 +5955,9 @@ impl AppState {
         }
         self.edit_blocks(page, |blocks| crate::pad::put_lines(blocks, &mut written, &lines));
         let typed = lines.iter().any(|l| !l.trim().is_empty());
+        if typed {
+            self.confirm_meeting(page);
+        }
         self.change_pad(|p| {
             p.lines = lines;
             p.written = written;
@@ -5244,7 +5979,14 @@ impl AppState {
             return self.close_pad();
         }
         let now = now_ms();
+        MEETING.with(|m| {
+            if let Some(n) = m.borrow_mut().as_mut().filter(|n| n.page == page) {
+                n.padded = true;
+            }
+        });
         self.change_pad(|p| {
+            // (The form it goes back to if the meeting goes on after all.)
+            p.was = if p.form == Form::Ask { Form::Small } else { p.form };
             p.turn(Form::End, now);
             p.ended = Some(now);
             if listens {
@@ -5295,7 +6037,7 @@ impl AppState {
     /// What the pad draws now (None: there is no pad, or its page is gone).
     /// The theme and the glass colours are added by the window that hands it on.
     pub fn pad_view(&self) -> Option<crate::pad::View> {
-        use crate::pad::{Form, Hears, Place, View};
+        use crate::pad::{Form, Hears, View};
         let pad = self.pad.read().clone()?;
         let (title, icon, parent) = {
             let pages = self.pages.read();
@@ -5334,22 +6076,12 @@ impl AppState {
         };
         if pad.form == Form::End {
             view.asks_place = self.place_asks.read().iter().any(|(p, _)| *p == pad.page);
-            view.here = parent.clone().unwrap_or_default();
-            let pages = self.pages.read();
-            if let Some(home) = parent.as_ref().and_then(|home| pages.get(home)) {
-                view.here_title = home.display_title().to_string();
-                view.here_icon = home.icon.clone();
-            }
+            (view.here, view.here_space) = self.page_place(&pad.page);
             if view.asks_place {
-                view.places = self
-                    .meeting_places(&pad.page)
-                    .into_iter()
-                    .map(|(id, title, depth)| Place { icon: pages.get(&id).and_then(|p| p.icon.clone()), id, title, depth })
-                    .collect();
-                drop(pages);
+                view.places = self.meeting_places(&pad.page);
                 view.before = self.slot_of_page(&pad.page).0;
-            } else if !view.here_title.is_empty() {
-                view.told = format!("These notes are in “{}”, as before.", view.here_title);
+            } else if parent.is_some() {
+                view.told = format!("These notes are in “{}”, as before.", view.here.title);
             }
         }
         Some(view)
@@ -5530,7 +6262,18 @@ impl AppState {
         if self.pages.peek().get(page_id).is_some_and(|p| p.title != version.title) {
             self.rename_page(page_id, version.title.clone());
         }
-        let blocks = version.blocks.clone();
+        let mut blocks = version.blocks.clone();
+        // The rows of its tables go by what they go by now, so that the
+        // pages of the rows still find them.
+        let now = self.blocks.peek().get(page_id).cloned().unwrap_or_default();
+        for b in blocks.iter_mut().filter(|b| b.kind == BlockKind::Table) {
+            if let Some(current) = now.iter().find(|c| c.id == b.id && c.kind == BlockKind::Table) {
+                let mut table = crate::table::Table::parse(&b.data);
+                if table.keep_row_names(&crate::table::Table::parse(&current.data)) {
+                    b.data = table.to_data();
+                }
+            }
+        }
         self.edit_blocks(page_id, move |b| *b = blocks);
         self.set_modal(None);
         self.toast(format!("Restored the version from {}", when::moment(version.at)));
@@ -5668,7 +6411,7 @@ impl AppState {
             Bridge::DrawingSave { page, id, data } => self.save_drawing(&page, &id, data),
             Bridge::ImageData { page, id, data } => self.paste_image(&page, &id, &data),
             Bridge::ImagePlace { page, id, x, w, right, to, after } => {
-                let place = Place { free: true, right, x: x.round() as i32, y: 0, w: w.round().max(0.0) as u32 };
+                let place = Place { free: true, right, x: x.round() as i32, y: 0, w: w.round().max(0.0) as u32, beside: false };
                 self.edit_blocks(&page, |bs| place_picture(bs, &id, place, to.as_deref(), after));
             }
             Bridge::ImageSize { page, id, w } => {
@@ -5678,9 +6421,12 @@ impl AppState {
                 });
             }
             Bridge::TableOp { page, id, op, row, column } => self.table_op(&page, &id, &op, row, column),
+            Bridge::TableSet { page, id, row, column, text } => self.put_table_cell(&page, &id, row, column, &text),
             Bridge::CoverY { page, y } => self.set_cover_y(&page, y.round().clamp(0.0, 100.0) as u8),
             Bridge::PlayerPlace { x, y, w, h } => self.place_player(crate::player::Place { x, y, w, h }),
             Bridge::PlayerDock { h, v, x, y, w } => self.set_player_dock(DockPlace { h, v, x, y, w }),
+            Bridge::SwipeTrace { lines } => swipe_trace(&lines),
+            Bridge::AiImage { data } => self.ai_add_picture(&data),
             Bridge::EventMove { id, days, minutes, grow } => self.move_event(&id, days, minutes, grow),
             Bridge::EventDraw { day, from, to } => self.draw_event(&day, from, to),
             Bridge::TodoPlan { page, block, day, minutes } => self.plan_todo(&page, &block, &day, minutes),
@@ -5998,6 +6744,7 @@ impl AppState {
             while let Some(event) = rx.next().await {
                 match event {
                     AiEvent::Step(..) => {}
+                    AiEvent::Working { .. } => {}
                     AiEvent::Delta(text) => reply.push_str(&text),
                     AiEvent::Done => break,
                     AiEvent::Error(e) => {
@@ -6248,46 +6995,47 @@ impl AppState {
     /// Change a table. Its words are kept in the block's text too, so
     /// search and the AI see them.
     fn edit_table(self, page: &str, id: &str, change: impl FnOnce(&mut crate::table::Table)) {
+        let mut after = None;
         self.edit_blocks(page, |bs| {
             if let Some(i) = index_of(bs, id).filter(|&i| bs[i].kind == BlockKind::Table) {
                 let mut table = crate::table::Table::parse(&bs[i].data);
                 change(&mut table);
                 bs[i].data = table.to_data();
                 bs[i].text = table.plain_text();
+                crate::ui::tables::changed(id, &table);
+                after = Some(table);
             }
         });
+        // The first cell of a row is the name of the row's page.
+        if let Some(table) = after {
+            self.name_row_pages(id, &table);
+        }
     }
 
     /// A letter typed in a cell. This is on the path of every key, so it is
     /// kept light: see [`Origin::Cell`].
     pub fn set_table_cell(self, page: &str, id: &str, row: usize, column: usize, text: &str) {
         let group = format!("{id}#{row},{column}");
+        let mut named_row = None;
         self.edit_blocks_from(page, Origin::Cell { block: id, group: &group }, |bs| {
             if let Some(i) = index_of(bs, id).filter(|&i| bs[i].kind == BlockKind::Table) {
                 let mut table = crate::table::Table::parse(&bs[i].data);
+                // (The headings of a locked table stay as they are.)
+                if row == 0 && table.view.locked {
+                    return;
+                }
                 table.set(row, column, text);
+                if column == 0 {
+                    named_row = table.row_id(row).map(str::to_string);
+                }
                 bs[i].data = table.to_data();
                 bs[i].text = table.plain_text();
             }
         });
-    }
-
-    fn table_op(self, page: &str, id: &str, op: &str, row: usize, column: usize) {
-        self.edit_table(page, id, |t| match op {
-            "add-row" => t.add_row(row),
-            "add-column" => t.add_column(column),
-            "remove-row" => t.remove_row(row),
-            "remove-column" => t.remove_column(column),
-            _ => {}
-        });
-        // The caret goes to the new row or column, or stays near what went.
-        let (r, c) = match op {
-            "add-row" => (row + 1, column),
-            "add-column" => (row, column + 1),
-            "remove-row" => (row.saturating_sub(1), column),
-            _ => (row, column.saturating_sub(1)),
-        };
-        document::eval(&format!("requestAnimationFrame(()=>requestAnimationFrame(()=>window.__n2 && window.__n2.focusCell({}, {r}, {c})))", serde_json::to_string(id).unwrap_or_default()));
+        // The first cell of a row is the name of the row's page.
+        if let Some(row) = named_row {
+            self.name_row_page(id, &row, text);
+        }
     }
 
     /// Set or take away a page's cover.
@@ -6529,6 +7277,10 @@ impl AppState {
             crate::history::rebase(&current, &e.before, &e.after)
         };
         self.set_blocks(&page, target.clone(), true);
+        // (The first cell of a row is the name of the row's page, and a row
+        // that this step takes out takes its page along.)
+        self.name_row_pages_of(&page);
+        self.drop_lost_row_pages(&current, &target);
         for id in &e.trashed {
             self.set_trashed(id, !undo);
         }
@@ -6641,7 +7393,10 @@ impl AppState {
                     self.set_blocks(&page, bs, false);
                 }
                 let trashed: Vec<Id> = pages.values().filter(|p| p.trashed).map(|p| p.id.clone()).collect();
-                let open_and_trashed = self.ui.peek().tabs.iter().any(|t| matches!(t.route(), Route::Page(p) if trashed.contains(p)));
+                let open_and_trashed = {
+                    let ui = self.ui.peek();
+                    ui.tabs.iter().chain(ui.parked.values().flat_map(|set| set.0.iter())).any(|t| matches!(t.route(), Route::Page(p) if trashed.contains(p)))
+                };
                 if open_and_trashed {
                     self.leave_pages(&trashed);
                 }
@@ -6827,6 +7582,9 @@ impl AppState {
             journal: None,
             did: Vec::new(),
             plan: None,
+            working: None,
+            started: 0,
+            pictures: Vec::new(),
         });
         self.set_popover(None);
         if !prompting {
@@ -6926,7 +7684,7 @@ impl AppState {
         let run = session.run + 1;
         // Whichever AI Settings picks (an installed tool by default); a missing
         // tool or key arrives as an Error event.
-        let mut rx = ai::start_with(ai::Prefs::load(), messages, tools);
+        let mut rx = ai::start_with(ai::Prefs::load(), messages, tools, session.pictures.clone());
         let task = spawn(async move {
             while let Some(event) = rx.next().await {
                 // After a step and at the end: show what the tools changed in the notes.
@@ -6936,8 +7694,15 @@ impl AppState {
                     let mut guard = self.ai.write();
                     let Some(s) = guard.as_mut().filter(|s| s.run == run) else { break };
                     match event {
-                        AiEvent::Delta(text) => s.output.push_str(&text),
+                        AiEvent::Delta(text) => {
+                            s.working = None;
+                            s.output.push_str(&text);
+                        }
+                        AiEvent::Working { tool, title, chars } => {
+                            s.working = Some(ai::working_label(&tool, title.as_deref(), chars));
+                        }
                         AiEvent::Step(tool, input) => {
+                            s.working = None;
                             let label = {
                                 let pages = self.pages.peek();
                                 ai::step_label(&tool, &input, |id| pages.get(id).map(|p| p.title.clone()))
@@ -6988,6 +7753,8 @@ impl AppState {
             s.steps.clear();
             s.did.clear();
             s.journal = journal;
+            s.working = None;
+            s.started = now_ms();
             s.status = AiStatus::Streaming;
             s.task = Some(task);
         }
@@ -7029,6 +7796,39 @@ impl AppState {
                 slot.set(None);
             }
         });
+    }
+
+    /// A picture was pasted or dropped into the AI box: it goes with the
+    /// request. (Into the box that is open: the bar of a page while it
+    /// waits for words, or the box that asks all the notes.)
+    pub fn ai_add_picture(mut self, data_url: &str) {
+        let Some(picture) = ai::Picture::from_data_url(data_url) else {
+            return self.toast("That picture is too large, or not a picture");
+        };
+        let in_bar = self.ai.peek().as_ref().is_some_and(|s| s.status == AiStatus::Prompting);
+        let full = "No more than four pictures go with one request";
+        if in_bar {
+            let mut ai = self.ai.write();
+            let Some(s) = ai.as_mut() else { return };
+            if s.pictures.len() >= ai::MOST_PICTURES {
+                drop(ai);
+                return self.toast(full);
+            }
+            s.pictures.push(picture);
+        } else if self.ui.peek().modal == Some(Modal::AskNotes) {
+            if self.ask_pictures.peek().len() >= ai::MOST_PICTURES {
+                return self.toast(full);
+            }
+            self.ask_pictures.write().push(picture);
+        }
+    }
+
+    /// Take a picture out again, before the request is sent.
+    pub fn ai_remove_picture(mut self, id: &str) {
+        if let Some(s) = self.ai.write().as_mut() {
+            s.pictures.retain(|p| p.id != id);
+        }
+        self.ask_pictures.write().retain(|p| p.id != id);
     }
 
     /// "Do it" under a plan for a large job: the AI does the work now.
@@ -7154,6 +7954,8 @@ impl AppState {
             *bs = merged;
             bs.iter().rev().find(|b| b.kind.is_editable()).map(|b| Caret::end(&b.id))
         });
+        // (A row that the AI gave another name: its page takes the name.)
+        self.name_row_pages_of(&session.page_id);
         *self.ai.write() = None;
         let made: Vec<Id> = made.into_iter().map(|(_, id)| id).collect();
         // One step: Undo takes back the change and the sub-pages together.
@@ -7416,7 +8218,31 @@ impl AppState {
                 store::set_setting("meeting_homes", "");
             }
             // (For the self-test: the next meeting that starts is a new one.)
-            "forget_meeting" => MEETING.with(|m| *m.borrow_mut() = None),
+            "forget_meeting" => {
+                MEETING.with(|m| *m.borrow_mut() = None);
+                self.keep_meeting();
+            }
+            // (For the self-test: the watcher hears the sound of the meeting's
+            // program again, with no microphone; the answer is left for the test.)
+            "meeting_back" => {
+                let back = self.meeting_back();
+                document::eval(&format!("document.body.dataset.meetingBack = '{}';", if back { "yes" } else { "no" }));
+            }
+            // (For the self-test: the meeting went quiet half an hour ago.)
+            "meeting_old" => MEETING.with(|m| {
+                if let Some(end) = m.borrow_mut().as_mut().and_then(|n| n.ended.as_mut()) {
+                    *end -= 30 * when::MINUTE;
+                }
+            }),
+            // (For the self-test: the app is closed and opened again. What it
+            // knows of the meeting is what it wrote down; its pad is gone.)
+            "meeting_restart" => {
+                self.keep_meeting();
+                MEETING.with(|m| *m.borrow_mut() = None);
+                self.close_pad();
+                let app = self.recall_meeting();
+                document::eval(&format!("document.body.dataset.meetingApp = {:?};", app.unwrap_or("")));
+            }
             // (For the self-test: the meetings that start take no event of the
             // calendar, so that a check of a meeting with no event does not
             // hang on what the other checks left there at this hour.)
@@ -7573,6 +8399,110 @@ fn seed(pages: &mut HashMap<Id, Page>, blocks: &mut HashMap<Id, Vec<Block>>, spa
 
 #[cfg(test)]
 mod tests {
+    fn page_in(id: &str, space: &str) -> (Id, Page) {
+        let mut p = Page::new(None, 1.0);
+        p.id = id.into();
+        p.space_id = space.into();
+        (id.to_string(), p)
+    }
+
+    fn ui_with(tabs: Vec<Tab>, space: &str) -> Ui {
+        Ui {
+            tabs,
+            active: 0,
+            closed: Vec::new(),
+            parked: HashMap::new(),
+            sidebar_open: true,
+            sidebar_width: 240.0,
+            expanded: HashSet::new(),
+            popover: None,
+            modal: None,
+            zoom: 1.0,
+            theme: Theme::parse(""),
+            recent: Vec::new(),
+            space: space.into(),
+            history: None,
+            voice: VoiceFor::NewPage,
+        }
+    }
+
+    fn titles(tabs: &[Tab]) -> Vec<String> {
+        tabs.iter()
+            .map(|t| match t.route() {
+                Route::Page(id) => id.clone(),
+                _ => "home".to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn each_space_keeps_its_own_tabs() {
+        let pages: HashMap<Id, Page> = [page_in("a", "one"), page_in("b", "one"), page_in("t", "two")].into_iter().collect();
+        let mut ui = ui_with(vec![Tab::new(Route::Page("a".into())), Tab::new(Route::Page("b".into()))], "one");
+        ui.active = 1;
+        // A space with no tabs yet starts with one.
+        assert!(ui.show_tabs_of("two", &pages, Route::Page("t".into())));
+        assert_eq!((titles(&ui.tabs), ui.space.as_str()), (vec!["t".to_string()], "two"));
+        // Back again: the same tabs, the same one in front, and none is made.
+        assert!(!ui.show_tabs_of("one", &pages, Route::Home));
+        assert_eq!((titles(&ui.tabs), ui.active), (vec!["a".to_string(), "b".to_string()], 1));
+        assert_eq!(titles(&ui.parked["two"].0), vec!["t".to_string()]);
+    }
+
+    #[test]
+    fn a_tab_goes_with_a_page_moved_to_another_space() {
+        let mut pages: HashMap<Id, Page> = [page_in("a", "one"), page_in("b", "one"), page_in("t", "two")].into_iter().collect();
+        let mut ui = ui_with(vec![Tab::new(Route::Page("a".into())), Tab::new(Route::Page("b".into()))], "one");
+        ui.parked.insert("two".into(), (vec![Tab::new(Route::Page("t".into()))], 0));
+        // The tab in front is carried over and is in front there.
+        pages.get_mut("a").unwrap().space_id = "two".into();
+        ui.carry_tab_to("two", &pages);
+        assert_eq!((titles(&ui.tabs), ui.active, ui.space.as_str()), (vec!["t".to_string(), "a".to_string()], 1, "two"));
+        assert_eq!(titles(&ui.parked["one"].0), vec!["b".to_string()]);
+        // A tab put away finds its page gone to the space you left: it moves.
+        pages.get_mut("b").unwrap().space_id = "two".into();
+        assert!(ui.show_tabs_of("one", &pages, Route::Home), "the space is left with no tab, so it gets one");
+        assert_eq!(titles(&ui.tabs), vec!["home".to_string()]);
+        assert_eq!(titles(&ui.parked["two"].0), vec!["t".to_string(), "a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn the_tabs_of_every_space_survive_a_restart() {
+        let mut parked: HashMap<Id, TabSet> = HashMap::new();
+        parked.insert("two".into(), (vec![Tab::new(Route::Home), Tab::new(Route::Page("t".into()))], 1));
+        let saved = serde_json::to_string(&parked).unwrap();
+        let back: HashMap<Id, TabSet> = serde_json::from_str(&saved).unwrap();
+        assert_eq!(back, parked);
+    }
+
+    #[test]
+    fn tabs_saved_in_one_row_are_sorted_by_space() {
+        let pages: HashMap<Id, Page> = [page_in("a", "one"), page_in("t", "two"), page_in("u", "two")].into_iter().collect();
+        let mut mixed = Tab::new(Route::Page("t".into()));
+        mixed.push(Route::Page("a".into()));
+        mixed.push(Route::Page("u".into()));
+        let tabs = vec![Tab::new(Route::Home), mixed, Tab::new(Route::Page("a".into()))];
+        let (here, active, others) = sort_tabs_by_space(tabs, 2, "one", &pages);
+        assert_eq!((titles(&here), active), (vec!["home".to_string(), "a".to_string()], 1));
+        assert_eq!(titles(&others["two"].0), vec!["u".to_string()]);
+        // Back in that tab stays in its space.
+        let pane = &others["two"].0[0].panes[0];
+        assert_eq!(pane.history, vec![Route::Page("t".into()), Route::Page("u".into())]);
+        assert_eq!(pane.cursor, 1);
+    }
+
+    #[test]
+    fn a_saved_tab_loses_a_page_that_is_gone_and_keeps_the_one_on_show() {
+        let (mut pages, mut pane): (HashMap<Id, Page>, Pane) = ([page_in("a", "one"), page_in("b", "one"), page_in("c", "one")].into_iter().collect(), Pane::new(Route::Page("a".into())));
+        pane.push(Route::Page("b".into()));
+        pane.push(Route::Page("c".into()));
+        pane.cursor = 1;
+        pages.get_mut("a").unwrap().trashed = true;
+        let mut tabs = vec![Tab::with_pane(pane)];
+        forget_gone(&mut tabs, &pages);
+        assert_eq!(tabs[0].route(), &Route::Page("b".into()));
+    }
+
     #[test]
     fn the_place_of_the_video_player() {
         let usual = DockPlace::default();
@@ -7587,6 +8517,116 @@ mod tests {
     }
 
     use super::*;
+
+    /// A page for the tests of the list of places.
+    fn place_page(id: &str, title: &str, space: &str, parent: Option<&str>, position: f64) -> Page {
+        Page { id: id.into(), title: title.into(), space_id: space.into(), ..Page::new(parent.map(str::to_string), position) }
+    }
+
+    fn two_spaces() -> (Vec<Space>, HashMap<Id, Page>) {
+        let mut work = Space::new("Work", "blue", 1.0);
+        work.id = "work".into();
+        let mut trading = Space::new("Trading", "green", 2.0);
+        trading.id = "trading".into();
+        let pages = [
+            place_page("acme", "Acme", "work", None, 1.0),
+            place_page("deep1", "One", "work", Some("acme"), 1.0),
+            place_page("deep2", "Two", "work", Some("deep1"), 1.0),
+            place_page("deep3", "Three", "work", Some("deep2"), 1.0),
+            place_page("deep4", "Four", "work", Some("deep3"), 1.0),
+            place_page("notes", "Meeting notes", "trading", None, 1.0),
+            place_page("call", "Call", "trading", Some("notes"), 1.0),
+            place_page("inside", "Inside the call", "trading", Some("call"), 1.0),
+            place_page("old", "Old", "trading", None, 2.0),
+        ];
+        let mut pages: HashMap<Id, Page> = pages.into_iter().map(|p| (p.id.clone(), p)).collect();
+        pages.get_mut("old").unwrap().trashed = true;
+        (vec![work, trading], pages)
+    }
+
+    #[test]
+    fn every_space_and_its_pages_can_be_chosen_to_keep_a_page_in() {
+        let (spaces, pages) = two_spaces();
+        let rows = places_to_keep(&pages, &spaces, "call", &[]);
+        let seen: Vec<(&str, usize)> = rows.iter().map(|r| (r.id.as_str(), r.depth)).collect();
+        // Grouped by space, as deep as the pages go; not the page itself, what
+        // is inside it, or the Trash.
+        assert_eq!(seen, [("work", 0), ("acme", 1), ("deep1", 2), ("deep2", 3), ("deep3", 4), ("deep4", 5), ("trading", 0), ("notes", 1)]);
+        assert_eq!(rows[0].badge, Some(("W".to_string(), "blue".to_string())));
+        assert_eq!(rows[1].badge, None);
+        // The notes of a meeting are not a place, but pages inside one are.
+        let rows = places_to_keep(&pages, &spaces, "acme", &["call".to_string()]);
+        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["work", "trading", "notes", "inside"]);
+        assert_eq!(rows[3].depth, 2);
+    }
+
+    #[test]
+    fn with_one_space_the_list_of_places_has_no_groups() {
+        let (mut spaces, pages) = two_spaces();
+        spaces.remove(0);
+        let rows = places_to_keep(&pages, &spaces, "call", &[]);
+        let seen: Vec<(&str, usize)> = rows.iter().map(|r| (r.id.as_str(), r.depth)).collect();
+        assert_eq!(seen, [("", 0), ("notes", 0)]);
+        assert_eq!(rows[0].title, NO_PAGE);
+    }
+
+    #[test]
+    fn where_a_page_is_kept_is_where_it_really_is() {
+        let (spaces, pages) = two_spaces();
+        let (place, space) = place_of(&pages, &spaces, "call");
+        assert_eq!((place.id.as_str(), place.title.as_str(), space.as_str()), ("notes", "Meeting notes", "Trading"));
+        let (place, space) = place_of(&pages, &spaces, "acme");
+        assert_eq!((place.id.as_str(), place.title.as_str(), space.as_str()), ("work", "Work", ""));
+        let one = &spaces[..1];
+        let (place, space) = place_of(&pages, one, "acme");
+        assert_eq!((place.id.as_str(), place.title.as_str(), space.as_str()), ("", NO_PAGE, ""));
+    }
+
+    #[test]
+    fn a_page_can_move_to_another_space() {
+        let (_, pages) = two_spaces();
+        // Into a page of another space, and to the top of another space's list.
+        assert_eq!(plan_page_move(&pages, "work", "call", Some("deep2"), "into"), Some((Some("deep2".to_string()), 2.0, "work".to_string())));
+        assert_eq!(plan_page_move(&pages, "work", "call", None, "root"), Some((None, 2.0, "work".to_string())));
+    }
+
+    #[test]
+    fn a_call_that_is_noticed_again_is_the_same_meeting_or_the_next_one() {
+        const MIN: i64 = when::MINUTE;
+        let t0 = 1_800_000_000_000;
+        let standup = ("a".to_string(), t0, t0 + 30 * MIN);
+        let review = ("b".to_string(), t0 + 30 * MIN, t0 + 60 * MIN);
+        let focus = ("c".to_string(), t0 - 60 * MIN, t0 + 120 * MIN);
+        // Its own event is still on: the same meeting, however long it was quiet.
+        assert!(same_meeting(Some(&standup), t0 + 2 * MIN, t0 + 29 * MIN, Some(&standup)));
+        assert!(same_meeting(Some(&standup), t0 + 2 * MIN, t0 + 29 * MIN, None));
+        // It runs over its time: the same meeting for 20 minutes after it went quiet…
+        assert!(same_meeting(Some(&standup), t0 + 31 * MIN, t0 + 45 * MIN, None));
+        assert!(!same_meeting(Some(&standup), t0 + 31 * MIN, t0 + 52 * MIN, None));
+        // …and an event that has been on for a long time (a block of the day) does not make it another one.
+        assert!(same_meeting(Some(&standup), t0 + 31 * MIN, t0 + 45 * MIN, Some(&focus)));
+        // Another event starts about now: the next meeting, though the last one went quiet a minute ago.
+        assert!(!same_meeting(Some(&standup), t0 + 30 * MIN, t0 + 31 * MIN, Some(&review)));
+        assert!(!same_meeting(None, t0 + 28 * MIN, t0 + 29 * MIN, Some(&review)));
+        // A meeting with no event: the same one for 20 minutes, then a new one.
+        assert!(same_meeting(None, t0, t0 + 19 * MIN, None));
+        assert!(!same_meeting(None, t0, t0 + 20 * MIN, None));
+        // …and an event that started long before does not cut it in two.
+        assert!(same_meeting(None, t0, t0 + 5 * MIN, Some(&focus)));
+        // The same event of a repeat on another day is another meeting.
+        let tomorrow = ("a".to_string(), t0 + 24 * 60 * MIN, t0 + 24 * 60 * MIN + 30 * MIN);
+        assert!(!same_meeting(Some(&standup), t0 + 29 * MIN, t0 + 24 * 60 * MIN + MIN, Some(&tomorrow)));
+    }
+
+    #[test]
+    fn the_meeting_is_written_down_in_a_form_that_reads_back() {
+        let kept = KeptMeeting { page: "p".into(), stamp: "s".into(), started: 5, ended: None, app: Some("Zoom".into()), noticed: true, span: Some((1, 9)), event: Some("e".into()), padded: true, listened: false, seen: 7, draft: true };
+        let back: KeptMeeting = serde_json::from_str(&serde_json::to_string(&kept).unwrap()).unwrap();
+        assert_eq!((back.page.as_str(), back.started, back.ended, back.app.as_deref(), back.span, back.event.as_deref(), back.padded, back.seen), ("p", 5, None, Some("Zoom"), Some((1, 9)), Some("e"), true, 7));
+        // What an older run wrote (or nothing) is not a meeting.
+        assert!(serde_json::from_str::<KeptMeeting>("").is_err());
+    }
 
     #[test]
     fn blocks_are_picked_alone_with_their_nested_lines_or_as_a_range() {

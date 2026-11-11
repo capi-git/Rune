@@ -126,6 +126,7 @@ pub fn to_blocks(md: &str) -> Vec<Block> {
                 flush(&mut out, &mut paragraph, &mut quote);
                 let mut block = Block::new(BlockKind::Table, table.plain_text());
                 block.data = table.to_data();
+                block.place.beside = table.beside;
                 out.push(block);
                 skip = taken - 1;
                 continue;
@@ -295,7 +296,7 @@ pub fn render(title: &str, blocks: &[Block], mut special: impl FnMut(&Block) -> 
             BlockKind::Drawing => format!("{pad}[Drawing]"),
             BlockKind::Image if b.text.trim().is_empty() => format!("{pad}[Image]"),
             BlockKind::Image => format!("{pad}[Image: {}]", b.text.trim()),
-            BlockKind::Table => crate::table::Table::parse(&b.data).to_markdown(&pad),
+            BlockKind::Table => table_markdown(b, &pad),
             BlockKind::Chart => crate::chart::Chart::parse(&b.data).to_markdown(),
             BlockKind::PageLink => "[Page]".to_string(),
             }
@@ -304,6 +305,14 @@ pub fn render(title: &str, blocks: &[Block], mut special: impl FnMut(&Block) -> 
         out.push_str("\n\n");
     }
     out.trim_end().to_string()
+}
+
+/// A table block as Markdown. That it stands beside the table above it is
+/// kept with the block, and said on the table's comment line.
+pub fn table_markdown(b: &Block, pad: &str) -> String {
+    let mut table = crate::table::Table::parse(&b.data);
+    table.beside = b.place.beside;
+    table.to_markdown(pad)
 }
 
 #[cfg(test)]
@@ -324,6 +333,25 @@ mod tests {
         assert_eq!(to_blocks(&back).iter().map(|b| (b.kind, b.data.clone())).collect::<Vec<_>>(), blocks.iter().map(|b| (b.kind, b.data.clone())).collect::<Vec<_>>());
         // A chart block that is not a chart stays code.
         assert_eq!(to_blocks("```chart\nnot json\n```")[0].kind, BlockKind::Code);
+    }
+
+    #[test]
+    fn a_named_table_beside_another_there_and_back() {
+        let md = "| Item | Amount |\n| --- | --- |\n| Salary | $3,500.00 |\n<!-- columns: text | number USD sum -->\n<!-- table: Income | icon plus:green -->\n\n| Item | Amount |\n| --- | --- |\n| Rent | $2,000.00 |\n<!-- columns: text | number USD sum -->\n<!-- table: Expenses | beside -->\n\nAfter";
+        let blocks = to_blocks(md);
+        assert_eq!(blocks.iter().map(|b| b.kind).collect::<Vec<_>>(), [BlockKind::Table, BlockKind::Table, BlockKind::Text]);
+        assert_eq!((blocks[0].place.beside, blocks[1].place.beside), (false, true));
+        let (income, expenses) = (crate::table::Table::parse(&blocks[0].data), crate::table::Table::parse(&blocks[1].data));
+        assert_eq!((income.name.as_str(), income.icon.as_str(), expenses.name.as_str()), ("Income", "plus:green", "Expenses"));
+        assert_eq!(expenses.total(1), Some(("Sum", "$2,000.00".to_string())));
+        // The name of a table is in the words of its block, for search.
+        assert!(blocks[1].text.starts_with("Expenses"));
+        // (That it stands beside is kept with the block, not in the table.)
+        assert!(!blocks[1].data.contains("beside"));
+        let back = from_blocks("", &blocks, |_| String::new());
+        assert!(back.contains("<!-- table: Expenses | beside -->") && back.contains("<!-- table: Income | icon plus:green -->"), "{back}");
+        let again = to_blocks(&back);
+        assert_eq!(again.iter().map(|b| (b.kind, b.data.clone(), b.place)).collect::<Vec<_>>(), blocks.iter().map(|b| (b.kind, b.data.clone(), b.place)).collect::<Vec<_>>());
     }
 
     #[test]

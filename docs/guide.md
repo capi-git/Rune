@@ -160,11 +160,24 @@ NOTION2_DB=/tmp/notion2-test.db NOTION2_SELFTEST=/tmp/notion2-report.json cargo 
   rows for the day, the times, repeat, reminder, colour, space, meeting link
   and notes, each with Rune's own picker; or turn its notes into a page. Home
   lists what's coming up.
-- **Tables and charts:** a table column has a kind (text, date, number, time,
-  pace, checkbox, choice), a unit and a total at the foot; **New row for
-  today** starts a row. A chart block (type `/chart`) draws bars, a line, a
-  ring or days from the table above it or from a table of another page. With
-  an AI connected, "I ran 6 km in 34 minutes today" adds the row.
+- **Tables and charts:** a table column has a kind (text, number, choice,
+  several choices, date, time, pace, checkbox, link, email, phone, picture,
+  formula, row of another table), a format (money, percent), a unit and a
+  total at the foot. Type `$3,500` in a cell and its column becomes US
+  Dollar. A click on a choice cell opens its list: pick an option, or type
+  a new one and press Return; the dots beside an option change its name
+  and colour. A table can have a name and an icon, stand beside another table,
+  and show its rows as a board, a list, a gallery or a calendar. Its menu
+  (the ⋯ at its top right) also filters, sorts, groups and colours its rows,
+  and locks its columns; a filter or a sort shows as a small chip above the
+  table. Each row is a page: **Open** on a row shows it at the side, with
+  the values of the row at the top and room to write below. The handle at
+  the left of a row adds a row, moves it, nests it under the row above, or
+  takes it out. New rows can start from a template; in a table with a date
+  column, **New row for today** starts a row. A chart block (type `/chart`)
+  draws bars, a line, a ring or days from the table above it or from a table
+  of another page. With an AI connected, "I ran 6 km in 34 minutes today"
+  adds the row.
 - **Notifications:** each event has a reminder (new events default to 10
   minutes before; change it in Settings). Reminders for the next two weeks are
   handed to macOS, so they arrive even when the app is closed, and clicking one
@@ -231,6 +244,11 @@ card shows the step it is at. At the end it lists what it did, with Undo: one
 press takes all of it back. A page it removes goes to the Trash. With no AI
 tool connected, none of the AI shows in the app; Settings ▸ AI is where you
 connect one.
+
+You can give the AI a picture with your words: paste a screenshot (⌘V) or drop
+a picture file into the AI bar, up to four. It shows small in the bar; a press
+on it takes it out again. While the AI writes a long page, the card says what
+it writes and how far it is, with a clock.
 
 To check the installed tools for real (sends one tiny prompt to each):
 `cargo test live_installed_tools -- --ignored --nocapture`. To see the real

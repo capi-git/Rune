@@ -224,6 +224,9 @@ pub struct Block {
 /// line it was let go at: it keeps its spot in the list of blocks (so it
 /// stays with the text around it), and the lines after it run beside it
 /// where there is room, or below it. Nothing goes under or over it.
+///
+/// For a table, only `beside` is used: the table stands at the right of the
+/// table above it, on the same line.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Place {
     #[serde(default)]
@@ -242,6 +245,9 @@ pub struct Place {
     /// Its width in points; 0 is the picture's own width.
     #[serde(default)]
     pub w: u32,
+    /// A table that stands beside the table above it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub beside: bool,
 }
 
 impl Place {
@@ -479,6 +485,13 @@ pub struct Page {
     /// "serif" or "mono". A serif page also has a larger first paragraph
     /// and sets its quotes large.
     pub font: String,
+    /// For the page of a row of a table: the id of the table's block (it
+    /// is in the page `parent_id`), a bar, and what the row goes by there
+    /// (`table::RowInfo::id`); "template" in place of a row for the page of
+    /// the table's template. Such a page is not in the sidebar: it opens
+    /// from its row.
+    #[serde(default)]
+    pub row_of: Option<Id>,
 }
 
 /// The faces a page can have, with their names.
@@ -536,6 +549,7 @@ impl Page {
             cover: None,
             cover_y: 50,
             font: String::new(),
+            row_of: None,
         }
     }
 
@@ -884,7 +898,8 @@ pub fn keep_unchanged(old: &[Block], new: Vec<Block>) -> Vec<Block> {
             j += 1;
         }
     }
-    new.into_iter()
+    let mut out: Vec<Block> = new
+        .into_iter()
         .zip(same)
         .map(|(fresh, was)| {
             let Some(was) = was.map(|i| &old[i]) else { return fresh };
@@ -903,7 +918,67 @@ pub fn keep_unchanged(old: &[Block], new: Vec<Block>) -> Vec<Block> {
                 Block { id: was.id.clone(), ..fresh }
             }
         })
-        .collect()
+        .collect();
+    // A table with a changed cell has other words, so above it came out as
+    // a new block. It is the same table still.
+    keep_tables(old, &mut out);
+    out
+}
+
+/// A page was written anew as Markdown and read back as `new`. Each table
+/// of `new` that is no block of `old` is the table of `old` it was written
+/// from, when there is one: it takes that table's id, and from it what
+/// Markdown cannot say (its view, what its rows go by, so that the pages of
+/// the rows find them: see `Table::adopt`). The two are paired by the name
+/// of the table, then by the headings they share (the most first). Tables
+/// that are left on both sides pair in their order only when as many are
+/// left old as new: a table that was added takes nothing from another.
+pub fn keep_tables(old: &[Block], new: &mut [Block]) {
+    use crate::table::Table;
+    let fresh: Vec<usize> = (0..new.len()).filter(|&i| new[i].kind == BlockKind::Table && !old.iter().any(|o| o.id == new[i].id)).collect();
+    let spare: Vec<&Block> = old.iter().filter(|o| o.kind == BlockKind::Table && !new.iter().any(|b| b.id == o.id)).collect();
+    if fresh.is_empty() || spare.is_empty() {
+        return;
+    }
+    let mut now: Vec<Table> = fresh.iter().map(|&i| Table::parse(&new[i].data)).collect();
+    let was: Vec<Table> = spare.iter().map(|b| Table::parse(&b.data)).collect();
+    let headings = |t: &Table| -> Vec<String> { (0..t.columns()).map(|c| t.cell(0, c).trim().to_lowercase()).filter(|h| !h.is_empty()).collect() };
+    let (heads_now, heads_was): (Vec<_>, Vec<_>) = (now.iter().map(headings).collect(), was.iter().map(headings).collect());
+    let mut likeness: Vec<(usize, usize, usize)> = Vec::new();
+    for n in 0..now.len() {
+        for w in 0..was.len() {
+            let named = !now[n].name.is_empty() && now[n].name.to_lowercase() == was[w].name.to_lowercase();
+            let shared = heads_now[n].iter().filter(|h| heads_was[w].contains(h)).count();
+            if named || shared > 0 {
+                likeness.push((if named { 1000 } else { 0 } + shared, n, w));
+            }
+        }
+    }
+    // (The most alike first; among equals, those that come first.)
+    likeness.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+    let mut pair: Vec<Option<usize>> = vec![None; now.len()];
+    let mut taken = vec![false; was.len()];
+    for (_, n, w) in likeness {
+        if pair[n].is_none() && !taken[w] {
+            pair[n] = Some(w);
+            taken[w] = true;
+        }
+    }
+    let left_now: Vec<usize> = (0..now.len()).filter(|&n| pair[n].is_none()).collect();
+    let left_was: Vec<usize> = (0..was.len()).filter(|&w| !taken[w]).collect();
+    if left_now.len() == left_was.len() {
+        for (n, w) in left_now.into_iter().zip(left_was) {
+            pair[n] = Some(w);
+        }
+    }
+    for (n, w) in pair.into_iter().enumerate().filter_map(|(n, w)| Some((n, w?))) {
+        let b = &mut new[fresh[n]];
+        now[n].adopt(&was[w]);
+        b.id = spare[w].id.clone();
+        b.data = now[n].to_data();
+        b.text = now[n].plain_text();
+        b.place.beside |= spare[w].place.beside;
+    }
 }
 
 /// Put a picture at a place. A free picture goes to the line it was let go
@@ -1145,7 +1220,7 @@ mod tests {
 
     #[test]
     fn a_picture_goes_to_the_line_it_is_let_go_at() {
-        let free = Place { free: true, right: true, x: 42, y: 0, w: 300 };
+        let free = Place { free: true, right: true, x: 42, y: 0, w: 300, beside: false };
         let mut blocks = vec![
             picture(Place::default()),
             Block::text("a"),
@@ -1173,13 +1248,13 @@ mod tests {
         assert!(!place_picture(&mut blocks, &pic, free, Some("gone"), false));
         assert!(!place_picture(&mut blocks, &c, free, None, false), "only pictures have a place");
         // Back in line: it keeps its width and its spot in the list.
-        assert!(place_picture(&mut blocks, &pic, Place { free: false, right: true, x: 9, y: 9, w: 300 }, None, false));
-        assert_eq!(blocks[3].place, Place { free: false, right: false, x: 0, y: 0, w: 300 });
+        assert!(place_picture(&mut blocks, &pic, Place { free: false, right: true, x: 9, y: 9, w: 300, beside: false }, None, false));
+        assert_eq!(blocks[3].place, Place { free: false, right: false, x: 0, y: 0, w: 300, beside: false });
         assert!(!blocks[3].floats());
         // Numbers out of range are brought in.
-        assert_eq!(Place { free: true, right: true, x: 999_999, y: -999_999, w: 3 }.tidy(), Place { free: true, right: true, x: 20_000, y: 0, w: 40 });
+        assert_eq!(Place { free: true, right: true, x: 999_999, y: -999_999, w: 3, beside: false }.tidy(), Place { free: true, right: true, x: 20_000, y: 0, w: 40, beside: false });
         // A file from the first form of free pictures (with a height) still reads.
-        assert_eq!(Place::from_column(r#"{"free":true,"x":120,"y":64,"w":300}"#), Place { free: true, right: false, x: 120, y: 0, w: 300 });
+        assert_eq!(Place::from_column(r#"{"free":true,"x":120,"y":64,"w":300}"#), Place { free: true, right: false, x: 120, y: 0, w: 300, beside: false });
         assert_eq!(Place::from_column(&free.to_column()), free);
         assert_eq!(Place::default().to_column(), "");
         assert_eq!(Place::from_column("not json"), Place::default());
@@ -1201,7 +1276,7 @@ mod tests {
             toggle.clone(),
             Block::text("hidden line").with_indent(1),
             todo.clone(),
-            picture(Place { free: true, right: true, x: 0, y: 0, w: 200 }),
+            picture(Place { free: true, right: true, x: 0, y: 0, w: 200, beside: false }),
             Block::text("Old closing line"),
         ];
         // As read back from the AI's Markdown: new ids, the toggle a bullet,
@@ -1238,8 +1313,87 @@ mod tests {
     }
 
     #[test]
+    fn a_table_written_again_is_the_same_table() {
+        use crate::table::{Table, Total};
+        // A page with two tables; the first has a view and rows that go by names.
+        let make = |rows: &[[&str; 2]]| Table::of(rows.iter().map(|r| r.iter().map(|c| c.to_string()).collect()).collect());
+        let mut budget = make(&[["Item", "Amount"], ["Rent", "$2,000.00"], ["Food", "$150.00"]]);
+        budget.set_kind(1, crate::table::Kind::Number);
+        budget.set_format(1, "USD");
+        budget.set_total(1, Some(Total::Sum));
+        budget.change_view(|v| v.sort_by(1, true));
+        budget.name_rows();
+        let other = make(&[["Name", "Note"], ["a", "b"]]);
+        let block = |t: &Table, beside: bool| {
+            let mut b = Block::new(BlockKind::Table, t.plain_text());
+            b.data = t.to_data();
+            b.place.beside = beside;
+            b
+        };
+        let old = vec![Block::text("Intro"), block(&budget, false), block(&other, true), Block::text("End")];
+        // The AI changes one cell of the first table and leaves the rest.
+        let md = crate::markdown::from_blocks("", &old, |_| String::new()).replace("$150.00", "$175.00");
+        let out = keep_unchanged(&old, crate::markdown::to_blocks(&md));
+        assert_eq!(out.iter().map(|b| b.id.as_str()).collect::<Vec<_>>(), old.iter().map(|b| b.id.as_str()).collect::<Vec<_>>());
+        let changed = Table::parse(&out[1].data);
+        assert_eq!(changed.cell(2, 1), "$175.00");
+        assert_eq!(changed.total(1), Some(("Sum", "$2,175.00".to_string())));
+        // What Markdown cannot say stayed: the sort, and what the rows go by.
+        assert_eq!(changed.view, budget.view);
+        assert_eq!((changed.row_id(1), changed.row_id(2)), (budget.row_id(1), budget.row_id(2)));
+        // The table that did not change is the old block as it was, beside the first.
+        assert_eq!(out[2], old[2]);
+        assert!(out[2].place.beside && !out[1].place.beside);
+    }
+
+    #[test]
+    fn a_table_put_above_another_takes_nothing_from_it() {
+        use crate::table::Table;
+        let make = |name: &str, rows: &[[&str; 2]]| {
+            let mut t = Table::of(rows.iter().map(|r| r.iter().map(|c| c.to_string()).collect()).collect());
+            t.name = name.to_string();
+            t
+        };
+        let block = |t: &Table| {
+            let mut b = Block::new(BlockKind::Table, t.plain_text());
+            b.data = t.to_data();
+            b
+        };
+        let mut budget = make("", &[["Item", "Amount"], ["Rent", "2000"], ["Food", "150"]]);
+        budget.change_view(|v| v.sort_by(1, true));
+        budget.name_rows();
+        let mut plans = make("Plans", &[["Name", "Note"], ["Trip", "May"]]);
+        plans.name_rows();
+        let old = vec![Block::text("Intro"), block(&budget), block(&plans)];
+        // The AI puts a new table first, changes a cell of each of the two, and gives the second other headings.
+        let md = crate::markdown::from_blocks("", &old, |_| String::new());
+        let md = md.replace("| Food | 150 |", "| Food | 175 |").replace("| Name | Note |", "| What | When |").replace("| Trip | May |", "| Trip | June |");
+        let md = format!("| Item | Shop |\n| --- | --- |\n| Milk | Corner |\n\n{md}");
+        let out = keep_unchanged(&old, crate::markdown::to_blocks(&md));
+        let tables: Vec<&Block> = out.iter().filter(|b| b.kind == BlockKind::Table).collect();
+        assert_eq!(tables.len(), 3);
+        // The new table is a new block; the two others are the blocks they were, with what Markdown cannot say.
+        assert!(old.iter().all(|o| o.id != tables[0].id));
+        assert_eq!((tables[1].id.as_str(), tables[2].id.as_str()), (old[1].id.as_str(), old[2].id.as_str()));
+        let (new_one, budget_now, plans_now) = (Table::parse(&tables[0].data), Table::parse(&tables[1].data), Table::parse(&tables[2].data));
+        assert!(new_one.view.is_plain() && !new_one.has_ids());
+        assert_eq!((budget_now.view.clone(), budget_now.row_id(2), budget_now.cell(2, 1)), (budget.view.clone(), budget.row_id(2), "175"));
+        assert_eq!((plans_now.name.as_str(), plans_now.row_id(1), plans_now.cell(1, 1)), ("Plans", plans.row_id(1), "June"));
+        // Through the connector (no line of the page is kept as it was) the tables are found the same way.
+        let mut fresh = crate::markdown::to_blocks(&md);
+        keep_tables(&old, &mut fresh);
+        let ids: Vec<&str> = fresh.iter().filter(|b| b.kind == BlockKind::Table).map(|b| b.id.as_str()).collect();
+        assert_eq!(&ids[1..], [old[1].id.as_str(), old[2].id.as_str()]);
+        // A table that is taken out and another put in its place: one old, one new, so they pair (the id stays; no row is the same row).
+        let mut swapped = crate::markdown::to_blocks("| Colour | Code |\n| --- | --- |\n| Red | 1 |");
+        keep_tables(&old[..2], &mut swapped);
+        assert_eq!(swapped[0].id, old[1].id);
+        assert!(!Table::parse(&swapped[0].data).has_ids());
+    }
+
+    #[test]
     fn a_free_picture_is_not_a_line() {
-        let free = picture(Place { free: true, right: false, x: 0, y: 0, w: 200 });
+        let free = picture(Place { free: true, right: false, x: 0, y: 0, w: 200, beside: false });
         // The count of a numbered list goes on past it.
         let blocks = vec![Block::new(BlockKind::Numbered, "one"), free.clone(), Block::new(BlockKind::Numbered, "two")];
         assert_eq!(list_numbers(&blocks), vec![Some(1), None, Some(2)]);

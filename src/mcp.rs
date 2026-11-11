@@ -8,7 +8,7 @@
 
 use crate::markdown;
 use crate::model::*;
-use crate::state::{ancestors, children_of, descendants};
+use crate::state::{ancestors, children_of, descendants, stale_row_titles};
 use crate::store::{Loaded, Store};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -28,14 +28,43 @@ A line that is exactly [Title](notion2://page/<id>) is a link to another page; s
 A to-do can end with the day it is due, as 📅 2026-11-12 (the sign, then the date): it then shows in that day of the calendar. Keep that ending when you rewrite a to-do; leave it out to take the day away. \
 A picture or a drawing shows in read_page as a line [Image](notion2://block/<id>) or [Drawing](notion2://block/<id>): keep that line as it is to keep the picture or drawing in its place when you replace a page (one that you leave out is kept at the end of the page, never lost). \
 Tables are Markdown pipe tables. A table's columns can have kinds, given on a comment line right under it, one part for each column: \
-<!-- columns: date count | choice | number km sum | time sum | pace average | checkbox checked --> \
-(kinds: text, number, date, time, pace, checkbox, choice; then an optional unit, and an optional total shown at the foot: count, sum, average, highest, lowest, checked). \
-A pace column is worked out from the first number and the first time column of its row: leave its cells empty. Keep the comment line when you rewrite a table. \
+<!-- columns: text count | date | choice | number km sum | number USD sum | time sum | pace average | checkbox checked | formula USD sum = Price * Qty --> \
+(kinds: text, number, date, time, pace, checkbox, choice (one tag from a list), multi (several tags, with commas between them), status (one of Not started, In progress, Done, or its own list; a choice, multi or status column can list its options and their colours in braces, as choice {Long:green; Short:red}, colours: gray, brown, orange, yellow, green, blue, purple, pink, red), link, email, phone, file (pictures), formula, relation (rows of another table, by their names); \
+then for a number or a formula an optional format (a kind of money by its code, as USD or EUR, or percent, or grouped), an optional unit, \
+and an optional total shown at the foot: count, sum, average, median, highest, lowest, range, unique, empty, checked; \
+a number column can also show a bar or a ring that is full at a goal: number percent ring goal 100, number km bar goal 20; \
+a number or formula column marked signed shows amounts above zero green and below it red (a gain and a loss): number USD sum signed; \
+a formula column ends with = and what it works out from the other columns of its row, by their headings). \
+A cell of a money column is written with its sign ($2,000.00); a plain number there is fine too. \
+A pace column is worked out from the first number and the first time column of its row, and a formula column from its formula: what is in their cells is not kept. \
+A table can have a name, on a second comment line under it, and after the name, each between bars, what else it has: \
+<!-- table: Trades | icon target:green | sort Date down | frozen 1 | color P&L below 0 red | color Result is Win green --> \
+(icon NAME:COLOUR, NAME one of plus, minus, check, star, heart, home, calendar, briefcase, book, flame, gift, coffee, target, trophy, rocket, leaf, music, plane, wrench, globe; \
+beside: it stands at the right of the table above it; board by COLUMN, list, gallery or calendar: how the rows show (a board has a column of cards for each option of a choice column); \
+group COLUMN; sort COLUMN, or sort COLUMN down for high to low and newest first; frozen N: the first N columns stay in place when a wide table scrolls sideways; hide COLUMN; \
+filter COLUMN TEST: only rows that pass show; color COLUMN TEST COLOUR: rows that pass get that colour; locked; full: a row opens as a full page, not at the side. \
+A TEST is is, is not, has, has not, above, below, at least or at most, then words or a number, or is empty, is filled, is ticked, is not ticked. Columns go by their headings.) \
+Keep both comment lines when you rewrite a table. What Markdown cannot say of a table (the pages of its rows, their nesting, the template of a new row) stays when you rewrite it, \
+and so does the view when the table line says nothing of it: \
+it is found again by the headings of the columns and by the names of the rows (the first cell of each row), so keep those the same where you can. \
+When the person asks for a tracker, a log, a journal, a list of things to keep or any table of their own, make a real database: \
+a name for the table and an icon; the right kind for each column (date for days, number with the money code for amounts, so that totals add up, \
+choice or multi for words from a short list, checkbox for yes or no, link for web addresses); the options of each choice column with colours that mean something \
+(green for a win, done or good, red for a loss or a problem, yellow or orange for waiting, gray for nothing yet); a total at the foot of the columns that add up; \
+the newest first when rows are dated; frozen 1 when the table has more than six columns; and a colour rule when one result matters at a glance. \
+The first column names each row (a row opens as a page of that name): make it a text column, such as the ticker, the task or the item, never a date or a number. Leave the rows empty unless the person gives you rows or asks for examples; a chart, a short line on how to use the page, \
+or a section of rules or a review under the table make it better when they fit what was asked. \
+Never draw a picture with characters (boxes, lines and arrows made of -, |, +, ^, v, > or of box-drawing signs), in a code block or out of one, even when the person asks for a diagram, a chart of steps or a picture: it breaks on a narrow page and looks broken. \
+Show steps or a process as a numbered list with the name of each step in bold, levels or amounts as a small table, and a rule or a formula as one line in bold. \
 To add a row to a table (a log), use add_table_row; to change one, update_table_row; to tick a to-do or set its day, set_todo: none of them write the page again. \
 A chart is a code block of the language chart holding JSON, for example \
 ```chart {\"shape\": \"bars\", \"from\": \"Run log\", \"x\": \"Date\", \"by\": \"week\", \"y\": \"km\", \"add\": \"sum\", \"goal\": 20, \"title\": \"Distance per week\"} ``` \
-(each on its own line). shape: bars, line, ring or days; from: the title or id of the page whose first table it draws, or left out for the table above it on the same page; \
+(each on its own line). shape: bars, line, pie, ring or days; from: the title or id of the page whose first table it draws, or left out for the table above it on the same page; \
 x: the column along the bottom, usually a date; by: row, day, week or month; y: the column of amounts; add: sum, average, highest, lowest or count; goal and title are optional. \
+Add \"running\": true to bars or a line for a running total, each point adding to those before it (money made over time, a balance, a count so far). \
+Amounts below zero draw under a line at zero, green and red when the column is signed. \
+A pie draws how much of each word of a choice, multi or status column, in the colours of its options: x is that column, and add is count for how many rows, or sum with y for an amount, \
+for example {\"shape\": \"pie\", \"x\": \"Status\", \"add\": \"count\"}. \
 A ring draws one amount (add over all rows) against the goal; days draws which days of the last four weeks have a row. The chart follows its table by itself. \
 Changes are saved immediately. trash_page is reversible with restore_page; no page is ever deleted permanently (delete_event does remove an event for good).";
 
@@ -606,6 +635,7 @@ impl Server {
         page_blocks[at].data = table.to_data();
         page_blocks[at].text = table.plain_text();
         self.save_blocks(&id, &page_blocks)?;
+        self.name_row_pages(&pages, &page_blocks[at].id, &table)?;
         Ok(pretty(&json!({ "page_id": id, "row": row, "cells": cells, "columns_not_found": unknown })))
     }
 
@@ -639,6 +669,7 @@ impl Server {
         page_blocks[at].data = table.to_data();
         page_blocks[at].text = table.plain_text();
         self.save_blocks(&id, &page_blocks)?;
+        self.name_row_pages(&pages, &page_blocks[at].id, &table)?;
         Ok(pretty(&json!({ "page_id": id, "row": row, "cells": cells, "columns_not_found": unknown })))
     }
 
@@ -696,9 +727,43 @@ impl Server {
             page.updated_at = now_ms();
             self.save_page(&page)?;
         }
-        let body = non_empty(keep_media(old, parse_body(&pages, &strip_title_heading(markdown, &page.title))));
+        let mut body = non_empty(keep_media(old, parse_body(&pages, &strip_title_heading(markdown, &page.title))));
+        // A table of the page is the same table still (its view, the pages of its rows).
+        keep_tables(old, &mut body);
         self.save_blocks(&id, &body)?;
+        for b in body.iter().filter(|b| b.kind == BlockKind::Table) {
+            self.name_row_pages(&pages, &b.id, &crate::table::Table::parse(&b.data))?;
+        }
+        if arg_str(args, "title").is_some() {
+            self.name_row_cell(&page, &blocks)?;
+        }
         Ok(pretty(&json!({ "page_id": id, "title": page.display_title(), "blocks": body.len() })))
+    }
+
+    /// The pages of the rows of a table take the names their rows have now.
+    fn name_row_pages(&self, pages: &HashMap<Id, Page>, block: &str, table: &crate::table::Table) -> Result<(), String> {
+        for (id, title) in stale_row_titles(pages, block, table) {
+            let Some(mut page) = pages.get(&id).cloned() else { continue };
+            page.title = title;
+            page.updated_at = now_ms();
+            self.save_page(&page)?;
+        }
+        Ok(())
+    }
+
+    /// A page that is a row of a table got another name: the first cell of
+    /// its row takes it. (`blocks`: the lines of every page, as they are kept.)
+    fn name_row_cell(&self, page: &Page, blocks: &HashMap<Id, Vec<Block>>) -> Result<(), String> {
+        let Some((block, row)) = page.row_of.as_deref().and_then(|key| key.split_once('/')) else { return Ok(()) };
+        let Some(parent) = page.parent_id.as_deref() else { return Ok(()) };
+        let mut lines = blocks.get(parent).cloned().unwrap_or_default();
+        let Some(b) = lines.iter_mut().find(|b| b.id == block && b.kind == BlockKind::Table) else { return Ok(()) };
+        let mut table = crate::table::Table::parse(&b.data);
+        let Some(r) = table.row_with_id(row).filter(|&r| table.cell(r, 0) != page.title) else { return Ok(()) };
+        table.set(r, 0, &page.title);
+        b.data = table.to_data();
+        b.text = table.plain_text();
+        self.save_blocks(parent, &lines)
     }
 
     fn update_page(&self, args: &Value) -> ToolResult {
@@ -740,6 +805,8 @@ impl Server {
             if new_parent != page.parent_id {
                 page.position = next_position(&pages, new_parent.as_deref());
                 page.parent_id = new_parent;
+                // (The page of a row that goes to another page is a page like any other there.)
+                page.row_of = None;
             }
             changed.push("parent_id");
         }
@@ -748,6 +815,11 @@ impl Server {
         }
         page.updated_at = now_ms();
         self.save_page(&page)?;
+        // (The name of a page that is a row of a table is the first cell of its row.)
+        if changed.contains(&"title") {
+            let (_, blocks) = self.load()?;
+            self.name_row_cell(&page, &blocks)?;
+        }
         Ok(pretty(&json!({
             "page_id": id,
             "updated": changed,
@@ -1570,7 +1642,7 @@ pub(crate) fn render_body(pages: &HashMap<Id, Page>, blocks: &[Block]) -> String
             // same picture or drawing back (see `keep_media`).
             BlockKind::Drawing => as_text(b, format!("[Drawing]({BLOCK_PREFIX}{})", b.id)),
             BlockKind::Image => as_text(b, format!("[Image]({BLOCK_PREFIX}{})", b.id)),
-            BlockKind::Table => as_text(b, crate::table::Table::parse(&b.data).to_markdown("")),
+            BlockKind::Table => as_text(b, crate::markdown::table_markdown(b, "")),
             BlockKind::Chart => as_text(b, crate::chart::Chart::parse(&b.data).to_markdown()),
             _ => b.clone(),
         })
@@ -1730,8 +1802,56 @@ mod tests {
         assert_eq!(json_of(&todo)["todo"], "Easy run, 4.5 km");
         let (page, _) = call(&mut s, "read_page", json!({ "page_id": log }));
         assert!(page.contains("- [x] Easy run, 4.5 km 📅 2026-12-01"), "{page}");
-        assert!(page.contains("| 2026-11-10 | 3.5 | 19:30 |  |"), "{page}");
+        // (A day is written the way its column writes, as if typed there.)
+        let day = crate::table::format_day(chrono::NaiveDate::from_ymd_opt(2026, 11, 10).unwrap(), crate::when::today());
+        assert!(page.contains(&format!("| {day} | 3.5 | 19:30 | 5:34 |")), "{page}");
         assert!(page.contains("<!-- columns: date | number km sum | time sum | pace average -->"), "{page}");
+        // Money: a row is written the way its column writes, and the name of the table stays.
+        let md = "| Item | Amount | Cost |\n| --- | --- | --- |\n| Rent | $2,000.00 |  |\n<!-- columns: text | number USD sum | formula USD = Amount * 2 -->\n<!-- table: Expenses -->";
+        let (made, _) = call(&mut s, "create_page", json!({ "title": "Budget", "markdown": md }));
+        let budget = json_of(&made)["id"].as_str().unwrap().to_string();
+        let (added, err) = call(&mut s, "add_table_row", json!({ "page_id": budget, "values": { "Item": "Dinner", "Amount": 65, "Cost": "9" } }));
+        assert!(!err, "{added}");
+        assert_eq!(json_of(&added)["cells"], json!({ "Item": "Dinner", "Amount": "$65.00", "Cost": "$130.00" }));
+        let (changed, err) = call(&mut s, "update_table_row", json!({ "page_id": budget, "match": { "Item": "rent" }, "values": { "Amount": "€2100.5" } }));
+        assert!(!err, "{changed}");
+        assert_eq!(json_of(&changed)["cells"]["Amount"], "$2,100.50");
+        let (page, _) = call(&mut s, "read_page", json!({ "page_id": budget }));
+        assert!(page.contains("| Dinner | $65.00 | $130.00 |") && page.contains("<!-- columns: text | number USD sum | formula USD = Amount * 2 -->") && page.contains("<!-- table: Expenses -->"), "{page}");
+        // The page written again: the table is the same block still, with what Markdown
+        // cannot say (a sort, what its rows go by), and the page of a row keeps its row and takes its name.
+        let (_, mut blocks) = s.store.load().unwrap();
+        let lines = blocks.get_mut(&budget).unwrap();
+        let at = lines.iter().position(|b| b.kind == BlockKind::Table).unwrap();
+        let block_id = lines[at].id.clone();
+        let mut table = crate::table::Table::parse(&lines[at].data);
+        table.change_view(|v| v.sort_by(1, true));
+        table.name_rows();
+        let rent = table.row_id(1).unwrap().to_string();
+        lines[at].data = table.to_data();
+        s.store.save_blocks(&budget, lines).unwrap();
+        let mut row_page = Page::new(Some(budget.clone()), 0.0);
+        row_page.title = "Rent".into();
+        row_page.row_of = Some(format!("{block_id}/{rent}"));
+        s.store.save_page(&row_page).unwrap();
+        let (page, _) = call(&mut s, "read_page", json!({ "page_id": budget }));
+        let again = page.replace("| Rent |", "| Rent (flat) |").replace("| Dinner | $65.00 |", "| Dinner | $70.00 |");
+        let (_, err) = call(&mut s, "replace_page_content", json!({ "page_id": budget, "markdown": again }));
+        assert!(!err);
+        let (pages, blocks) = s.store.load().unwrap();
+        let now = blocks[&budget].iter().find(|b| b.kind == BlockKind::Table).unwrap();
+        let table_now = crate::table::Table::parse(&now.data);
+        assert_eq!(now.id, block_id);
+        assert_eq!((table_now.view.clone(), table_now.row_with_id(&rent), table_now.cell(2, 1)), (table.view.clone(), Some(1), "$70.00"));
+        assert_eq!(pages[&row_page.id].title, "Rent (flat)");
+        // A row changed by its tool: its page takes the name. A page of a row with another name: its row takes it.
+        let (_, err) = call(&mut s, "update_table_row", json!({ "page_id": budget, "row": 1, "values": { "Item": "Rent, flat 2" } }));
+        assert!(!err);
+        assert_eq!(s.store.load().unwrap().0[&row_page.id].title, "Rent, flat 2");
+        let (_, err) = call(&mut s, "update_page", json!({ "page_id": row_page.id, "title": "Rent" }));
+        assert!(!err);
+        let (_, blocks) = s.store.load().unwrap();
+        assert_eq!(crate::table::Table::parse(&blocks[&budget].iter().find(|b| b.kind == BlockKind::Table).unwrap().data).cell(1, 0), "Rent");
         // A page with no table says so.
         let (made, _) = call(&mut s, "create_page", json!({ "title": "Empty" }));
         let empty = json_of(&made)["id"].as_str().unwrap().to_string();

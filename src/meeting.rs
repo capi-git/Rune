@@ -226,7 +226,17 @@ pub const POLL_MS: u64 = 3000;
 const START_AFTER: u32 = 2;
 /// Looks in a row with no audio at all before it has ended (a muted
 /// microphone alone doesn't end it: the meeting's sound is still playing).
-const END_AFTER: u32 = 6;
+/// Half a minute: a call that changes its sound device, joins again after a
+/// bad line, or passes from the screen before the call to the call itself
+/// is quiet for some seconds, and an end said too early stops the listening.
+/// The price is that a true end is seen this much later (its time is still
+/// written as the time of the last sound).
+const END_AFTER: u32 = 10;
+/// After an end: looks in a row with sound in the program the meeting was
+/// in, before it is said to go on (one sound of a message is not a call).
+const BACK_AFTER: u32 = 3;
+/// After an end: for this many looks (an hour) that sound can say so.
+const BACK_WITHIN: u32 = (60 * 60 * 1000 / POLL_MS) as u32;
 
 /// How long after the last sound a meeting is said to have ended.
 pub const END_LAG_MS: i64 = END_AFTER as i64 * POLL_MS as i64;
@@ -235,46 +245,131 @@ pub const END_LAG_MS: i64 = END_AFTER as i64 * POLL_MS as i64;
 pub enum Change {
     /// A call started, in the program with this name.
     Started(&'static str),
+    /// After an end, the program the meeting was in plays sound again with
+    /// no microphone (the person is muted): the meeting may be going on. It
+    /// is never a reason to make notes of a new meeting; the app says with
+    /// `Watch::not_back` when it is not the meeting that ended.
+    Back(&'static str),
     Ended,
 }
 
 /// Turns a stream of looks into "a meeting started" and "it ended".
 #[derive(Default)]
 pub struct Watch {
-    /// The program the meeting is in, or the one that may be starting one.
+    /// The program that may be starting a meeting.
     app: Option<&'static str>,
     in_meeting: bool,
     streak: u32,
+    /// The programs the meeting is in, or was in when it ended. A call can
+    /// pass from one to another (a browser, then the call program).
+    apps: Vec<&'static str>,
+    /// Looks since the meeting ended (None: none ended in the last hour).
+    since_end: Option<u32>,
+    /// Looks in a row, after the end, with sound in one of its programs.
+    back: u32,
 }
 
 impl Watch {
+    /// The app opens, and the last run did not see its meeting end (the app
+    /// was closed during the call; an update does that). As after an end,
+    /// the sound of that meeting's program alone can say that it goes on.
+    pub fn after(app: &'static str) -> Watch {
+        Watch { apps: vec![app], since_end: Some(0), ..Watch::default() }
+    }
+
     pub fn step(&mut self, heard: &[Heard]) -> Option<Change> {
-        if !self.in_meeting {
-            // A program that uses the microphone (a browser must also play sound).
-            let starter = heard.iter().find(|h| h.input && (!h.app.browser || h.output)).map(|h| h.app.name);
-            self.streak = match starter {
-                Some(name) if self.app == Some(name) => self.streak + 1,
-                Some(_) => 1,
-                None => 0,
-            };
-            self.app = starter;
-            if self.streak >= START_AFTER {
-                self.in_meeting = true;
-                self.streak = 0;
-                return starter.map(Change::Started);
+        // A program that uses the microphone (a browser must also play sound).
+        let starter = heard.iter().find(|h| h.input && (!h.app.browser || h.output)).map(|h| h.app.name);
+        if self.in_meeting {
+            // A program that would start a meeting is part of this one. A
+            // browser the call was in before is left behind then (it plays
+            // sound for many other reasons).
+            if let Some(name) = starter {
+                if !self.apps.contains(&name) {
+                    self.apps.retain(|a| !call_app_named(a).is_some_and(|app| app.browser));
+                    self.apps.push(name);
+                }
             }
-        } else {
-            // Only the program the meeting is in keeps it going.
-            let alive = heard.iter().any(|h| Some(h.app.name) == self.app && (h.input || h.output));
+            // Any program of the meeting keeps it going, with its microphone or its sound.
+            let alive = heard.iter().any(|h| self.apps.contains(&h.app.name) && (h.input || h.output));
             self.streak = if alive { 0 } else { self.streak + 1 };
             if self.streak >= END_AFTER {
                 self.in_meeting = false;
                 self.streak = 0;
                 self.app = None;
+                self.since_end = Some(0);
+                self.back = 0;
                 return Some(Change::Ended);
             }
+            return None;
+        }
+        self.streak = match starter {
+            Some(name) if self.app == Some(name) => self.streak + 1,
+            Some(_) => 1,
+            None => 0,
+        };
+        self.app = starter;
+        if self.streak >= START_AFTER {
+            self.in_meeting = true;
+            self.streak = 0;
+            self.apps = starter.into_iter().collect();
+            self.since_end = None;
+            self.back = 0;
+            return starter.map(Change::Started);
+        }
+        // A meeting ended a while ago, and its program plays sound again. A
+        // person who is muted gives no other sign that the call goes on. (Not
+        // for a browser: it plays sound for many other reasons.)
+        let since = self.since_end?;
+        if since >= BACK_WITHIN {
+            self.not_back();
+            return None;
+        }
+        self.since_end = Some(since + 1);
+        let sound = heard.iter().find(|h| h.output && !h.app.browser && self.apps.contains(&h.app.name)).map(|h| h.app.name);
+        self.back = if sound.is_some() { self.back + 1 } else { 0 };
+        if self.back >= BACK_AFTER {
+            self.in_meeting = true;
+            self.streak = 0;
+            self.since_end = None;
+            self.back = 0;
+            return sound.map(Change::Back);
         }
         None
+    }
+
+    pub fn in_meeting(&self) -> bool {
+        self.in_meeting
+    }
+
+    /// The app's answer to `Change::Back`: that sound was not the meeting
+    /// going on (it ended too long ago, or another one has started since).
+    pub fn not_back(&mut self) {
+        self.in_meeting = false;
+        self.streak = 0;
+        self.apps.clear();
+        self.since_end = None;
+        self.back = 0;
+    }
+}
+
+/// What the watcher said, with the time: a small file beside the workspace
+/// (`meeting-watch.log`, the newest lines), to see afterwards why notes were
+/// made or not. It holds times and the names of call programs, nothing else.
+pub fn log(line: &str) {
+    use std::io::Write;
+    let Some(dir) = crate::store::db_path().and_then(|p| p.parent().map(|d| d.to_path_buf())) else { return };
+    let path = dir.join("meeting-watch.log");
+    // Kept small: when it has grown, the older half goes.
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 64 * 1024) {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            let from = text.len() / 2;
+            let from = text[from..].find('\n').map(|i| from + i + 1).unwrap_or(text.len());
+            let _ = std::fs::write(&path, &text[from..]);
+        }
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(file, "{}  {line}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
     }
 }
 
@@ -442,13 +537,152 @@ mod tests {
         }
         assert_eq!(w.step(&at(chrome, false, true)), Some(Change::Ended));
         assert_eq!(w.step(&[]), None);
-        // Sound alone (a video) does not start one.
+        // Sound alone (a video) in a program that was not in it does not start one.
         for _ in 0..10 {
             assert_eq!(w.step(&at(zoom, false, true)), None);
         }
         // Another call program starts one too, and it is named.
         assert_eq!(w.step(&at(zoom, true, false)), None);
         assert_eq!(w.step(&at(zoom, true, false)), Some(Change::Started("Zoom")));
+    }
+
+    #[test]
+    fn a_call_that_goes_quiet_for_some_seconds_has_not_ended() {
+        let at = |input: bool, output: bool| vec![Heard { app: TEAMS, input, output }];
+        let mut w = Watch::default();
+        w.step(&at(true, true));
+        assert_eq!(w.step(&at(true, true)), Some(Change::Started("Microsoft Teams")));
+        // 24 seconds with no sign (a change of the sound device, a bad line,
+        // nobody speaks while the person is muted): still the meeting.
+        for _ in 0..8 {
+            assert_eq!(w.step(&[]), None);
+        }
+        assert_eq!(w.step(&at(false, true)), None);
+        // And the count starts again after each sign.
+        for _ in 0..(END_AFTER - 1) {
+            assert_eq!(w.step(&[]), None);
+        }
+        assert_eq!(w.step(&at(true, false)), None);
+        // A true end: half a minute with nothing.
+        for _ in 0..(END_AFTER - 1) {
+            assert_eq!(w.step(&[]), None);
+        }
+        assert_eq!(w.step(&[]), Some(Change::Ended));
+        assert_eq!(END_LAG_MS, 30_000);
+    }
+
+    #[test]
+    fn a_call_that_passes_to_another_program_is_one_meeting() {
+        let zoom = call_app("/Applications/zoom.us.app/x").unwrap();
+        let chrome = call_app("/Applications/Google Chrome.app/x").unwrap();
+        let at = |app: CallApp, input: bool, output: bool| vec![Heard { app, input, output }];
+        let mut w = Watch::default();
+        // Joined in the browser…
+        w.step(&at(chrome, true, true));
+        assert_eq!(w.step(&at(chrome, true, true)), Some(Change::Started("Google Chrome")));
+        // …then the call opens in Zoom, and the browser is silent from then on.
+        assert_eq!(w.step(&[]), None);
+        assert_eq!(w.step(&at(zoom, true, true)), None, "no second start");
+        // Muted in Zoom, for a long time: Zoom is a program of this meeting now.
+        for _ in 0..40 {
+            assert_eq!(w.step(&at(zoom, false, true)), None);
+        }
+        // The call ends, and the browser plays a video: the call left the
+        // browser, so the video does not keep the meeting going.
+        for _ in 0..(END_AFTER - 1) {
+            assert_eq!(w.step(&at(chrome, false, true)), None);
+        }
+        assert_eq!(w.step(&at(chrome, false, true)), Some(Change::Ended));
+        // A program that only plays sound, and was never in the meeting, does not join it.
+        let mut w = Watch::default();
+        w.step(&at(TEAMS, true, true));
+        assert_eq!(w.step(&at(TEAMS, true, true)), Some(Change::Started("Microsoft Teams")));
+        for _ in 0..(END_AFTER - 1) {
+            assert_eq!(w.step(&at(zoom, false, true)), None);
+        }
+        assert_eq!(w.step(&at(zoom, false, true)), Some(Change::Ended));
+    }
+
+    #[test]
+    fn after_an_end_the_sound_of_the_meetings_program_says_that_it_goes_on() {
+        let zoom = call_app("/Applications/zoom.us.app/x").unwrap();
+        let chrome = call_app("/Applications/Google Chrome.app/x").unwrap();
+        let at = |app: CallApp, input: bool, output: bool| vec![Heard { app, input, output }];
+        let ended = |app: CallApp| {
+            let mut w = Watch::default();
+            w.step(&at(app, true, true));
+            assert!(matches!(w.step(&at(app, true, true)), Some(Change::Started(_))));
+            for _ in 0..(END_AFTER - 1) {
+                assert_eq!(w.step(&[]), None);
+            }
+            assert_eq!(w.step(&[]), Some(Change::Ended));
+            w
+        };
+        // The person is muted and alone; then the others speak: sound, no microphone.
+        let mut w = ended(TEAMS);
+        assert_eq!(w.step(&at(TEAMS, false, true)), None);
+        assert_eq!(w.step(&at(TEAMS, false, true)), None);
+        assert_eq!(w.step(&at(TEAMS, false, true)), Some(Change::Back("Microsoft Teams")));
+        // It is in the meeting again: more sound says nothing new, silence ends it again.
+        assert_eq!(w.step(&at(TEAMS, false, true)), None);
+        for _ in 0..(END_AFTER - 1) {
+            assert_eq!(w.step(&[]), None);
+        }
+        assert_eq!(w.step(&[]), Some(Change::Ended));
+        // The sound of one message is not a call.
+        let mut w = ended(TEAMS);
+        assert_eq!(w.step(&at(TEAMS, false, true)), None);
+        assert_eq!(w.step(&[]), None);
+        assert_eq!(w.step(&at(TEAMS, false, true)), None);
+        assert_eq!(w.step(&at(TEAMS, false, true)), None);
+        assert_eq!(w.step(&[]), None);
+        // Another program's sound is not this meeting, and a browser's sound never says so.
+        let mut w = ended(TEAMS);
+        for _ in 0..10 {
+            assert_eq!(w.step(&at(zoom, false, true)), None);
+        }
+        let mut w = ended(chrome);
+        for _ in 0..10 {
+            assert_eq!(w.step(&at(chrome, false, true)), None);
+        }
+        // The microphone starts it as always (the app says if it is the same meeting).
+        let mut w = ended(TEAMS);
+        assert_eq!(w.step(&at(TEAMS, true, true)), None);
+        assert_eq!(w.step(&at(TEAMS, true, true)), Some(Change::Started("Microsoft Teams")));
+        // The app said that the sound was not the meeting: the watcher is out of it,
+        // and that sound says no more.
+        let mut w = ended(TEAMS);
+        w.step(&at(TEAMS, false, true));
+        w.step(&at(TEAMS, false, true));
+        assert_eq!(w.step(&at(TEAMS, false, true)), Some(Change::Back("Microsoft Teams")));
+        w.not_back();
+        for _ in 0..10 {
+            assert_eq!(w.step(&at(TEAMS, false, true)), None);
+        }
+        assert_eq!(w.step(&at(TEAMS, true, true)), None);
+        assert_eq!(w.step(&at(TEAMS, true, true)), Some(Change::Started("Microsoft Teams")));
+        // The app was closed and opened again during a call in Teams: the
+        // sound of Teams is enough (the person is muted), another program's is not.
+        let mut w = Watch::after(TEAMS.name);
+        for _ in 0..5 {
+            assert_eq!(w.step(&at(zoom, false, true)), None);
+        }
+        assert_eq!(w.step(&at(TEAMS, false, true)), None);
+        assert_eq!(w.step(&at(TEAMS, false, true)), None);
+        assert_eq!(w.step(&at(TEAMS, false, true)), Some(Change::Back("Microsoft Teams")));
+        assert!(w.in_meeting());
+        // …and the microphone starts it as always.
+        let mut w = Watch::after(TEAMS.name);
+        assert_eq!(w.step(&at(TEAMS, true, true)), None);
+        assert_eq!(w.step(&at(TEAMS, true, true)), Some(Change::Started("Microsoft Teams")));
+        // An hour after the end, sound alone says nothing.
+        let mut w = ended(TEAMS);
+        for _ in 0..BACK_WITHIN {
+            assert_eq!(w.step(&[]), None);
+        }
+        for _ in 0..10 {
+            assert_eq!(w.step(&at(TEAMS, false, true)), None);
+        }
     }
 
     #[test]

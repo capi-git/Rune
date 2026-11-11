@@ -3,7 +3,7 @@
 //! for what is now (this week, the last run); no colours of its own.
 
 use super::icons::Icon;
-use crate::chart::{nice_top, Add, By, Chart, Day, Point, Shape};
+use crate::chart::{nice_top, Add, By, Chart, Day, Point, Shape, Slice};
 use crate::state::{AppState, ChartSource, Popover};
 use crate::table::{Kind, Table};
 use dioxus::prelude::*;
@@ -59,6 +59,7 @@ pub fn ChartView(page_id: String, id: String, data: String) -> Element {
                     Shape::Line => rsx! { Line { chart: chart.clone(), table: src.table.clone(), points: chart.points(&src.table, today) } },
                     Shape::Ring => rsx! { Ring { chart: chart.clone(), table: src.table.clone() } },
                     Shape::Days => rsx! { Days { days: chart.days(&src.table, today) } },
+                    Shape::Pie => rsx! { Pie { chart: chart.clone(), table: src.table.clone(), slices: chart.slices(&src.table) } },
                 },
             }
             if open {
@@ -76,6 +77,8 @@ fn note(chart: &Chart, t: &Table, today: chrono::NaiveDate) -> String {
             let n = chart.days(t, today).iter().filter(|d| d.has_row).count();
             format!("{n} {} in 4 weeks", if n == 1 { "day" } else { "days" })
         }
+        Shape::Pie => String::new(),
+        Shape::Bars | Shape::Line if chart.running => chart.points(t, today).last().map(|p| format!("{} now", chart.format(t, p.value))).unwrap_or_default(),
         Shape::Bars | Shape::Line if chart.add == Add::Sum || chart.add == Add::Count => {
             let points = chart.points(t, today);
             if points.is_empty() {
@@ -94,6 +97,20 @@ fn shows_label(i: usize, n: usize, current: bool) -> bool {
     current || i % every == 0 || i + 1 == n
 }
 
+/// The class of a bar: the one of now, and its colour by its sign.
+fn bar_class(p: &Point, signed: bool) -> String {
+    let mut class = String::new();
+    if p.current {
+        class.push_str(" current");
+    }
+    if signed && p.value > 0.0 {
+        class.push_str(" pos");
+    } else if signed && p.value < 0.0 {
+        class.push_str(" neg");
+    }
+    class
+}
+
 #[component]
 fn Bars(chart: Chart, table: Table, points: Vec<Point>) -> Element {
     if points.is_empty() {
@@ -101,20 +118,26 @@ fn Bars(chart: Chart, table: Table, points: Vec<Point>) -> Element {
     }
     let (left, right, top_y, bottom) = (34.0, W - 4.0, 12.0, H - 30.0);
     let most = points.iter().map(|p| p.value).fold(chart.goal.unwrap_or(0.0), f64::max);
-    let top = nice_top(most);
-    let y_of = |v: f64| bottom - (v / top).clamp(0.0, 1.0) * (bottom - top_y);
+    let least = points.iter().map(|p| p.value).fold(0.0, f64::min);
+    // Losses go below a line at zero.
+    let top = if most > 0.0 || least == 0.0 { nice_top(most) } else { 0.0 };
+    let floor = if least < 0.0 { -nice_top(-least) } else { 0.0 };
+    let y_of = |v: f64| bottom - ((v - floor) / (top - floor)).clamp(0.0, 1.0) * (bottom - top_y);
+    let zero = y_of(0.0);
     let n = points.len();
     let band = (right - left) / n as f64;
     let bw = (band * 0.56).clamp(3.0, 40.0);
-    let bars: Vec<(usize, f64, f64, f64, &Point)> = points.iter().enumerate().map(|(i, p)| (i, left + band * i as f64 + (band - bw) / 2.0, y_of(p.value), (bottom - y_of(p.value)).max(if p.value > 0.0 { 1.0 } else { 0.0 }), p)).collect();
-    let ticks = [0.0, top / 2.0, top].map(|v| (y_of(v), chart.format(&table, v)));
+    let signed = chart.signed(&table);
+    let bars: Vec<(usize, f64, f64, f64, &Point)> = points.iter().enumerate().map(|(i, p)| (i, left + band * i as f64 + (band - bw) / 2.0, y_of(p.value).min(zero), (y_of(p.value) - zero).abs().max(if p.value != 0.0 { 1.0 } else { 0.0 }), p)).collect();
+    let marks = if floor < 0.0 && top > 0.0 { [floor, 0.0, top] } else if floor < 0.0 { [floor, floor / 2.0, 0.0] } else { [0.0, top / 2.0, top] };
+    let ticks = marks.map(|v| (y_of(v), v == 0.0, chart.format(&table, v)));
     let goal = chart.goal.map(|g| (y_of(g), chart.format(&table, g)));
     let said = points.iter().map(|p| format!("{} {}", p.label, chart.format(&table, p.value))).collect::<Vec<_>>().join(", ");
     rsx! {
         svg { class: "chart-svg", view_box: "0 0 {W} {H}", role: "img", "aria-label": "{said}",
-            for (i, (y, label)) in ticks.iter().enumerate() {
+            for (i, (y, base, label)) in ticks.iter().enumerate() {
                 g { key: "t{i}",
-                    line { class: if i == 0 { "chart-base" } else { "chart-grid" }, x1: "{left}", x2: "{right}", y1: "{y}", y2: "{y}" }
+                    line { class: if *base { "chart-base" } else { "chart-grid" }, x1: "{left}", x2: "{right}", y1: "{y}", y2: "{y}" }
                     text { class: "chart-tick", x: "{left - 6.0}", y: "{y + 3.5}", text_anchor: "end", "{label}" }
                 }
             }
@@ -124,9 +147,9 @@ fn Bars(chart: Chart, table: Table, points: Vec<Point>) -> Element {
             }
             for (i, x, y, h, p) in bars {
                 g { key: "b{i}",
-                    rect { class: if p.current { "chart-bar current" } else { "chart-bar" }, x: "{x}", y: "{y}", width: "{bw}", height: "{h}", rx: "3" }
-                    if p.current && p.value > 0.0 {
-                        text { class: "chart-value", x: "{x + bw / 2.0}", y: "{y - 6.0}", text_anchor: "middle", "{chart.format(&table, p.value)}" }
+                    rect { class: "chart-bar{bar_class(p, signed)}", x: "{x}", y: "{y}", width: "{bw}", height: "{h}", rx: "3" }
+                    if p.current && p.value != 0.0 {
+                        text { class: "chart-value", x: "{x + bw / 2.0}", y: if p.value > 0.0 { "{y - 6.0}" } else { "{y + h + 12.0}" }, text_anchor: "middle", "{chart.format(&table, p.value)}" }
                     }
                     if shows_label(i, n, p.current) {
                         text { class: if p.current { "chart-label current" } else { "chart-label" }, x: "{x + bw / 2.0}", y: "{H - 12.0}", text_anchor: "middle", "{p.label}" }
@@ -163,6 +186,16 @@ fn Line(chart: Chart, table: Table, points: Vec<Point>) -> Element {
     let ticks = [lo + pad, (lo + hi) / 2.0, hi - pad].map(|v| (y_of(v), chart.format(&table, v)));
     let dots: Vec<(usize, f64, f64, &Point)> = points.iter().enumerate().map(|(i, p)| (i, x_of(i), y_of(p.value), p)).collect();
     let said = points.iter().map(|p| format!("{} {}", p.label, chart.format(&table, p.value))).collect::<Vec<_>>().join(", ");
+    let last = points.last().map(|p| p.value).unwrap_or(0.0);
+    let tone = match (chart.signed(&table), last > 0.0, last < 0.0) {
+        (true, true, _) => " pos",
+        (true, _, true) => " neg",
+        _ => "",
+    };
+    // A line at zero when it crosses it, and a soft area down to the base.
+    let zero = (lo < 0.0 && hi > 0.0).then(|| y_of(0.0));
+    let base = zero.unwrap_or(bottom);
+    let area = format!("{:.1},{base:.1} {path} {:.1},{base:.1}", x_of(0), x_of(n - 1));
     rsx! {
         svg { class: "chart-svg", view_box: "0 0 {W} {H}", role: "img", "aria-label": "{said}",
             for (i, (y, label)) in ticks.iter().enumerate() {
@@ -171,7 +204,13 @@ fn Line(chart: Chart, table: Table, points: Vec<Point>) -> Element {
                     text { class: "chart-tick", x: "{left - 6.0}", y: "{y + 3.5}", text_anchor: "end", "{label}" }
                 }
             }
-            polyline { class: "chart-line", points: "{path}" }
+            if let Some(y) = zero {
+                line { class: "chart-base", x1: "{left}", x2: "{right}", y1: "{y}", y2: "{y}" }
+            }
+            if n > 1 {
+                polygon { class: "chart-area{tone}", points: "{area}" }
+            }
+            polyline { class: "chart-line{tone}", points: "{path}" }
             for (i, x, y, p) in dots {
                 g { key: "d{i}",
                     circle { class: if p.current { "chart-dot current" } else { "chart-dot" }, cx: "{x}", cy: "{y}", r: if p.current { "4" } else { "2.5" } }
@@ -214,6 +253,48 @@ fn Ring(chart: Chart, table: Table) -> Element {
             div { class: "ring-words",
                 span { class: "ring-value", "{shown}" }
                 span { class: "ring-under", "{under}" }
+            }
+        }
+    }
+}
+
+/// Slices of a circle in the colours of their tags, and what each one is.
+#[component]
+fn Pie(chart: Chart, table: Table, slices: Vec<Slice>) -> Element {
+    if slices.is_empty() {
+        return rsx! { div { class: "chart-empty", "No rows to draw yet." } };
+    }
+    let total: f64 = slices.iter().map(|s| s.value).sum();
+    let round = 2.0 * std::f64::consts::PI * 34.0;
+    let mut gone = 0.0;
+    let arcs: Vec<(usize, &Slice, f64, f64, String)> = slices
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let share = s.value / total;
+            let arc = (i, s, share * round, gone * 360.0 - 90.0, format!("{:.0}%", share * 100.0));
+            gone += share;
+            arc
+        })
+        .collect();
+    let said = arcs.iter().map(|(_, s, _, _, p)| format!("{} {p}", s.label)).collect::<Vec<_>>().join(", ");
+    let total_text = chart.format(&table, total);
+    rsx! {
+        div { class: "chart-pie",
+            svg { view_box: "0 0 84 84", width: "132", height: "132", role: "img", "aria-label": "{said}",
+                for (i, s, arc, turn, _) in arcs.iter() {
+                    circle { key: "{i}", class: "pie-slice c-{s.color.name()}", cx: "42", cy: "42", r: "34", stroke_dasharray: "{arc:.2} {round:.2}", transform: "rotate({turn:.2} 42 42)" }
+                }
+                text { class: "ring-percent", x: "42", y: "46", text_anchor: "middle", "{total_text}" }
+            }
+            div { class: "pie-legend",
+                for (i, s, _, _, percent) in arcs.iter() {
+                    div { key: "{i}", class: "pie-row",
+                        span { class: "tag c-{s.color.name()}", span { class: "tag-words", "{s.label}" } }
+                        span { class: "pie-amount", "{chart.format(&table, s.value)}" }
+                        span { class: "pie-share", "{percent}" }
+                    }
+                }
             }
         }
     }
@@ -350,7 +431,7 @@ fn ChartPanel(page_id: String, id: String, chart: Chart, source: Option<ChartSou
                 PanelField { name: "Across", icon: "calendar", value: across_label, open: open == Some("across"), onpick: move |_| list.set(if open == Some("across") { None } else { Some("across") }) }
                 if open == Some("across") {
                     div { class: "panel-list",
-                        for (c, name, kind) in columns.iter().cloned().filter(|(_, _, k)| matches!(k, Kind::Date | Kind::Text | Kind::Choice)) {
+                        for (c, name, kind) in columns.iter().cloned().filter(|(_, _, k)| if chart.shape == Shape::Pie { k.has_options() } else { matches!(k, Kind::Date | Kind::Text | Kind::Choice | Kind::Status) }) {
                             button {
                                 key: "x{c}",
                                 class: if x == Some(c) { "ai-menu-row active" } else { "ai-menu-row" },
@@ -448,7 +529,24 @@ fn ChartPanel(page_id: String, id: String, chart: Chart, source: Option<ChartSou
                     }
                 }
             }
-            if table.is_some() && chart.shape != Shape::Days {
+            if table.is_some() && matches!(chart.shape, Shape::Bars | Shape::Line) {
+                button {
+                    class: if chart.running { "ai-menu-row active" } else { "ai-menu-row" },
+                    "data-chart-running": "1",
+                    role: "switch",
+                    "aria-checked": if chart.running { "true" } else { "false" },
+                    onclick: {
+                        let mut ch = chart.clone();
+                        let save = save.clone();
+                        move |_| {
+                            ch.running = !ch.running;
+                            save(ch.clone());
+                        }
+                    },
+                    span { class: "ai-menu-value", "Running total" }
+                }
+            }
+            if table.is_some() && matches!(chart.shape, Shape::Bars | Shape::Line | Shape::Ring) {
                 label { class: "panel-field panel-input",
                     span { class: "panel-name", "Goal" }
                     input {

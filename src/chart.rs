@@ -16,7 +16,8 @@
 use chrono::{Datelike, Duration, NaiveDate};
 use serde::{Deserialize, Serialize};
 
-use crate::table::{Kind, Table};
+use crate::table::choice::names_in;
+use crate::table::{Color, Kind, Table};
 
 /// How a chart draws.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,10 +28,12 @@ pub enum Shape {
     Line,
     Ring,
     Days,
+    /// Slices of a circle: how much of each tag (wins against losses).
+    Pie,
 }
 
 impl Shape {
-    pub const ALL: [Shape; 4] = [Shape::Bars, Shape::Line, Shape::Ring, Shape::Days];
+    pub const ALL: [Shape; 5] = [Shape::Bars, Shape::Line, Shape::Pie, Shape::Ring, Shape::Days];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -38,6 +41,7 @@ impl Shape {
             Shape::Line => "Line",
             Shape::Ring => "Ring",
             Shape::Days => "Days",
+            Shape::Pie => "Pie",
         }
     }
 
@@ -48,6 +52,7 @@ impl Shape {
             Shape::Line => "chart",
             Shape::Ring => "ring",
             Shape::Days => "days",
+            Shape::Pie => "pie",
         }
     }
 }
@@ -140,6 +145,17 @@ pub struct Chart {
     pub goal: Option<f64>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub title: String,
+    /// Each bar or point adds to the ones before it (a curve of what was made).
+    #[serde(default, alias = "cumulative", skip_serializing_if = "std::ops::Not::not")]
+    pub running: bool,
+}
+
+/// One slice of a pie.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Slice {
+    pub label: String,
+    pub value: f64,
+    pub color: Color,
 }
 
 /// One bar or point.
@@ -186,8 +202,9 @@ impl Chart {
     /// any). Unset, the first date column and the first number, time or
     /// pace column.
     pub fn columns(&self, t: &Table) -> (Option<usize>, Option<usize>) {
-        let x = t.find_column(&self.x).or_else(|| t.first_of(Kind::Date));
-        let y = t.find_column(&self.y).or_else(|| [Kind::Number, Kind::Time, Kind::Pace].into_iter().find_map(|k| t.first_of(k)));
+        let tags = || (0..t.columns()).find(|&c| t.kind(c).has_options());
+        let x = t.find_column(&self.x).or_else(|| if self.shape == Shape::Pie { tags() } else { t.first_of(Kind::Date) });
+        let y = t.find_column(&self.y).or_else(|| [Kind::Number, Kind::Time, Kind::Pace, Kind::Formula].into_iter().find_map(|k| t.first_of(k)));
         (x, y)
     }
 
@@ -211,6 +228,12 @@ impl Chart {
                 Add::Average => format!("Average {}", amount.to_lowercase()),
                 Add::Sum | Add::Count => amount,
             },
+            Shape::Pie => match (self.add, x) {
+                (Add::Count, Some(c)) => format!("Rows by {}", t.heading(c).to_lowercase()),
+                (_, Some(c)) => format!("{amount} by {}", t.heading(c).to_lowercase()),
+                _ => amount,
+            },
+            Shape::Bars | Shape::Line if self.running => format!("{amount}, running total"),
             Shape::Bars | Shape::Line => match (self.by, dated) {
                 (By::Day, true) => format!("{amount} per day"),
                 (By::Week, true) => format!("{amount} per week"),
@@ -229,24 +252,67 @@ impl Chart {
         }
     }
 
-    /// The bars or points to draw, oldest first.
+    /// The bars or points to draw, oldest first: the last few when there
+    /// are many, with a running total counted from the very first.
     pub fn points(&self, t: &Table, today: NaiveDate) -> Vec<Point> {
+        let mut points = self.all_points(t, today);
+        if self.running {
+            let mut sum = 0.0;
+            for p in &mut points {
+                sum += p.value;
+                p.value = sum;
+            }
+        }
+        let (x, _) = self.columns(t);
+        let most = if self.by == By::Row || !x.is_some_and(|c| t.kind(c) == Kind::Date) { 30 } else { 26 };
+        let from = points.len().saturating_sub(most);
+        points.split_off(from)
+    }
+
+    /// The slices of a pie: for each tag of the column along the bottom, how
+    /// many rows have it, or the sum of their amounts. In the column's order.
+    pub fn slices(&self, t: &Table) -> Vec<Slice> {
+        let (x, y) = self.columns(t);
+        let Some(c) = x else { return Vec::new() };
+        let column = t.column(c);
+        let mut out: Vec<Slice> = column.options.iter().map(|o| Slice { label: o.name.clone(), value: 0.0, color: o.color }).collect();
+        for r in t.body() {
+            let Some(amount) = self.amount(t, r, y) else { continue };
+            for name in names_in(column.kind, &t.shown(r, c)) {
+                match out.iter_mut().find(|s| s.label.eq_ignore_ascii_case(&name)) {
+                    Some(s) => s.value += amount,
+                    None => out.push(Slice { label: name, value: amount, color: Color::Gray }),
+                }
+            }
+        }
+        out.retain(|s| s.value > 0.0);
+        out
+    }
+
+    /// Amounts of this chart's column are coloured by their sign.
+    pub fn signed(&self, t: &Table) -> bool {
+        self.add != Add::Count && self.columns(t).1.is_some_and(|c| t.column(c).signed)
+    }
+
+    fn all_points(&self, t: &Table, today: NaiveDate) -> Vec<Point> {
         let (x, y) = self.columns(t);
         let dated = x.filter(|&c| t.kind(c) == Kind::Date);
         match (self.by, dated) {
             (By::Row, _) | (_, None) => {
-                let rows: Vec<usize> = t.body().filter(|&r| self.amount(t, r, y).is_some()).collect();
-                let from = rows.len().saturating_sub(30);
+                let mut rows: Vec<usize> = t.body().filter(|&r| self.amount(t, r, y).is_some()).collect();
+                // Rows of a dated table go by their day, however they are kept.
+                if let Some(c) = dated {
+                    rows.sort_by_key(|&r| t.day(r, c, today));
+                }
                 let last = rows.len().saturating_sub(1);
-                rows[from..]
-                    .iter()
+                rows.iter()
                     .enumerate()
                     .map(|(i, &r)| {
                         let label = match x {
                             Some(c) => t.shown(r, c),
-                            None => (from + i + 1).to_string(),
+                            None => (i + 1).to_string(),
                         };
-                        Point { label, value: self.amount(t, r, y).unwrap_or(0.0), current: from + i == last }
+                        Point { label, value: self.amount(t, r, y).unwrap_or(0.0), current: i == last }
                     })
                     .collect()
             }
@@ -290,8 +356,7 @@ impl Chart {
                     out.push(Point { label, value: self.add.apply(values).unwrap_or(0.0), current: k == now });
                     k = next(k);
                 }
-                let from = out.len().saturating_sub(26);
-                out.split_off(from)
+                out
             }
         }
     }
@@ -378,7 +443,7 @@ mod tests {
         .iter()
         .map(|r| r.iter().map(|c| c.to_string()).collect())
         .collect();
-        let mut t = Table { rows, columns: Vec::new() };
+        let mut t = Table::of(rows);
         t.set_kind(0, Kind::Date);
         t.set_kind(1, Kind::Number);
         t.set_kind(2, Kind::Time);
@@ -471,5 +536,64 @@ mod tests {
         assert_eq!(nice_top(21.0), 25.0);
         assert_eq!(nice_top(2040.0), 2500.0);
         assert_eq!(nice_top(0.0), 1.0);
+    }
+
+    /// A small trade log: wins, a loss, and tags.
+    fn trades() -> Table {
+        let mut t = Table::of(vec![
+            vec!["Date".into(), "Outcome".into(), "PnL".into()],
+            vec!["2026-11-03".into(), "Loss".into(), "-100".into()],
+            vec!["2026-11-02".into(), "Win".into(), "300".into()],
+            vec!["2026-11-09".into(), "Win".into(), "50".into()],
+        ]);
+        t.set_kind(0, Kind::Date);
+        t.set_kind(1, Kind::Choice);
+        t.set_kind(2, Kind::Number);
+        t
+    }
+
+    #[test]
+    fn a_running_total_goes_by_day_and_keeps_what_was_before() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 10).unwrap();
+        let chart = Chart { shape: Shape::Line, x: "Date".into(), by: By::Row, y: "PnL".into(), running: true, ..Chart::default() };
+        let values: Vec<f64> = chart.points(&trades(), today).iter().map(|p| p.value).collect();
+        assert_eq!(values, [300.0, 200.0, 250.0]);
+        assert_eq!(chart.heading(&trades()), "PnL, running total");
+        assert_eq!(Chart::from_markdown(&chart.to_data()), Some(chart));
+        // More rows than show: the first of those shown still counts all before it.
+        let mut many = trades();
+        for i in 0..40 {
+            many.rows.push(vec![format!("2026-10-{:02}", i % 28 + 1), "Win".into(), "1".into()]);
+        }
+        let chart = Chart { shape: Shape::Line, x: "Date".into(), by: By::Row, y: "PnL".into(), running: true, ..Chart::default() };
+        let points = chart.points(&many, today);
+        assert_eq!(points.len(), 30);
+        assert_eq!(points.last().map(|p| p.value), Some(290.0));
+    }
+
+    #[test]
+    fn losses_draw_below_zero_and_a_signed_column_says_so() {
+        let mut t = trades();
+        let chart = Chart { shape: Shape::Bars, x: "Date".into(), by: By::Row, y: "PnL".into(), ..Chart::default() };
+        let values: Vec<f64> = chart.points(&t, NaiveDate::from_ymd_opt(2026, 11, 10).unwrap()).iter().map(|p| p.value).collect();
+        assert_eq!(values, [300.0, -100.0, 50.0], "a loss stays below zero");
+        assert!(!chart.signed(&t));
+        t.columns[2].signed = true;
+        assert!(chart.signed(&t));
+        assert!(!Chart { add: Add::Count, ..chart }.signed(&t), "a count has no sign");
+    }
+
+    #[test]
+    fn a_pie_counts_each_tag_in_its_colour() {
+        let mut t = trades();
+        t.color_option(1, "Win", Color::Green);
+        let chart = Chart { shape: Shape::Pie, x: "Outcome".into(), add: Add::Count, ..Chart::default() };
+        let slices = chart.slices(&t);
+        assert_eq!(slices.len(), 2);
+        let win = slices.iter().find(|s| s.label == "Win").unwrap();
+        assert_eq!((win.value, win.color), (2.0, Color::Green));
+        assert_eq!(chart.heading(&t), "Rows by outcome");
+        // With no column named, the first column of tags.
+        assert_eq!(Chart { shape: Shape::Pie, add: Add::Count, ..Chart::default() }.columns(&t).0, Some(1));
     }
 }

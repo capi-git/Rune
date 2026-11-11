@@ -6,7 +6,23 @@ const results = [];
 // Saved copies of the screen at a few moments, for checking the look.
 const snaps = {};
 const snap = (name) => {
-  snaps[name] = document.documentElement.outerHTML;
+  // What is typed in a box is not in the text of the page: a copy of the
+  // page gets it written in, so that a picture of the copy shows it.
+  const copy = document.documentElement.cloneNode(true);
+  const live = document.querySelectorAll('textarea, input');
+  copy.querySelectorAll('textarea, input').forEach((box, i) => {
+    const from = live[i];
+    if (!from) return;
+    if (box.tagName === 'TEXTAREA') box.textContent = from.value;
+    else if (from.type === 'checkbox' || from.type === 'radio') box.toggleAttribute('checked', from.checked);
+    else box.setAttribute('value', from.value);
+  });
+  // Each picture goes to the report by itself: all of them with the results
+  // is too much for one message, and the results would be lost with it.
+  // (Half a pair of code units, which a report cannot carry, becomes a mark.)
+  const html = copy.outerHTML;
+  snaps[name] = html.length;
+  dioxus.send({ snap: name, html: html.toWellFormed ? html.toWellFormed() : html });
 };
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const until = async (fn, ms = 2500, step = 30) => {
@@ -32,6 +48,28 @@ const onTop = (el) => {
   return !!hit && (hit === el || el.contains(hit));
 };
 const menuItem = (menu, text) => $$('.menu-item', menu).find((m) => m.textContent.includes(text));
+// The menu of the bar that asks where to keep a page: Rune's own, with every space.
+const placeNow = (within) => $('#meeting-place .pad-pick-name', within)?.textContent.trim();
+const placesOpen = async (within) => {
+  if (!$('.place-menu', within)) $('#meeting-place', within).click();
+  return until(() => $('.place-menu', within));
+};
+const placesShut = async (within) => {
+  $('.place-shade', within)?.click();
+  await until(() => !$('.place-menu', within), 1500);
+};
+const placeRowName = (row) => row.querySelector('.place-name').textContent.trim();
+const placeNames = async (within) => {
+  const menu = await placesOpen(within);
+  const names = menu ? $$('.place-row', menu).map(placeRowName) : [];
+  await placesShut(within);
+  return names;
+};
+const choosePlace = async (within, name) => {
+  const menu = await placesOpen(within);
+  $$('.place-row', menu).find((r) => placeRowName(r) === name).click();
+  await until(() => !$('.place-menu', within), 1500);
+};
 // (Not the picture of the last space's list, which slides out for a moment when the space changes.)
 const treeItem = (title) => $$('.sidebar .tree-item').find((t) => !t.closest('.side-ghost') && t.querySelector('.tree-title')?.textContent === title);
 const typeIn = (el, text) => {
@@ -41,6 +79,10 @@ const typeIn = (el, text) => {
 // Whether the window was in view at the start and end of each check (macOS
 // pauses drawing in a window out of view, which stalls the checks).
 const views = {};
+// The real pointer is no part of a test: resting over the test window, it
+// sends hover events of its own when the page changes under it (found when
+// one closed the floating sidebar in the middle of its check).
+for (const type of ['mouseover', 'mouseout', 'mousemove']) window.addEventListener(type, (e) => e.isTrusted && e.stopImmediatePropagation(), true);
 // NOTION2_SELFTEST_ONLY: run only the checks whose name holds one of these.
 const ONLY = String(window.__n2_only || '').split(',').map((o) => o.trim()).filter(Boolean);
 const run = async (name, fn) => {
@@ -124,6 +166,34 @@ const newPage = async (title) => {
   t.dispatchEvent(new Event('input', { bubbles: true }));
   await until(() => treeItem(title));
   return t;
+};
+
+// A table: one of the commands of the menu of a column, and of a row (the
+// handle of a row comes to the row under the pointer).
+const columnDo = async (table, c, item) => {
+  $$('.th-menu', table)[c].click();
+  const row = await until(() => $(`.column-menu [data-item="${item}"]`, table));
+  if (!row) throw new Error(`the menu of column ${c} has no "${item}"`);
+  row.click();
+};
+const rowHandle = async (table, r) => {
+  $(`tr[data-r="${r}"]`, table).dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
+  const handle = await until(() => $(`.row-handle.on[data-r="${r}"]`, table.parentElement));
+  if (!handle) throw new Error(`no handle came to row ${r}`);
+  return handle;
+};
+const rowDo = async (table, r, item) => {
+  $('[data-row-op="row-menu"]', await rowHandle(table, r)).click();
+  const row = await until(() => $(`.row-menu [data-item="${item}"]`, table));
+  if (!row) throw new Error(`the menu of row ${r} has no "${item}"`);
+  row.click();
+};
+// Type in a cell and leave it, as a person does.
+const fillCell = (cell, text) => {
+  cell.focus();
+  cell.value = text;
+  cell.dispatchEvent(new Event('input', { bubbles: true }));
+  cell.dispatchEvent(new Event('change', { bubbles: true }));
 };
 
 await wait(600);
@@ -585,6 +655,13 @@ await run('Spaces', async () => {
   menuItem(menu2, 'My Space').click();
   check('Switching back shows the first space', await until(() => treeItem('Getting Started') && !treeItem('Only in space two')));
 
+  // Each space has its own tabs.
+  const tabTitles = () => $$('.tab .tab-title').map((t) => t.textContent);
+  check('The tabs of a space are not in the bar of another space', await until(() => tabTitles().length && !tabTitles().includes('Only in space two')), tabTitles().join(' | '));
+  treeItem('Getting Started').click();
+  check('A page opens in a tab of its space', await until(() => $('.tab.active .tab-title')?.textContent === 'Getting Started'), tabTitles().join(' | '));
+  const firstTabs = tabTitles().join(' | ');
+
   // The foot of the sidebar: Settings, and a dot for each space.
   const dots = () => $$('.side-foot .space-dot');
   const current = () => dots().findIndex((d) => d.classList.contains('current'));
@@ -608,6 +685,12 @@ await run('Spaces', async () => {
   check('…and is gone when the move is over', await until(() => !$('.side-ghost'), 1500));
   check('A click on a dot goes to its space, and its list comes in from that side', list && current() === 1 && treeItem('Only in space two') && list.classList.contains('from-next'), list?.className);
   check('…and the mark of the move goes away when it is over', await until(() => $('.side-scroll').className === 'side-scroll', 2000), $('.side-scroll').className);
+  check('Another space brings back its own tabs, with the one you left in front', await until(() => $('.tab.active .tab-title')?.textContent === 'Only in space two') && !tabTitles().includes('Getting Started'), tabTitles().join(' | '));
+  check('The highlight is under the tab in front after a change of space', await until(() => Math.abs($('.tabs .tab-glider').getBoundingClientRect().left - $('.tab.active').getBoundingClientRect().left) < 2, 800), `${$('.tabs .tab-glider').getBoundingClientRect().left} and ${$('.tab.active').getBoundingClientRect().left}`);
+  $('.tabs .new-tab').click();
+  check('A new tab belongs to the space in front', await until(() => $('.tab.active .tab-title')?.textContent === 'Home') && tabTitles().includes('Only in space two'), tabTitles().join(' | '));
+  $('.tab.active .tab-close').click();
+  await until(() => $('.tab.active .tab-title')?.textContent === 'Only in space two');
 
   // Two fingers moved sideways on the sidebar: one space for each move.
   const swipe = async (dx) => {
@@ -623,6 +706,7 @@ await run('Spaces', async () => {
   };
   await swipe(-30);
   check('Two fingers moved to the right go to the space before', await until(() => $('.ws-label')?.textContent === 'My Space' && current() === 0, 2000), $('.ws-label')?.textContent);
+  check('The first space has the same tabs as before, and the same one in front', await until(() => tabTitles().join(' | ') === firstTabs && $('.tab.active .tab-title')?.textContent === 'Getting Started'), `${tabTitles().join(' | ')} (was ${firstTabs})`);
   await wait(250);
   await swipe(-30);
   await wait(200);
@@ -684,6 +768,98 @@ await run('Spaces', async () => {
   // A move the other way is a new move, with no pause before it.
   await light(-1);
   check('A move the other way is seen with no pause after the last one', await until(() => $('.ws-label')?.textContent === 'My Space' && current() === 0, 2000), $('.ws-label')?.textContent);
+  await wait(450);
+
+  // Three spaces: two moves, one soon after the other, go from the first to
+  // the third. (The second move was lost in the glide of the first, and the
+  // sidebar stopped at the middle space.)
+  $('.ws-name').click();
+  menuItem(await until(() => $('.space-menu')), 'New space').click();
+  const third = await until(() => $('.space-new input'));
+  third.value = 'Third space';
+  third.dispatchEvent(new Event('input', { bubbles: true }));
+  await wait(50);
+  key(third, 'Enter');
+  await until(() => $('.ws-label')?.textContent === 'Third space');
+  await wait(450);
+  dots()[0].click();
+  await until(() => $('.ws-label')?.textContent === 'My Space' && treeItem('Getting Started'));
+  await wait(450);
+  const wheel = (x, y = 0) => $('.side-scroll').dispatchEvent(new WheelEvent('wheel', { deltaX: x, deltaY: y, bubbles: true, cancelable: true }));
+  // One move of the fingers, then its glide: weaker and weaker, with no pause.
+  const flick = async () => {
+    for (const x of [3, 8, 14, 18, 16, 12]) {
+      wheel(x);
+      await wait(12);
+    }
+  };
+  const tail = async (steps) => {
+    for (const x of steps) {
+      wheel(x);
+      await wait(12);
+    }
+  };
+  await flick();
+  await tail([10, 8, 7, 6, 5, 5, 4, 4, 3, 3, 2, 2, 2, 1, 1]);
+  check('With three spaces, the first move goes to the middle space', await until(() => $('.ws-label')?.textContent === 'Second space' && current() === 1, 2000), $('.ws-label')?.textContent);
+  // The second move starts in the glide of the first: no pause at all.
+  await flick();
+  await tail([10, 8, 6, 5, 4, 3, 2, 2, 1, 1]);
+  check('A second move soon after it, with no pause, goes on to the third space', await until(() => $('.ws-label')?.textContent === 'Third space' && current() === 2, 2000), $('.ws-label')?.textContent);
+  await wait(500);
+  // One long move with its long glide is still one space, not two.
+  dots()[0].click();
+  await until(() => $('.ws-label')?.textContent === 'My Space' && treeItem('Getting Started'));
+  await wait(450);
+  await tail([3, 8, 14, 18, 20, 20, 19, 20, 18, 19, 20, 18, 17, 18, 19, 20, 18, 16, 15, 14, 13, 12, 11, 10, 9, 8, 8, 7, 6, 6, 5, 5, 4, 4, 3, 3, 3, 2, 2, 2, 1, 1, 1, 1]);
+  await wait(200);
+  check('One long move and its glide go one space only', $('.ws-label')?.textContent === 'Second space' && current() === 1, $('.ws-label')?.textContent);
+  await wait(450);
+  // A move that starts a little downward and then goes sideways is a move for the spaces.
+  for (const [x, y] of [[2, 9], [3, 10], [4, 9], [9, 4], [13, 2], [15, 1], [15, 0], [14, 1], [12, 0], [9, 0], [6, 0], [4, 0], [2, 0]]) {
+    wheel(x, y);
+    await wait(12);
+  }
+  check('A move that starts a little downward and then goes sideways changes the space', await until(() => $('.ws-label')?.textContent === 'Third space' && current() === 2, 2000), $('.ws-label')?.textContent);
+  await wait(500);
+  // Up and down with a little drift sideways is still the list.
+  for (let i = 0; i < 12; i++) {
+    wheel(-3, 14);
+    await wait(12);
+  }
+  await wait(200);
+  check('Up and down with a little drift does not change the space', $('.ws-label')?.textContent === 'Third space' && current() === 2);
+  await wait(500);
+  // Soft moves, one right after the other, from the third space back to the
+  // first. (A soft second move was lost: only a strong one went through.)
+  const softMove = async (way) => {
+    for (const x of [1, 2, 3, 4, 5, 5, 4, 4, 3, 3, 2, 2, 2, 1, 1]) {
+      wheel(x * way);
+      await wait(12);
+    }
+  };
+  await softMove(-1);
+  check('A soft move from the third space goes to the middle space', await until(() => $('.ws-label')?.textContent === 'Second space' && current() === 1, 2000), $('.ws-label')?.textContent);
+  await softMove(-1);
+  check('A soft move right after it, with no pause, goes on to the first space', await until(() => $('.ws-label')?.textContent === 'My Space' && current() === 0, 2000), $('.ws-label')?.textContent);
+  await wait(500);
+  await softMove(1);
+  await softMove(1);
+  check('…and two soft moves the other way go to the third space', await until(() => $('.ws-label')?.textContent === 'Third space' && current() === 2, 2000), $('.ws-label')?.textContent);
+  await wait(500);
+  // A very soft move that goes on after the change (steps of 1 to 3) is one move.
+  dots()[0].click();
+  await until(() => $('.ws-label')?.textContent === 'My Space' && treeItem('Getting Started'));
+  await wait(450);
+  for (const x of [1, 2, 3, 2, 3, 3, 2, 3, 3, 2, 3, 2, 3, 3, 2, 3, 2, 1, 2, 3, 2, 3, 2, 2, 3, 2, 1, 2, 1, 1, 2, 1, 1]) {
+    wheel(x);
+    await wait(12);
+  }
+  await wait(200);
+  check('One very soft move that goes on is still one space', $('.ws-label')?.textContent === 'Second space' && current() === 1, $('.ws-label')?.textContent);
+  await wait(300);
+  dots()[0].click();
+  await until(() => $('.ws-label')?.textContent === 'My Space' && treeItem('Getting Started'));
   await wait(450);
 
   // The sidebar that floats (not pinned): the same move works there.
@@ -1092,6 +1268,17 @@ await run('Calendar across spaces', async () => {
   const up = await until(() => $$('.up-row').find((r) => r.textContent.includes('Across the spaces')), 3000);
   check('Home shows the events of every space, each with the mark of its space', up && up.querySelector('.ev-space')?.title === other, up?.outerHTML.slice(0, 200));
 
+  // A page of another space opens among the tabs of that space.
+  await openCalendar();
+  ev().click();
+  (await until(() => $('#ev-page'))).click();
+  check('Opening a page of another space goes to that space, in a tab there', await until(() => name() === other && ($('.tab.active .tab-title')?.textContent || '').includes('Across the spaces'), 3000), `${name()}: ${$('.tab.active .tab-title')?.textContent}`);
+  $('.pagebar .icon-btn[title="Page options"]').click();
+  menuItem(await until(() => $('.page-menu')), 'Move to Trash').click();
+  await until(() => !$$('.tab .tab-title').some((t) => t.textContent.includes('Across the spaces')));
+  $$('.side-foot .space-dot').find((d) => d.title === first).click();
+  await until(() => name() === first);
+
   // Clean up.
   await openCalendar();
   ev()?.click();
@@ -1421,9 +1608,27 @@ await run('Meeting notes', async () => {
   T().command('meeting_started');
   await wait(400);
   check('The same meeting does not make a second page', listed() === 1, listed());
+  typeIn(document.activeElement, 'Agenda first');
+  await wait(300);
   T().command('meeting_ended');
   check('When it ends, the line gets the end time and length', await until(() => /\(\d+ min\)/.test(line())), line());
   snap('meeting-notes');
+  // A call the person wants no notes of: "Not now" on the page, and no page is kept.
+  T().command('forget_meeting');
+  const tabsBefore = $$('.tab').length;
+  T().command('meeting_started');
+  const asked = await until(() => $$('.pane').find((p) => p.offsetParent && $('#listen-no', p)), 4000);
+  check('With no pad, the page of the call asks itself', asked && listed() === 2, listed());
+  $('#listen-no', asked)?.click();
+  check('"Not now" on an empty page of a call takes the page away: no page is kept', await until(() => listed() === 1 && $$('.tab').length === tabsBefore, 3000), `${listed()} pages, ${$$('.tab').length - tabsBefore} new tabs`);
+  T().command('meeting_ended');
+  // A call nobody says yes to: at its end, its empty page goes.
+  T().command('forget_meeting');
+  T().command('meeting_started');
+  await until(() => listed() === 2, 4000);
+  T().command('meeting_ended');
+  check('A call with no yes and nothing written leaves no page when it ends', await until(() => listed() === 1, 3000), listed());
+  T().command('forget_meeting');
 });
 
 await run('Speak a page', async () => {
@@ -1644,23 +1849,17 @@ await run('Pictures, tables and covers', async () => {
   cells()[8].focus();
   key(document.activeElement, 'Tab');
   check('Tab past the last cell adds a row and goes to its start', await until(() => $$('tr', table).length === 4 && document.activeElement === cells()[9], 3000), `${$$('tr', table).length} rows, at ${cells().indexOf(document.activeElement)}`);
-  cells()[2].focus();
-  await until(() => table.dataset.c === '2');
-  $('[data-table-op="remove-column"]', table).click();
-  check('The buttons act on the cell with the caret: its column goes', await until(() => grid() === 'Item|Amount / Rent|$2,000 / | / |', 3000), grid());
-  cells()[1].focus();
-  await until(() => table.dataset.c === '1' && table.dataset.r === '0');
-  $('[data-table-op="add-column"]', table).click();
-  check('…and a column is added after it', await until(() => grid() === 'Item|Amount| / Rent|$2,000| / || / ||', 3000), grid());
-  cells()[9].focus();
-  await until(() => table.dataset.r === '3');
-  $('[data-table-op="remove-row"]', table).click();
-  check('…and its row goes', await until(() => $$('tr', table).length === 3, 3000), grid());
+  await columnDo(table, 2, 'delete');
+  check('The menu of a column takes the column out', await until(() => grid() === 'Item|Amount / Rent|$2,000 / | / |', 3000), grid());
+  await columnDo(table, 1, 'right');
+  check('…and puts a new column after it, with the caret in its heading', await until(() => grid() === 'Item|Amount| / Rent|$2,000| / || / ||' && document.activeElement === cells()[2], 3000), grid());
+  await rowDo(table, 3, 'delete');
+  check('The menu of a row takes the row out', await until(() => $$('tr', table).length === 3, 3000), grid());
   cells()[3].focus();
   key(document.activeElement, 'Enter');
   check('Return goes to the cell below', await until(() => document.activeElement === cells()[6]));
   await wait(200);
-  check('The buttons show while a cell has the caret', table.classList.contains('editing') && getComputedStyle($('.table-tools', table)).opacity === '1', getComputedStyle($('.table-tools', table)).opacity);
+  check('The table knows that a cell has the caret', table.classList.contains('editing'));
   document.activeElement.blur();
   check('…and go when the caret leaves the table', await until(() => !table.classList.contains('editing')));
   T().command('copy_markdown');
@@ -1710,7 +1909,7 @@ await run('Typed tables and charts', async () => {
   const wrap = () => box.closest('.table-wrap');
   const paces = () => $$('.cell.computed', box).map((c) => c.value).join(' ');
   check('The pace is worked out from the distance and the time', paces() === '6:30 6:24 6:36', paces());
-  check('A choice is a tag and a tick is a box', $$('.cell.choice', box).length === 3 && $$('.cell-check', box).length === 3 && $$('.cell-check.on', box).length === 2);
+  check('A choice is a tag and a tick is a box', $$('.cell.pick .tag', box).length === 3 && $$('.cell-check', box).length === 3 && $$('.cell-check.on', box).length === 2);
   const totals = () => $$('.table-totals td', wrap()).map((t) => t.textContent.trim()).join(' | ');
   check('The totals show under the table', totals() === '3 rows |  | Sum 9.5 | Sum 1:01:47 | Avg 6:30 | 2 of 3', totals());
   $$('.cell-check', box)[1].click();
@@ -1721,20 +1920,21 @@ await run('Typed tables and charts', async () => {
   const kmMenu = $$('.th-menu', box)[2];
   kmMenu.click();
   const menu = await until(() => $('.column-menu', box));
-  check('A column has a menu of kinds and totals', menu && $('.ai-menu-row.active', menu)?.textContent.includes('Number') && $('[data-total="average"]', menu));
+  check('A column has a menu of kinds and totals', menu && $('[data-item="type"]', menu)?.textContent.includes('Number') && $('[data-item="total"]', menu)?.textContent.includes('Sum'));
   check('The menu is not cut by the table', menu && onTop(menu), menu ? JSON.stringify(menu.getBoundingClientRect()) : '');
   await wait(200);
   snap('column-menu');
-  $('[data-total="average"]', menu).click();
+  $('[data-item="total"]', menu).click();
+  (await until(() => $('.column-sub [data-item="average"]', menu))).click();
   check('Choosing a total changes the foot of that column', await until(() => totals().includes('Avg 3.2')), totals());
   (await until(() => $('.backdrop'))).click();
   check('A click elsewhere closes the menu', await until(() => !$('.column-menu')));
 
   // A row for today.
-  const rowsBefore = $$('tr', box).length;
+  const rowsBefore = $$('tr[data-r]', box).length;
   $('.table-today', wrap()).click();
-  check('New row for today adds a row with today in its date column', await until(() => $$('tr', box).length === rowsBefore + 1 && $$('tr', box).pop().querySelector('.cell').value === $('.table-today-day', wrap()).textContent), $$('tr', box).pop()?.querySelector('.cell')?.value);
-  check('…and puts the caret in the row to type', await until(() => document.activeElement?.classList.contains('cell') && document.activeElement.closest('tr') === $$('tr', box).pop()), document.activeElement?.className);
+  check('New row for today adds a row with today in its date column', await until(() => $$('tr[data-r]', box).length === rowsBefore + 1 && /^\w{3} \d+ \w{3}/.test($$('tr[data-r]', box).pop().querySelector('.cell').value)), $$('tr[data-r]', box).pop()?.querySelector('.cell')?.value);
+  check('…and puts the caret in the row to type', await until(() => document.activeElement?.classList.contains('cell') && document.activeElement.closest('tr') === $$('tr[data-r]', box).pop()), document.activeElement?.className);
 
   // A chart from the "/" menu: it draws the table above it.
   const notes = $$('.blk', pane()).find((b) => b.textContent.includes('Notes'));
@@ -1768,6 +1968,702 @@ await run('Typed tables and charts', async () => {
   T().command('copy_markdown');
   await wait(200);
   snap('typed-table');
+});
+
+await run('Tables as databases', async () => {
+  await oneTab();
+  const title = await newPage('Budget check');
+  key(title, 'Enter');
+  const first = await until(() => document.activeElement?.classList.contains('blk') && document.activeElement);
+  const pane = () => shownPane('Budget check');
+  const md = [
+    '| Item | Amount |',
+    '| --- | --- |',
+    '| Salary | 3500 |',
+    '| Side gig | 450 |',
+    '<!-- table: Income | icon plus:green -->',
+    '',
+    '| Item | Amount | Category | Day | Paid |',
+    '| --- | --- | --- | --- | --- |',
+    '| Rent | 2000 | Home | 2026-11-01 | x |',
+    '| Groceries | 150 | Food | 2026-11-05 | x |',
+    '| Dinner | 65 | Food | 2026-11-07 |  |',
+    '<!-- columns: text | text | choice | date | checkbox -->',
+    '<!-- table: Expenses | icon minus:red | beside -->',
+    '',
+    'After',
+  ].join('\n');
+  const clip = new DataTransfer();
+  clip.setData('text/plain', md);
+  first.dispatchEvent(new ClipboardEvent('paste', { clipboardData: clip, bubbles: true, cancelable: true }));
+  const wraps = () => $$('.table-wrap', pane());
+  await until(() => wraps().length === 2, 4000);
+  const wrap = () => wraps()[1];
+  const box = () => $('.table-block', wrap());
+  const cell = (r, c) => $(`.cell[data-r="${r}"][data-c="${c}"]`, box());
+  const panes = () => $$('.pane').filter((p) => p.offsetParent).length;
+  const closeMenu = async () => {
+    $('.backdrop')?.click();
+    await until(() => !$('.table-menu'));
+  };
+  // One of the commands of the menu of the second table; `sub` is in its second list.
+  const tableDo = async (item, sub) => {
+    $('.table-head .table-more', wrap()).click();
+    const row = await until(() => $(`.own-menu [data-item="${item}"]`, wrap()));
+    if (!row) throw new Error(`the menu of the table has no "${item}"`);
+    row.click();
+    if (sub) (await until(() => $(`.own-menu .column-sub [data-item="${sub}"]`, wrap()))).click();
+  };
+
+  // Names, icons, side by side.
+  const names = () => $$('.table-name', pane()).map((n) => n.value).join(' / ');
+  check('Two tables with their names and icons', names() === 'Income / Expenses' && $$('.table-icon', pane()).length === 2, names());
+  const lines = wraps().map((w) => w.closest('.block-row'));
+  const [a, b] = lines.map((l) => l.getBoundingClientRect());
+  const wide = pane().getBoundingClientRect().width > 700;
+  check('The second table stands beside the first (below it in a narrow pane)', lines.every((l) => l.classList.contains('side')) && (wide ? Math.abs(a.top - b.top) < 2 && b.left >= a.right : b.top >= a.bottom), `${wide} ${Math.round(a.top)},${Math.round(a.left)}-${Math.round(a.right)} / ${Math.round(b.top)},${Math.round(b.left)}`);
+  check('No system list anywhere in the tables', !$('select', pane()));
+  const headHeight = () => Math.round($('tr.head-row', box()).getBoundingClientRect().height);
+  check('A heading of one word stands on one line, in a narrow column too', headHeight() < 44, String(headHeight()));
+  const inWindow = (el) => {
+    const r = el.getBoundingClientRect();
+    return r.top >= 0 && r.left >= 0 && r.bottom <= innerHeight && r.right <= innerWidth;
+  };
+  await wait(200);
+  snap('tables-side-by-side');
+
+  // Money: a sign typed in a cell says what the column holds.
+  fillCell(cell(1, 1), '$2,000');
+  const amounts = () => [1, 2, 3].map((r) => cell(r, 1)?.value).join(' ');
+  check('A money sign typed in a cell makes its column money', await until(() => amounts() === '$2,000.00 $150.00 $65.00', 3000), amounts());
+  const totals = () => $$('.table-totals td', box()).map((t) => t.textContent.trim()).join(' | ');
+  await columnDo(box(), 1, 'total');
+  const sum = await until(() => $('.column-sub [data-item="sum"]', box()));
+  check('The menu of a column and its second list are on top of the page', sum && onTop(sum) && onTop($('.column-menu [data-item="type"]', box())));
+  const menuPlace = () =>
+    [$('.column-menu', box()), $('.column-sub', box())]
+      .map((m) => {
+        const r = m.getBoundingClientRect();
+        return [r.left, r.top, r.right, r.bottom].map(Math.round).join(',');
+      })
+      .join(' / ') + ' in ' + innerWidth + 'x' + innerHeight;
+  check('…both are whole in the window, and the table stays in its box', inWindow($('.column-menu', box())) && inWindow($('.column-sub', box())) && getComputedStyle(box()).overflowX !== 'visible', menuPlace());
+  sum.click();
+  check('The sum is written as money too', await until(() => totals().includes('Sum $2,215.00')), totals());
+  $('.column-menu [data-item="format"]', box()).click();
+  (await until(() => $('.column-sub [data-item="EUR"]', box()))).click();
+  check('Another kind of money writes every number again', await until(() => cell(1, 1).value === '€2,000.00' && totals().includes('Sum €2,215.00')), amounts() + ' ' + totals());
+  await wait(150);
+  snap('table-column-menu');
+  $('.column-sub [data-item="USD"]', box()).click();
+  await until(() => cell(1, 1).value === '$2,000.00');
+  await closeMenu();
+
+  // A row is a page: Open shows it at the side.
+  $('tr[data-r="1"] .row-open', box()).click();
+  check('Open shows the row as a page at the side', (await until(() => shownPane('Rent'), 4000)) && panes() === 2 && $('[data-peek="close"]', shownPane('Rent')), String(panes()));
+  const valueNames = (p) => $$('.row-value input.value-name', p).map((n) => n.value).join(',');
+  check('The page lists the values of its row', await until(() => valueNames(shownPane('Rent')) === 'Amount,Category,Day,Paid' && $('.row-values .cell[data-c="1"]', shownPane('Rent'))?.value === '$2,000.00'), valueNames(shownPane('Rent')));
+  check('The row is marked while its page is open', $('tr[data-r="1"]', box()).classList.contains('open'));
+  check('The page of a row is not in the sidebar', !treeItem('Rent'));
+  check('…and opening it leaves its parent closed there', !$$('.sidebar .tree-item').some((t) => t.textContent.includes('No pages inside')) && !$$('.sidebar').some((b) => b.textContent.includes('No pages inside')), $('.sidebar')?.textContent.slice(0, 120));
+  const rowTitle = $('.title-input', shownPane('Rent'));
+  rowTitle.focus();
+  rowTitle.value = 'Rent and heat';
+  rowTitle.dispatchEvent(new Event('input', { bubbles: true }));
+  check('The name typed on the page goes to the row', await until(() => cell(1, 0).value === 'Rent and heat'), cell(1, 0).value);
+  fillCell($('.row-values .cell[data-c="1"]', shownPane('Rent and heat')), '2100');
+  check('A value changed on the page changes the cell, in the way its column writes', await until(() => cell(1, 1).value === '$2,100.00'), cell(1, 1).value);
+  const nameCell = cell(1, 0);
+  nameCell.focus();
+  nameCell.value = 'Rent';
+  nameCell.dispatchEvent(new Event('input', { bubbles: true }));
+  check('…and the name typed in the row goes to the page', await until(() => shownPane('Rent')), $$('.title-input').map((t) => t.value).join(','));
+  document.activeElement.blur();
+  $('tr[data-r="2"] .row-open', box()).click();
+  check('The next row opens in the same pane at the side', await until(() => shownPane('Groceries') && panes() === 2 && !shownPane('Rent'), 4000), `${panes()} ${$$('.title-input').map((t) => t.value).join(',')}`);
+  const marked = () => $$('tr.open', box()).map((tr) => tr.dataset.r).join(',');
+  check('The mark goes to the row whose page is open now', await until(() => marked() === '2'), marked());
+  await wait(250);
+  snap('table-side-peek');
+  $('[data-peek="close"]', shownPane('Groceries')).click();
+  check('The pane at the side closes', await until(() => panes() === 1), String(panes()));
+  check('…and no row is marked then', await until(() => marked() === ''), marked());
+
+  // Sorts and filters, as chips. A row stays where it is while it is typed in.
+  const shown = () => $$('tr[data-r]', box()).slice(1).map((tr) => $('.cell[data-c="0"]', tr).value).join(',');
+  await columnDo(box(), 1, 'sort-up');
+  check('A sort orders the rows and shows as a chip', await until(() => shown() === 'Dinner,Groceries,Rent' && $('[data-chip="sort"]', wrap())?.textContent.includes('Amount, low to high')), shown());
+  const dinner = cell(3, 1);
+  dinner.focus();
+  await wait(150);
+  dinner.value = '9999';
+  dinner.dispatchEvent(new Event('input', { bubbles: true }));
+  await wait(300);
+  check('A row stays in its place while it is typed in', shown() === 'Dinner,Groceries,Rent', shown());
+  dinner.dispatchEvent(new Event('change', { bubbles: true }));
+  cell(3, 1).blur();
+  check('…and goes to its new place when the caret leaves the table', await until(() => shown() === 'Groceries,Rent,Dinner', 3000), shown());
+  fillCell(cell(3, 1), '65');
+  document.activeElement.blur();
+  await until(() => shown() === 'Dinner,Groceries,Rent', 3000);
+  await columnDo(box(), 2, 'filter');
+  const chip = await until(() => $('.chip-menu', wrap()));
+  check('Filter opens a chip to say what it asks', chip && $('[data-item="is"]', chip)?.classList.contains('active') && onTop($('[data-item="is"]', chip)));
+  $$('[data-item="value"]', chip).find((v) => v.textContent.includes('Food')).click();
+  check('A filter leaves the rows that pass, and the totals count only those', await until(() => shown() === 'Dinner,Groceries' && totals().includes('Sum $215.00')), shown() + ' ' + totals());
+  await wait(150);
+  snap('table-filter');
+  await closeMenu();
+  $('[data-new-row]', wrap()).click();
+  check('A new row takes the value the filter asks, so it stays in view', await until(() => $$('tr[data-r]', box()).length === 4 && cell(4, 2)?.value === 'Food'), `${$$('tr[data-r]', box()).length} ${cell(4, 2)?.value}`);
+  document.activeElement.blur();
+  await rowDo(box(), 4, 'delete');
+  await until(() => !cell(4, 0));
+  for (const kind of ['filter', 'sort']) {
+    $(`[data-chip="${kind}"]`, wrap()).click();
+    (await until(() => $('.chip-menu [data-item="remove"]', wrap()))).click();
+    await until(() => !$(`[data-chip="${kind}"]`, wrap()));
+  }
+  check('The chips go with the filter and the sort', !$('.table-chips', wrap()) && shown() === 'Rent,Groceries,Dinner', shown());
+
+  // Groups, and the other views of the same rows.
+  fillCell(cell(3, 3), 'today');
+  document.activeElement.blur();
+  await columnDo(box(), 2, 'group');
+  const groups = () => $$('.group-row', box()).map((g) => g.textContent.trim()).join(',');
+  check('Group puts the rows under the values of a column', await until(() => groups() === 'Home1,Food2'), groups());
+  await tableDo('view', 'board');
+  const board = () => $('.table-board', wrap());
+  const cards = () => $$('.board-col', board()).map((c) => `${$('.tag', c).textContent}:${$$('.board-card', c).length}`).join(',');
+  check('A board has a column of cards for each value, with its sum', (await until(() => board())) && cards() === 'Home:1,Food:2' && $('.board-sum', board())?.textContent === '$2,100.00', cards() + ' ' + $('.board-sum', board())?.textContent);
+  await wait(150);
+  snap('table-board');
+  await dragAlong($$('.board-card', board()).find((c) => c.textContent.includes('Dinner')), [centre($$('.board-col', board())[0])]);
+  check('A card dragged to another column takes its value', await until(() => cards() === 'Home:2,Food:1', 3000), cards());
+  await tableDo('view', 'list');
+  check('A list has a line for each row', await until(() => $$('.list-row', wrap()).length === 3), String($$('.list-row', wrap()).length));
+  await tableDo('view', 'gallery');
+  check('A gallery has a card for each row', await until(() => $$('.gallery-card', wrap()).length === 3), String($$('.gallery-card', wrap()).length));
+  await tableDo('view', 'calendar');
+  const month = () => $('.table-month', wrap());
+  check('A calendar shows a month with the row of today on today', (await until(() => month())) && $$('.month-day', month()).length >= 28 && $('.month-day.today .day-row', month())?.textContent === 'Dinner', $('.month-day.today', month())?.textContent);
+  const before = month().dataset.month;
+  $('[data-month-step="1"]', month()).click();
+  check('The arrows go to the months beside it', await until(() => month().dataset.month !== before), month().dataset.month);
+  await wait(150);
+  snap('table-calendar');
+  await tableDo('view', 'table');
+  await until(() => box());
+  $('[data-chip="group"] .chip-x', wrap()).click();
+  check('Back as a table, with no groups', await until(() => !$('.group-row', box()) && shown() === 'Rent,Groceries,Dinner'), shown());
+
+  // Rows are picked by their handle, and stay picked when their menu closes.
+  $('[data-row-op="row-menu"]', await rowHandle(box(), 1)).click();
+  const rowMenu = await until(() => $('.row-menu', box()));
+  check('The handle of a row opens its menu, on top of the page', rowMenu && onTop($('[data-item="side"]', rowMenu)) && $('.table-picked', wrap())?.textContent === '1 row selected', $('.table-picked', wrap())?.textContent);
+  await wait(150);
+  snap('table-row-menu');
+  await closeMenu();
+  check('The row stays picked when its menu closes', $$('tr.picked', box()).length === 1);
+  $('[data-row-op="row-menu"]', await rowHandle(box(), 3)).dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, shiftKey: true }));
+  check('Shift and a click pick the rows up to that row', await until(() => $$('tr.picked', box()).length === 3 && $('.row-menu [data-item="delete"]', box())?.textContent.includes('Delete 3 rows')), `${$$('tr.picked', box()).length} ${$('.row-menu [data-item="delete"]', box())?.textContent}`);
+  await closeMenu();
+  $('h1, .title-input', pane()).dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+  check('A press elsewhere lets the rows go', await until(() => $$('tr.picked', box()).length === 0));
+
+  // Rows nested under a row.
+  await rowDo(box(), 3, 'nest');
+  check('A row nested under the row above stands in, and that row can fold it', await until(() => $('tr[data-r="3"] .first-cell', box())?.style.paddingLeft === '18px' && $('tr[data-r="2"] .row-fold', box())), $('tr[data-r="3"] .first-cell', box())?.style.paddingLeft);
+  $('tr[data-r="2"] .row-fold', box()).click();
+  check('Folding hides the rows inside', await until(() => !$('tr[data-r="3"]', box())));
+  $('tr[data-r="2"] .row-fold', box()).click();
+  await until(() => $('tr[data-r="3"]', box()));
+  await rowDo(box(), 3, 'unnest');
+  await until(() => !$('.row-fold', box()));
+
+  // A formula column, with bars.
+  $('[data-add-column]', wrap()).click();
+  const kinds = await until(() => $('.kinds-menu', wrap()));
+  check('A new column can be one of fifteen kinds, in a menu on top of the page', kinds && $$('[data-item]', kinds).length === 15 && onTop($('[data-item="text"]', kinds)), String($$('[data-item]', kinds || document).length));
+  await wait(150);
+  snap('table-kinds');
+  $('[data-item="formula"]', kinds).click();
+  await until(() => $$('tr.head-row td', box()).length === 6);
+  const heading = cell(0, 5);
+  heading.value = 'Double';
+  heading.dispatchEvent(new Event('input', { bubbles: true }));
+  $$('.th-menu', box())[5].click();
+  const formula = await until(() => $('.column-menu [data-item="formula"]', box()));
+  const typeFormula = (text) => {
+    const field = $('.column-menu [data-item="formula"]', box());
+    field.value = text;
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  typeFormula('Amount *');
+  check('A formula that cannot be read says why', formula && (await until(() => $('.column-error', box())?.textContent.length > 5)), $('.column-error', box())?.textContent);
+  typeFormula('Amount * 2');
+  const worked = () => $$('.cell.computed', box()).map((c) => c.value).join(',');
+  check('A formula is worked out for each row', await until(() => worked() === '4200,300,130' && !$('.column-error', box())), worked());
+  $('.column-menu [data-item="format"]', box()).click();
+  (await until(() => $('.column-sub [data-item="show-as"]', box()))).click();
+  (await until(() => $('.column-sub [data-show="Bar"]', box()))).click();
+  check('Bars show how large each number is', await until(() => $$('.meter-bar', box()).length === 3 && $('.meter-bar span', box()).style.width === '100%'), String($$('.meter-bar', box()).length));
+  await closeMenu();
+
+  // A column that stays in place, a colour rule, the template of new rows, the lock.
+  await columnDo(box(), 0, 'freeze');
+  check('The first column can be frozen (its cell at the foot too)', await until(() => $$('tbody td.frozen', box()).length === 4 && $$('tfoot td.frozen', box()).length === 1 && getComputedStyle($('td.frozen', box())).position === 'sticky'), String($$('td.frozen', box()).length));
+  await tableDo('paint');
+  const paint = await until(() => $('.paint-menu', wrap()));
+  check('The menu of a table and its colour rules are on top of the page', paint && onTop($('.pick', paint)));
+  $$('.pick', paint).find((p) => p.textContent === 'Paid').click();
+  (await until(() => $('.paint-menu [data-op="notticked"]', wrap()))).click();
+  check('A colour rule gives its colour to the rows that pass', await until(() => $$('tr.painted', box()).length === 1 && $('tr.painted .cell', box()).value === 'Dinner'), String($$('tr.painted', box()).length));
+  await wait(150);
+  snap('table-colours');
+  await closeMenu();
+  await tableDo('template');
+  const template = await until(() => shownPane('Template'), 4000);
+  check('The template of new rows opens at the side', template && $('.values-note', template));
+  const category = $$('.row-value', template).find((v) => $('.value-name', v)?.textContent === 'Category')?.querySelector('input.cell');
+  category.value = 'Fun';
+  category.dispatchEvent(new Event('input', { bubbles: true }));
+  await wait(150);
+  $('[data-peek="close"]', shownPane('Template')).click();
+  await until(() => panes() === 1);
+  $('[data-new-row]', wrap()).click();
+  check('A new row starts with what the template says', await until(() => cell(4, 2)?.value === 'Fun'), String(cell(4, 2)?.value));
+  document.activeElement.blur();
+  await tableDo('lock');
+  check('A locked table keeps its columns: no new column, no other heading', await until(() => $('.table-block.locked', wrap()) && cell(0, 0).readOnly && !$('[data-add-column]', wrap())));
+  await tableDo('lock');
+  check('…and takes them again when it is unlocked', await until(() => !$('.table-block.locked', wrap()) && $('[data-add-column]', wrap())));
+  await wait(150);
+  snap('tables-end');
+});
+
+await run('A table with many columns', async () => {
+  // The tables the AI made for a trading journal: eleven and twelve columns.
+  // In a page they were pressed so thin that a heading had one letter in a line.
+  await oneTab();
+  const title = await newPage('Trading journal');
+  key(title, 'Enter');
+  const first = await until(() => document.activeElement?.classList.contains('blk') && document.activeElement);
+  const pane = () => shownPane('Trading journal');
+  const md = [
+    "| Date | Sleep | Mood | Market bias | News and key levels | Trades | P&L | Rules kept | Best decision | Worst decision | Tomorrow's focus |",
+    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+    '|  |  |  |  |  |  |  |  |  |  |  |',
+    '<!-- columns: date count | number | choice | choice | text | number | number USD sum | checkbox checked | text | text | text -->',
+    '',
+    '| Date | Ticker | Market | Side | Setup | Session | Entry | Stop | Target | Exit | Size | Hold |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+    '| 2026-11-10 | Btc | Crypto | Long | Breakout | London | 68000 | 67200 | 70000 |  | 0.5 | 45:00 |',
+    '<!-- columns: date count | text | choice | choice | choice | choice | number | number | number | number | number | time -->',
+    '',
+    '| Week starting | P&L | What worked | One change for next week |',
+    '| --- | --- | --- | --- |',
+    '|  |  |  |  |',
+    '<!-- columns: date count | number | text | text -->',
+    '',
+    '| Date | Ticker | Side | Setup | Risk | P/L | R | Followed plan | Notes |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+    '| 2026-10-20 | AAPL | Long | Breakout | 100 | 180 | 1.8 | Yes | Clean break on volume |',
+    '| 2026-10-22 | TSLA | Short | Reversal | 100 | -100 | -1 | Yes | Stopped out |',
+    '| 2026-10-27 | NVDA | Long | Pullback | 100 | 240 | 2.4 | Yes | Held to target |',
+    '| 2026-10-28 | AMD | Long | A very long setup name here | 100 | -130 | -1.3 | No | Moved my stop |',
+    '<!-- columns: date | text | choice | choice | number | number | number | choice | text -->',
+    '',
+    'After',
+  ].join('\n');
+  const clip = new DataTransfer();
+  clip.setData('text/plain', md);
+  first.dispatchEvent(new ClipboardEvent('paste', { clipboardData: clip, bubbles: true, cancelable: true }));
+  const wraps = () => $$('.table-wrap', pane());
+  await until(() => wraps().length === 4, 4000);
+  await wait(200);
+  const heads = (w) => $$('tr.head-row textarea.cell', w);
+  const tall = (h) => Math.round(h.getBoundingClientRect().height);
+  // A heading that is whole: no word of it is wider than its box, and it has two lines at most.
+  const broken = (w) => heads(w).filter((h) => h.scrollWidth > h.clientWidth + 1 || tall(h) > 60).map((h) => `${h.value} ${h.scrollWidth}/${h.clientWidth} ${tall(h)}`);
+  for (const [n, count, name] of [[0, 11, 'eleven'], [1, 12, 'twelve']]) {
+    check(`The headings of a table with ${name} columns are whole words`, heads(wraps()[n]).length === count && broken(wraps()[n]).length === 0, broken(wraps()[n]).join(' | ') || heads(wraps()[n]).map(tall).join(','));
+  }
+  const box = (n) => $('.table-block', wraps()[n]);
+  const edge = pane().getBoundingClientRect().right;
+  check('…and the table scrolls sideways in its box in place of thinner columns', [0, 1].every((n) => box(n).scrollWidth > box(n).clientWidth + 100 && box(n).getBoundingClientRect().right <= edge), [0, 1].map((n) => `${box(n).scrollWidth} in ${box(n).clientWidth}`).join(' | '));
+  const widths = $$('tr.head-row > td', box(0)).map((td) => Math.round(td.getBoundingClientRect().width));
+  check('A column has the width that its kind and its heading need', Math.min(...widths) >= 66 && widths[4] > widths[7] && widths[10] > widths[1], widths.join(','));
+  check('A table with no row yet has no line of totals at its foot', !$('.table-totals', wraps()[0]), $('.table-totals', wraps()[0])?.textContent);
+  const foot = $('.table-totals td', wraps()[1]);
+  check('…and one with a row has, as plain words under the table', foot?.textContent.includes('1 row') && getComputedStyle(foot).borderLeftColor !== getComputedStyle($('tr[data-r="1"] td', box(1))).borderLeftColor, `${foot?.textContent} ${foot && getComputedStyle(foot).borderLeftColor}`);
+  const tags = $$('.cell.pick .tag', wraps()[3]);
+  const twoLines = tags.filter((t) => t.getBoundingClientRect().height > 30).map((t) => t.value);
+  check('A tag stands on one line, and a long one is cut at its end', tags.length === 12 && twoLines.length === 0, twoLines.join(' | ') || String(tags.length));
+  check('The headings of the trade log are whole words', broken(wraps()[3]).length === 0, broken(wraps()[3]).join(' | '));
+  snap('table-wide');
+  // "New row for today" in a table whose only row is empty: that row takes
+  // the day (no empty row stays above a new one), and the caret is in it.
+  const rows = () => $$('tr[data-r]', box(2)).slice(1).map((tr) => $('.cell[data-c="0"]', tr).value).join('|');
+  const caret = () => `${document.activeElement?.dataset.r},${document.activeElement?.dataset.c}`;
+  $('[data-new-row]', wraps()[2]).click();
+  check('A row for today uses the empty row of a new table', (await until(() => /^\w{3} \d+ \w{3}$/.test(rows()) && caret() === '1,1', 3000)) && !$('.table-totals', wraps()[2])?.textContent.includes('0 rows'), `${rows()} caret ${caret()}`);
+  $('[data-new-row]', wraps()[2]).click();
+  check('…and the next one is a new row under it, with the caret in it', await until(() => rows().split('|').length === 2 && rows().split('|').every((d) => d) && caret() === '2,1', 3000), `${rows()} caret ${caret()}`);
+  check('The count at the foot says how many rows there are', $('.table-totals', wraps()[2])?.textContent.includes('2 rows'), $('.table-totals', wraps()[2])?.textContent);
+  document.activeElement.blur();
+  // A frozen column stays where it is while the table scrolls under it.
+  const closeWide = async () => {
+    $('.backdrop')?.click();
+    await until(() => !$('.table-menu'));
+  };
+  await columnDo(box(1), 0, 'freeze');
+  await closeWide();
+  await until(() => $$('td.frozen', box(1)).length > 0);
+  await wait(150);
+  const frozenCell = () => $('tr[data-r="1"] td.frozen', box(1));
+  const movingCell = () => $$('tr[data-r="1"] td', box(1))[3];
+  const startFrozen = frozenCell().getBoundingClientRect().left;
+  const startMoving = movingCell().getBoundingClientRect().left;
+  box(1).scrollLeft = 260;
+  await wait(200);
+  const nowFrozen = frozenCell().getBoundingClientRect();
+  const nowMoving = movingCell().getBoundingClientRect().left;
+  const frozenHit = document.elementFromPoint(nowFrozen.left + nowFrozen.width - 4, nowFrozen.top + nowFrozen.height / 2);
+  check('A frozen column stays while the others scroll under it', Math.abs(nowFrozen.left - startFrozen) < 1 && startMoving - nowMoving > 200 && frozenCell().contains(frozenHit), `${startFrozen} ${nowFrozen.left} ${startMoving} ${nowMoving} ${frozenHit?.className}`);
+  snap('table-frozen-scrolled');
+  box(1).scrollLeft = 0;
+  // The last columns are there when the table is scrolled.
+  box(0).scrollLeft = box(0).scrollWidth;
+  await wait(200);
+  snap('table-wide-end');
+});
+
+await run('Choices like Notion', async () => {
+  await oneTab();
+  const title = await newPage('Choices check');
+  key(title, 'Enter');
+  const first = await until(() => document.activeElement?.classList.contains('blk') && document.activeElement);
+  const pane = () => shownPane('Choices check');
+  const md = [
+    '| Ticker | Side | Tags |',
+    '| --- | --- | --- |',
+    '| AAPL | Long | Swing, Earnings |',
+    '| TSLA | Short |  |',
+    '| NVDA |  |  |',
+    '<!-- columns: text | choice | multi -->',
+    '',
+    'After',
+  ].join('\n');
+  const clip = new DataTransfer();
+  clip.setData('text/plain', md);
+  first.dispatchEvent(new ClipboardEvent('paste', { clipboardData: clip, bubbles: true, cancelable: true }));
+  const box = () => $('.table-block', pane());
+  await until(() => box(), 4000);
+  await wait(200);
+  const cell = (r, c) => $('.cell[data-r="' + r + '"][data-c="' + c + '"]', box());
+  const picker = () => $('.choice-picker');
+  const tagsOf = (el) => $$('.tag', el).map((t) => t.textContent.trim()).join(',');
+  const typeIn = (text) => {
+    const input = $('.pick-input', picker());
+    input.value = text;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  const press = (k) => key($('.pick-input', picker()), k);
+  const colour = (el) => getComputedStyle(el).backgroundColor;
+
+  check('A choice cell shows a tag, and each option has its own colour', tagsOf(cell(1, 1)) === 'Long' && tagsOf(cell(2, 1)) === 'Short' && colour($('.tag', cell(1, 1))) !== colour($('.tag', cell(2, 1))), `${tagsOf(cell(1, 1))} ${colour($('.tag', cell(1, 1)))} ${colour($('.tag', cell(2, 1)))}`);
+  check('Several choices show as several tags', tagsOf(cell(1, 2)) === 'Swing,Earnings', tagsOf(cell(1, 2)));
+
+  // The list.
+  cell(3, 1).click();
+  check('A click on the cell opens the list, with the caret in its box', (await until(() => picker())) && (await until(() => document.activeElement === $('.pick-input', picker()))), document.activeElement?.className);
+  const options = () => $$('.pick-row[data-option]', picker()).map((o) => o.dataset.option).join(',');
+  check('The list has the options of the column, on top of the page and whole in the window', options() === 'Long,Short' && onTop($('.pick-row', picker())) && picker().getBoundingClientRect().bottom <= innerHeight, options());
+  await wait(150);
+  snap('choice-list');
+  $('.pick-row[data-option="Short"]', picker()).click();
+  check('A click on an option fills the cell and closes the list', await until(() => tagsOf(cell(3, 1)) === 'Short' && !picker()), tagsOf(cell(3, 1)));
+
+  // Search, make with Return.
+  cell(3, 1).click();
+  await until(() => picker());
+  typeIn('lo');
+  check('Typing narrows the list', await until(() => options() === 'Long'), options());
+  typeIn('Hedge');
+  check('A new word offers to create it', await until(() => $('[data-make]', picker())?.textContent.includes('Hedge')), $('[data-make]', picker())?.textContent);
+  await wait(100);
+  snap('choice-create');
+  press('Enter');
+  check('Return creates the option and chooses it', await until(() => tagsOf(cell(3, 1)) === 'Hedge' && !picker()), tagsOf(cell(3, 1)));
+
+  // Arrows.
+  cell(2, 1).click();
+  await until(() => picker());
+  press('ArrowDown');
+  await wait(60);
+  check('The arrows move through the options', $('.pick-row.active', picker())?.dataset.option === 'Short', $('.pick-row.active', picker())?.dataset.option);
+  press('Escape');
+  check('Escape closes the list and changes nothing', await until(() => !picker()) && tagsOf(cell(2, 1)) === 'Short', tagsOf(cell(2, 1)));
+
+  // Several: the list stays open.
+  cell(2, 2).click();
+  await until(() => picker());
+  $('.pick-row[data-option="Swing"]', picker()).click();
+  check('With several choices the list stays open, and shows the chosen in its box', await until(() => tagsOf(cell(2, 2)) === 'Swing' && picker() && tagsOf($('.pick-bar', picker())) === 'Swing'), tagsOf(cell(2, 2)));
+  $('.pick-row[data-option="Earnings"]', picker()).click();
+  check('…takes a second one', await until(() => tagsOf(cell(2, 2)) === 'Swing,Earnings'), tagsOf(cell(2, 2)));
+  $('.pick-bar .tag-x', picker()).click();
+  check('…and the cross on a tag takes it away', await until(() => tagsOf(cell(2, 2)) === 'Earnings'), tagsOf(cell(2, 2)));
+  press('Backspace');
+  check('Backspace in the empty box takes the last tag away', await until(() => tagsOf(cell(2, 2)) === ''), tagsOf(cell(2, 2)));
+  press('Escape');
+  await until(() => !picker());
+
+  // Name and colour.
+  cell(3, 1).click();
+  await until(() => picker());
+  $('.pick-row[data-option="Long"] .pick-more', picker()).click();
+  const editor = await until(() => $('.option-editor'));
+  check('The dots of an option open its name, its colours and Delete', editor && $$('[data-color]', editor).length === 10 && $('[data-item="delete-option"]', editor) && onTop($('[data-color="red"]', editor)));
+  await wait(120);
+  snap('choice-editor');
+  const before = colour($('.tag', cell(1, 1)));
+  $('[data-color="red"]', editor).click();
+  check('A colour changes the tag in every row', await until(() => colour($('.tag', cell(1, 1))) !== before), `${before} ${colour($('.tag', cell(1, 1)))}`);
+  const name = $('.pop-input', $('.option-editor'));
+  name.value = 'Buy';
+  name.dispatchEvent(new Event('input', { bubbles: true }));
+  name.dispatchEvent(new Event('change', { bubbles: true }));
+  check('A new name changes the cells that have it', await until(() => tagsOf(cell(1, 1)) === 'Buy'), tagsOf(cell(1, 1)));
+  await until(() => $('.option-editor [data-item="delete-option"]'));
+  $('.option-editor [data-item="delete-option"]').click();
+  check('Delete takes the option out of its cells', await until(() => tagsOf(cell(1, 1)) === ''), tagsOf(cell(1, 1)));
+  check('…and goes back to the list without it', await until(() => picker() && !$('.option-editor') && !options().includes('Buy')), options());
+  press('Escape');
+  await until(() => !picker());
+
+  // An option dragged in its list.
+  cell(3, 1).click();
+  await until(() => picker());
+  const rowOf = (name) => $('.pick-row[data-option="' + name + '"]', picker());
+  const dragData = new DataTransfer();
+  rowOf('Hedge').dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: dragData }));
+  await wait(60);
+  rowOf('Short').dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dragData }));
+  rowOf('Short').dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dragData }));
+  check('An option dragged in the list takes its new place', await until(() => options() === 'Hedge,Short'), options());
+  typeIn('zzz');
+  check('…and a search that finds nothing, in a list that can make it, offers to create it', await until(() => $('[data-make]', picker())));
+  press('Escape');
+  await until(() => !picker());
+
+  // By the keyboard from the cell.
+  cell(1, 1).focus();
+  key(cell(1, 1), 'h');
+  check('A letter typed on the cell opens the list to search', await until(() => picker() && $('.pick-input', picker()).value === 'h' && options() === 'Hedge,Short'), options());
+  press('Escape');
+  await until(() => !picker());
+  check('The caret goes back to the cell', await until(() => document.activeElement === cell(1, 1)), document.activeElement?.className);
+
+  // In the page of a row.
+  $('tr[data-r="3"] .row-open', box()).click();
+  const side = await until(() => shownPane('NVDA'), 4000);
+  const valueCell = side && $('.row-values .cell.pick[data-c="1"]', side);
+  check('The page of a row shows the same tags', valueCell && tagsOf(valueCell) === 'Hedge', valueCell && tagsOf(valueCell));
+  valueCell.click();
+  const list = await until(() => $('.choice-picker', side));
+  await wait(200);
+  const pickRect = list && $('.pick-row', list).getBoundingClientRect();
+  const pickHit = pickRect && document.elementFromPoint(pickRect.left + pickRect.width / 2, pickRect.top + pickRect.height / 2);
+  snap('choice-row-page');
+  check('…and the same list', list && onTop($('.pick-row', list)), pickRect && `${Math.round(pickRect.left)},${Math.round(pickRect.top)} hit ${pickHit?.tagName}.${pickHit?.className}`);
+  $('.pick-row[data-option="Short"]', list).click();
+  check('…which changes the row', await until(() => tagsOf(cell(3, 1)) === 'Short'), tagsOf(cell(3, 1)));
+  $('[data-peek="close"]', shownPane('NVDA')).click();
+  await until(() => !shownPane('NVDA'));
+});
+
+await run('The mock pages', async () => {
+  // The same pages and the same moments as the mock boards, to lay beside them.
+  const closeMenu = async () => {
+    $('.backdrop')?.click();
+    await until(() => !$('.table-menu'));
+  };
+  await oneTab();
+  const budgetTitle = await newPage('Monthly Budget');
+  key(budgetTitle, 'Enter');
+  let first = await until(() => document.activeElement?.classList.contains('blk') && document.activeElement);
+  const paste = (el, md) => {
+    const clip = new DataTransfer();
+    clip.setData('text/plain', md);
+    el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: clip, bubbles: true, cancelable: true }));
+  };
+  paste(first, [
+    'What comes in and what goes out this month. Each table adds itself up.',
+    '',
+    '| Item | Amount |',
+    '| --- | --- |',
+    '| Salary | 3500 |',
+    '| Side gig | 450 |',
+    '| Birthday money | 150 |',
+    '<!-- columns: text | number USD sum -->',
+    '<!-- table: Income | icon plus:green -->',
+    '',
+    '| Item | Amount |',
+    '| --- | --- |',
+    '| Rent | 2000 |',
+    '| Groceries | 150 |',
+    '| Dinner with Rachel | 65 |',
+    '<!-- columns: text | number USD sum -->',
+    '<!-- table: Expenses | icon minus:red | beside -->',
+  ].join('\n'));
+  const budget = () => shownPane('Monthly Budget');
+  await until(() => $$('.table-wrap', budget()).length === 2, 4000);
+  await wait(250);
+  const money = (w) => $$('tr[data-r] td.num .cell', w).map((c) => c.value).join(' ');
+  check('Markdown money is written as money', money($$('.table-wrap', budget())[0]) === '$3,500.00 $450.00 $150.00', money($$('.table-wrap', budget())[0]));
+  snap('mock-main');
+  const income = () => $$('.table-wrap', budget())[0];
+  const expenses = () => $$('.table-wrap', budget())[1];
+  await columnDo($('.table-block', income()), 1, 'format');
+  await until(() => $('.column-sub [data-item="USD"]', income()));
+  check('The list of formats starts short, with a way to the others', $$('.column-sub [data-item]', income()).filter((m) => /^[A-Z]{3}$/.test(m.dataset.item)).length === 4 && $('.column-sub [data-item="more-money"]', income()));
+  const placesRow = $('.column-sub [data-item="places"]', income());
+  check('Decimal places is a row that says what it is set to', placesRow?.textContent.includes('Decimal places') && placesRow.textContent.includes('Auto') && !$('.column-sub [data-places]', income()), placesRow?.textContent);
+  await wait(200);
+  snap('mock-column');
+  placesRow.click();
+  (await until(() => $('.column-sub [data-places="1"]', income()))).click();
+  check('…and its row sets how the numbers are written', await until(() => money(income()) === '$3,500.0 $450.0 $150.0' && $('.column-sub [data-item="places"]', income()).textContent.includes('1')), money(income()));
+  $('.column-sub [data-places="Auto"]', income()).click();
+  await until(() => money(income()) === '$3,500.00 $450.00 $150.00');
+  $('.column-sub [data-item="more-money"]', income()).click();
+  check('Other currency shows the other kinds of money', await until(() => $('.column-sub [data-item="CHF"]', income()) && !$('.column-sub [data-item="more-money"]', income())));
+  $('.column-sub [data-item="CHF"]', income()).click();
+  check('…and one of them can be chosen', await until(() => money(income()).startsWith('CHF 3,500.00')), money(income()));
+  $('.column-sub [data-item="USD"]', income()).click();
+  await until(() => money(income()).startsWith('$3,500.00'));
+  await closeMenu();
+  $('tr[data-r="1"] .row-open', expenses()).click();
+  const rent = await until(() => shownPane('Rent'), 4000);
+  const crumbWords = () => $$('.crumb', rent).map((c) => c.textContent.trim()).join(' / ');
+  check('The page of a row sits under its table', crumbWords().endsWith('Expenses / Rent'), crumbWords());
+  await wait(250);
+  snap('mock-peek');
+  $('[data-peek="close"]', rent).click();
+  await until(() => !shownPane('Rent'));
+
+  await oneTab();
+  const title = await newPage('Spending');
+  key(title, 'Enter');
+  first = await until(() => document.activeElement?.classList.contains('blk') && document.activeElement);
+  paste(first, [
+    'Each expense of November, one row for each.',
+    '',
+    '| Item | Amount | Category | Date | Paid |',
+    '| --- | --- | --- | --- | --- |',
+    '| Rent | 2000 | Home | 2026-11-01 | x |',
+    '| Internet | 120 | Home | 2026-11-03 | x |',
+    '| Groceries | 150 | Food | 2026-11-05 | x |',
+    '| Dinner with Rachel | 65 | Food | 2026-11-07 | x |',
+    '| Coffee beans | 56.40 | Food | 2026-11-08 | x |',
+    '| Cinema | 32 | Fun | 2026-11-08 | x |',
+    '| Concert tickets | 63 | Fun | 2026-11-13 |  |',
+    '| Train to Portland | 48 | Travel | 2026-11-14 |  |',
+    '<!-- columns: text count | number USD sum | choice {Home:gray; Food:orange; Fun:purple; Travel:blue} | date | checkbox checked -->',
+    '<!-- table: Expenses | icon minus:red -->',
+  ].join('\n'));
+  const pane = () => shownPane('Spending');
+  await until(() => $('.table-wrap', pane()), 4000);
+  await wait(250);
+  const wrap = () => $('.table-wrap', pane());
+  const box = () => $('.table-block', wrap());
+  const cell = (r, c) => $('.cell[data-r="' + r + '"][data-c="' + c + '"]', box());
+  check('Markdown days are written as days', /^\w{3} 1 Nov/.test(cell(1, 3).value), cell(1, 3).value);
+  check('Colours given in the Markdown show', getComputedStyle($('.tag', cell(1, 2))).backgroundColor !== getComputedStyle($('.tag', cell(3, 2))).backgroundColor);
+  const widths = $$('tr.head-row > td', box()).map((td) => Math.round(td.getBoundingClientRect().width));
+  check('The name column takes the room that is left, and five columns need no scrolling', widths[0] > widths[1] * 1.6 && box().scrollWidth <= box().clientWidth + 1, widths.join(','));
+  snap('mock-table');
+  $('[data-row-op="row-menu"]', await rowHandle(box(), 4)).click();
+  await until(() => $('.row-menu', box()));
+  await wait(200);
+  snap('mock-row-menu');
+  await closeMenu();
+  await columnDo(box(), 2, 'filter');
+  const chip = await until(() => $('.chip-menu', wrap()));
+  $$('[data-item="value"]', chip).find((v) => v.textContent.includes('Food')).click();
+  await closeMenu();
+  await columnDo(box(), 1, 'sort-down');
+  check('A filter and a sort show as chips, each with a cross', await until(() => $$('.table-chips .chip-x.on-chip', wrap()).length === 2));
+  await wait(200);
+  snap('mock-filter');
+  $('[data-chip-x="filter"]', wrap()).click();
+  check('The cross of a chip takes it away', await until(() => !$('[data-chip="filter"]', wrap()) && $$('tr[data-r]', box()).length === 9), String($$('tr[data-r]', box()).length));
+  $('[data-chip-x="sort"]', wrap()).click();
+  await until(() => !$('[data-chip="sort"]', wrap()));
+  $('.table-head .table-more', wrap()).click();
+  (await until(() => $('.own-menu [data-item="view"]', wrap()))).click();
+  await until(() => $('.own-menu .column-sub [data-item="table"]', wrap()));
+  await wait(200);
+  snap('mock-table-menu');
+  $('.own-menu .column-sub [data-item="board"]', wrap()).click();
+  const board = await until(() => $('.table-board', wrap()));
+  check('A board says what it is by, in the line of its name', board && $('.table-by', wrap())?.textContent === 'by Category' && !$('[data-chip="group"]', wrap()), $('.table-by', wrap())?.textContent);
+  check('A card has its amount and its day on one line', $$('.board-card .card-facts span', board).length === 16, String($$('.board-card .card-facts span', board).length));
+  check('The foot of a board says its rows and its sum', $('.table-summary', wrap())?.textContent === '8 rows  ·  Sum $2,534.40', $('.table-summary', wrap())?.textContent);
+  await closeMenu();
+  await wait(200);
+  snap('mock-board');
+});
+
+await run('Gains, losses, status and pies', async () => {
+  await oneTab();
+  const title = await newPage('Gains check');
+  key(title, 'Enter');
+  const first = await until(() => document.activeElement?.classList.contains('blk') && document.activeElement);
+  const pane = () => shownPane('Gains check');
+  const md = [
+    '| Item | Date | State | Result | Amount |',
+    '| --- | --- | --- | --- | --- |',
+    '| One | 2026-11-02 | Done | Good | 300 |',
+    '| Two | 2026-11-03 | In progress | Bad | -100 |',
+    '| Three | 2026-11-09 | Done | Good | 50 |',
+    '<!-- columns: text | date | status | choice {Good:green; Bad:red} | number USD sum signed -->',
+    '',
+    'End',
+  ].join('\n');
+  const clip = new DataTransfer();
+  clip.setData('text/plain', md);
+  first.dispatchEvent(new ClipboardEvent('paste', { clipboardData: clip, bubbles: true, cancelable: true }));
+  const box = await until(() => $('.table-block', pane()), 4000);
+  check('A status column shows its words as tags with a dot', box && (await until(() => $$('.tag.dot', box).length === 3)), box ? String($$('.tag.dot', box).length) : 'no table');
+  check('A signed column shows a gain green and a loss red', $$('.cell.pos', box).length === 2 && $$('.cell.neg', box).length === 1, `${$$('.cell.pos', box).length} / ${$$('.cell.neg', box).length}`);
+  const end = $$('.blk', pane()).find((b) => b.textContent.includes('End'));
+  const makeChart = async (json) => {
+    const paste = new DataTransfer();
+    paste.setData('text/plain', '```chart\n' + json + '\n```');
+    end.focus();
+    T().setSel(end, 3, 3);
+    end.dispatchEvent(new ClipboardEvent('paste', { clipboardData: paste, bubbles: true, cancelable: true }));
+    await wait(350);
+  };
+  await makeChart('{"shape":"bars","x":"Date","by":"row","y":"Amount","add":"sum","title":"Each row"}');
+  await makeChart('{"shape":"line","x":"Date","by":"row","y":"Amount","add":"sum","running":true,"title":"So far"}');
+  await makeChart('{"shape":"pie","x":"Result","add":"count","title":"Good and bad"}');
+  const chart = (t) => $$('.chart-block', pane()).find((c) => $('.chart-title', c)?.textContent === t);
+  check('A loss draws below the line at zero, in red', await until(() => chart('Each row') && $('.chart-bar.neg', chart('Each row')) && $('.chart-bar.pos', chart('Each row')), 3000));
+  check('A running total ends at the sum', await until(() => chart('So far') && /250/.test($('.chart-note', chart('So far')).textContent), 3000), chart('So far')?.textContent);
+  check('A pie shows each word with its share, in its colour', await until(() => chart('Good and bad') && $$('.pie-slice', chart('Good and bad')).length === 2 && $('.pie-slice.c-green', chart('Good and bad')) && /67%/.test(chart('Good and bad').textContent), 3000), chart('Good and bad')?.textContent);
+  const settings = $('.chart-settings', chart('So far'));
+  settings.click();
+  const panel = await until(() => $('.chart-panel', chart('So far')));
+  check('The chart panel offers a pie and a running total', panel && $$('.chart-shape', panel).some((b) => b.textContent.includes('Pie')) && $('[data-chart-running]', panel)?.getAttribute('aria-checked') === 'true');
+  (await until(() => $('.backdrop'))).click();
+  await until(() => !$('.chart-panel'));
+  await wait(200);
+  snap('gains-charts');
 });
 
 await run('Move a page in the sidebar by a drag', async () => {
@@ -1941,6 +2837,53 @@ await run('The AI makes sub-pages and links them', async () => {
   await until(() => !treeItem('Session A'), 3000);
 });
 
+await run('The AI makes a database', async () => {
+  await oneTab();
+  const title = await newPage('Trading home');
+  key(title, 'Enter');
+  const first = await until(() => document.activeElement?.classList.contains('blk') && document.activeElement);
+  typeIn(first, 'My notes.');
+  await wait(200);
+  askAi();
+  const box = await until(() => $('.ai-dock #ai-input'));
+  // What the real AI gave for "Make me a trading journal" (2026-11-11), with three trades in it.
+  const journal = [
+    '@replace', '# Trading home', '', 'My notes.', '', '[[Trading Journal]]', '',
+    '@page Trading Journal', 'Log each trade when you close it.', '',
+    '| Trade | Date | Side | Setup | Entry | P&L | Result | Followed plan |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- |',
+    '| AAPL breakout | 2026-11-10 | Long | Breakout | 185.2 | 160 | Win | x |',
+    '| TSLA fade | 2026-11-11 | Short | Reversal | 242 | -80 | Loss |  |',
+    '| NVDA pullback | 2026-11-09 | Long | Pullback | 131.5 | 45 | Win | x |',
+    '<!-- columns: text count | date | choice {Long:green; Short:red} | choice {Breakout:blue; Pullback:purple; Reversal:orange} | number USD | number USD sum | choice {Win:green; Loss:red; Breakeven:gray} | checkbox checked -->',
+    '<!-- table: Trades | icon target:green | sort Date down | frozen 1 | color P&L below 0 red | color P&L above 0 green -->',
+  ].join('\\n');
+  box.value = `make me a trading journal [[reply: ${journal}]]`;
+  box.dispatchEvent(new Event('input', { bubbles: true }));
+  await until(() => $('#ai-send'));
+  key(box, 'Enter');
+  const go = await until(() => $('#ai-replace'), 6000);
+  check('The AI offers to make the journal page', go);
+  go?.click();
+  check('The journal is made as a sub-page', await until(() => treeItem('Trading Journal'), 4000));
+  treeItem('Trading Journal')?.click();
+  const pane = await until(() => shownPane('Trading Journal'), 3000);
+  const block = await until(() => pane && $('.table-block', pane), 3000);
+  check('Its table is there', block);
+  if (!block) return;
+  const wrap = block.closest('.table-wrap');
+  check('The table has the name and the icon the AI gave it', $('.table-name', wrap)?.value === 'Trades' && $('.table-icon', wrap), $('.table-name', wrap)?.value);
+  const names = () => $$('tbody tr[data-r]:not(.head-row)', block).map((r) => r.querySelector('.first-cell .cell')?.value);
+  check('Its rows are newest first, as the AI said', names().join('|') === 'TSLA fade|AAPL breakout|NVDA pullback', names().join('|'));
+  check('Each row with a P&L has its colour', $$('tbody tr.painted', block).length === 3, $$('tbody tr.painted', block).length);
+  check('The options are coloured tags', $$('.tag.c-green', block).length >= 4 && $$('.tag.c-red', block).length === 2 && $$('.tag.c-purple', block).length === 1, `${$$('.tag.c-green', block).length} green, ${$$('.tag.c-red', block).length} red`);
+  check('The first column stays in place', $$('.frozen', block).length > 0);
+  check('Money shows as money, and the P&L adds up at the foot', $$('textarea.cell', block).some((t) => t.value === '$185.20') && $('.table-totals', block)?.textContent.includes('$125.00'), $('.table-totals', block)?.textContent);
+  check('The ticks show as ticks', $$('tbody .cell-check.on', block).length === 2, $$('tbody .cell-check.on', block).length);
+  await wait(250);
+  snap('ai-database');
+});
+
 await run('The AI does things in Rune with its tools', async () => {
   await oneTab();
   const title = await newPage('Tools page');
@@ -1959,7 +2902,18 @@ await run('The AI does things in Rune with its tools', async () => {
   box.dispatchEvent(new Event('input', { bubbles: true }));
   await until(() => $('#ai-send'));
   key(box, 'Enter');
-  const step = await until(() => /Made the page|Added/.test($('#ai-step')?.textContent || '') && $('#ai-step').textContent, 3000, 15);
+  // What it is at shows at once, before a tool call is complete (a long page takes a while), with a clock.
+  const seen = { writing: '', clock: '', step: '' };
+  await until(() => {
+    const line = $('#ai-step')?.textContent || '';
+    if (/^Writing the page “Run log”/.test(line)) seen.writing = line;
+    if (/Made the page|Added/.test(line)) seen.step = line;
+    seen.clock = $('.ai-clock')?.textContent || seen.clock;
+    return seen.writing && seen.step && seen.clock;
+  }, 3000, 5);
+  const step = seen.step;
+  check('While the AI writes a page, the card says so at once', seen.writing, JSON.stringify(seen));
+  check('…with a clock that shows how long the run goes on', /^\d+:\d\d$/.test(seen.clock), seen.clock);
   check('While it works, the card says the step it is at', step, String(step));
   const did = await until(() => $('#ai-did'), 8000);
   const lines = () => $$('#ai-did .ai-plan-row').map((r) => r.textContent.trim()).join('|');
@@ -1991,6 +2945,43 @@ await run('The AI does things in Rune with its tools', async () => {
   check('After Done, a line at the foot says what was done, with Undo', pill && /1 page made/.test(pill.textContent) && $('#ai-undo') && !$('.ai-panel') && treeItem('Second log'), pill?.textContent);
   $('#ai-undo')?.click();
   check('…and that Undo takes it back too', await until(() => !treeItem('Second log') && !$('#ai-done'), 6000));
+  // A picture (a screenshot) pasted into the bar goes to the AI with the request.
+  askAi();
+  const shotBox = await until(() => $('.ai-dock #ai-input'));
+  const pictureFile = async () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 40;
+    canvas.height = 30;
+    const g = canvas.getContext('2d');
+    g.fillStyle = '#3a7';
+    g.fillRect(0, 0, 40, 30);
+    const blob = await new Promise((done) => canvas.toBlob(done, 'image/png'));
+    return new File([blob], 'shot.png', { type: 'image/png' });
+  };
+  const pasteInto = async (el) => {
+    const data = new DataTransfer();
+    data.items.add(await pictureFile());
+    el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+  };
+  const blocksBefore = $$('.block-row', pane()).length;
+  await pasteInto(shotBox);
+  const shot = await until(() => $('.ai-dock .ai-shot img'), 3000);
+  check('A picture pasted into the AI bar shows there, small', shot && shot.src.startsWith('data:image/jpeg;base64,') && shot.getBoundingClientRect().width <= 30 && $('.ai-dock').getBoundingClientRect().height <= 46, shot ? `${Math.round(shot.getBoundingClientRect().width)} wide` : 'no picture');
+  check('…and it is not put into the page', $$('.block-row', pane()).length === blocksBefore && !$('.kind-image', pane()));
+  $('.ai-dock .ai-shot-x').click();
+  check('A press on it takes it out again', await until(() => !$('.ai-dock .ai-shot'), 2000));
+  await pasteInto($('.ai-dock #ai-input'));
+  await until(() => $('.ai-dock .ai-shot img'), 3000);
+  await pasteInto($('.ai-dock #ai-input'));
+  await until(() => $$('.ai-dock .ai-shot').length === 2, 3000);
+  const withShots = $('.ai-dock #ai-input');
+  withShots.value = 'what is in these? [[reply: I see {pictures} pictures.]]';
+  withShots.dispatchEvent(new Event('input', { bubbles: true }));
+  await until(() => $('#ai-send'));
+  key(withShots, 'Enter');
+  check('The pictures go to the AI with the request', await until(() => $('.ai-output')?.textContent.includes('I see 2 pictures.'), 6000) && $('.ai-caption')?.textContent.includes('2 pictures'), `${$('.ai-output')?.textContent} / ${$('.ai-caption')?.textContent}`);
+  $$('.ai-actions button').find((b) => b.textContent === 'Discard').click();
+  await until(() => !$('.ai-panel'));
   // A large job: the AI says its plan first, and does nothing before "Do it".
   askAi();
   const big = await until(() => $('.ai-dock #ai-input'));
@@ -2654,16 +3645,12 @@ await run('Meeting notes in a page you choose', async () => {
     $('#move-page', menu).click();
     return until(() => !$('.page-menu') && $('#meeting-place', pane), 3000);
   };
-  const choose = (place, name) => {
-    place.value = [...place.options].find((o) => o.textContent.trim() === name).value;
-    place.dispatchEvent(new Event('change', { bubbles: true }));
-  };
   const place = made && (await ask(made));
-  const names = () => [...$('#meeting-place').options].map((o) => o.textContent.trim());
-  check('"Move to…" in the menu of the page asks which page to keep it in', place && $('.place-bar .listen-what', made).textContent === 'Keep these notes in' && place.selectedOptions[0]?.textContent.trim() === 'Meeting notes' && names().includes('Reading List') && !names().some((n) => datedName.test(n)), place && names().join(' | '));
+  const names = place ? await placeNames(made) : [];
+  check('"Move to…" in the menu of the page asks which page to keep it in', place && $('.place-bar .listen-what', made).textContent === 'Keep these notes in' && placeNow(made) === 'Meeting notes' && names.includes('Reading List') && !names.some((n) => datedName.test(n)), names.join(' | '));
   if (!place) return;
-  choose(place, 'Reading List');
-  check('A choice moves the page there at once', await until(() => crumbs().includes('Reading List') && $('#meeting-place')?.selectedOptions[0]?.textContent.trim() === 'Reading List', 3000), crumbs().join(' / '));
+  await choosePlace(made, 'Reading List');
+  check('A choice moves the page there at once', await until(() => crumbs().includes('Reading List') && placeNow() === 'Reading List', 3000), crumbs().join(' / '));
   await wait(120);
   snap('move-to');
   $('#meeting-place-done').click();
@@ -2682,12 +3669,14 @@ await run('Meeting notes in a page you choose', async () => {
   await newPage('Loose page');
   const loose = await until(() => shownPane('Loose page'));
   const where = loose && (await ask(loose));
-  check('On any other page it asks the same, with "no page" chosen for a page at the top', where && $('.place-bar .listen-what', loose).textContent === 'Keep this page in' && where.selectedOptions[0]?.value === '', where && where.selectedOptions[0]?.textContent);
+  // (With several spaces the top of the list has the name of the space.)
+  const topOfList = () => $$('.side-foot .space-dot').length > 1 ? $('.ws-label').textContent : 'No page (top of the list)';
+  check('On any other page it asks the same, with the top of the list chosen for a page at the top', where && $('.place-bar .listen-what', loose).textContent === 'Keep this page in' && placeNow(loose) === topOfList(), placeNow(loose));
   if (!where) return;
-  choose(where, 'Getting Started');
+  await choosePlace(loose, 'Getting Started');
   const looseCrumbs = () => $$('.pagebar .crumb', loose).map((c) => c.textContent.trim());
   check('…and a choice puts the page inside that page', await until(() => looseCrumbs().includes('Getting Started'), 3000), looseCrumbs().join(' / '));
-  choose($('#meeting-place', loose), 'No page (top of the list)');
+  await choosePlace(loose, topOfList());
   check('"No page" puts it back at the top of the list', await until(() => !looseCrumbs().includes('Getting Started') && treeItem('Loose page'), 3000), looseCrumbs().join(' / '));
   $('#meeting-place-done').click();
   await until(() => !$('#meeting-place'));
@@ -2727,8 +3716,7 @@ await run('A meeting with no event is known by its time', async () => {
   if (!first) return;
   const place = await ask(first);
   check('The first time, there is no page to propose', place && !$('.place-same', first));
-  place.value = [...place.options].find((o) => o.textContent.trim() === 'Reading List').value;
-  place.dispatchEvent(new Event('change', { bubbles: true }));
+  await choosePlace(first, 'Reading List');
   await until(() => crumbsOf(first).includes('Reading List'));
   // The person gives these notes a name.
   const title = first.querySelector('.title-input');
@@ -2793,8 +3781,7 @@ await run('A meeting remembers its page', async () => {
   $('#move-page', await until(() => $('.page-menu'))).click();
   const place = await until(() => $('#meeting-place', first), 3000);
   check('Before a choice, the page does not say where the next notes go', place && $('#meeting-place-kept', first).textContent === '', $('#meeting-place-kept', first)?.textContent);
-  place.value = [...place.options].find((o) => o.textContent.trim() === 'Reading List').value;
-  place.dispatchEvent(new Event('change', { bubbles: true }));
+  await choosePlace(first, 'Reading List');
   check('After a choice, the page says that the next notes of this meeting go there too', await until(() => crumbsOf(first).includes('Reading List') && $('#meeting-place-kept', first)?.textContent === 'The next “Apollo standup” notes go here too.', 3000), $('#meeting-place-kept', first)?.textContent);
   await wait(150);
   snap('meeting-kept');
@@ -2827,11 +3814,113 @@ await run('A meeting remembers its page', async () => {
   T().command('forget_meeting_slots');
 });
 
+await run('Notes kept in another space', async () => {
+  await oneTab();
+  for (let i = 0; i < 8 && $$('.pane').length > 1; i++) {
+    const n = $$('.pane').length;
+    T().command('close_split');
+    await until(() => $$('.pane').length < n, 1500);
+  }
+  await oneTab();
+  const startSpace = $('.ws-label').textContent;
+  // A space of its own, with a page in a page.
+  $('.ws-name').click();
+  const menu = await until(() => $('.space-menu'));
+  menuItem(menu, 'New space').click();
+  const input = await until(() => $('.space-new input'));
+  input.value = 'Far space';
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  await wait(50);
+  key(input, 'Enter');
+  await until(() => $('.ws-label')?.textContent === 'Far space');
+  await newPage('Far home');
+  await until(() => shownPane('Far home'));
+  await newPage('Far inner');
+  const farInner = await until(() => shownPane('Far inner'));
+  $('.pagebar .icon-btn[title="Page options"]', farInner).click();
+  $('#move-page', await until(() => $('.page-menu'))).click();
+  await until(() => $('#meeting-place', farInner), 3000);
+  await choosePlace(farInner, 'Far home');
+  $('#meeting-place-done', farInner).click();
+  await until(() => !$('#meeting-place', farInner));
+  // Back to the first space: a meeting there.
+  $('.ws-name').click();
+  menuItem(await until(() => $('.space-menu')), startSpace).click();
+  await until(() => $('.ws-label')?.textContent === startSpace);
+  const datedName = / – [A-Z][a-z]{2} \d{1,2}, \d{4}$/;
+  const before = new Set($$('.pane').map((p) => p.dataset.pane));
+  T().command('meeting_notes');
+  const made = await until(() => $$('.pane').find((p) => datedName.test(p.querySelector('.title-input')?.value || '') && p.offsetParent && !before.has(p.dataset.pane)), 4000);
+  const crumbs = () => $$('.pagebar .crumb', made).map((c) => c.textContent.trim());
+  check('The notes of a meeting start in the space on the screen', made && crumbs().includes('Meeting notes'), made && crumbs().join(' / '));
+  if (!made) return;
+  $('.pagebar .icon-btn[title="Page options"]', made).click();
+  $('#move-page', await until(() => $('.page-menu'))).click();
+  const field = await until(() => $('#meeting-place', made), 3000);
+  check('The bar has no system list', field && field.tagName === 'BUTTON' && !$('.place-bar select', made), field?.tagName);
+  check('Closed, the field says where the notes are, and in which space', placeNow(made) === 'Meeting notes' && $('#meeting-place .place-aside', made)?.textContent === startSpace, `${placeNow(made)} | ${$('#meeting-place .place-aside', made)?.textContent}`);
+  const list = await placesOpen(made);
+  await wait(200);
+  const rows = () => $$('.place-row', list);
+  const names = () => rows().map(placeRowName);
+  const spaces = $$('.side-foot .space-dot').map((d) => d.title);
+  const at = (name) => names().indexOf(name);
+  check('The menu is Rune’s own, under the field', list?.getAttribute('role') === 'menu' && getComputedStyle(list).position === 'fixed' && Math.abs(list.getBoundingClientRect().left - field.getBoundingClientRect().left) <= 1 && list.getBoundingClientRect().top >= field.getBoundingClientRect().bottom, `${getComputedStyle(list).position}`);
+  check('Every space is in the menu, each with a badge', spaces.length >= 2 && spaces.every((s) => names().includes(s)) && $$('.place-row.place-space .space-badge', list).length === spaces.length, names().join(' | '));
+  check('The pages are under their own space, and as deep as they go', at(startSpace) < at('Getting Started') && at('Far space') < at('Far home') && at('Far home') < at('Far inner') && parseInt(rows()[at('Far inner')].style.paddingLeft) > parseInt(rows()[at('Far home')].style.paddingLeft), names().join(' | '));
+  check('The place the notes are in is the chosen row, and has the keyboard', $('.place-row.on', list) && placeRowName($('.place-row.on', list)) === 'Meeting notes' && document.activeElement === $('.place-row.on', list), document.activeElement?.className);
+  snap('place-menu');
+  key(document.activeElement, 'Escape');
+  check('Escape shuts the menu', await until(() => !$('.place-menu', made)));
+  await choosePlace(made, 'Far inner');
+  const label = () => $('.ws-label')?.textContent;
+  check('A page of another space: the notes move there, and the sidebar goes with them', await until(() => crumbs().includes('Far inner') && crumbs().includes('Far home') && !crumbs().includes('Meeting notes') && placeNow(made) === 'Far inner' && label() === 'Far space', 3000), `${crumbs().join(' / ')} | ${label()}`);
+  check('The field names the new space', await until(() => $('#meeting-place .place-aside', made)?.textContent === 'Far space'), $('#meeting-place .place-aside', made)?.textContent);
+  const reopened = await placesOpen(made);
+  check('Opened again, that is the chosen row', reopened && placeRowName($('.place-row.on', reopened)) === 'Far inner', $('.place-row.on', reopened)?.textContent);
+  await placesShut(made);
+  const title = made.querySelector('.title-input').value;
+  check('In the sidebar the notes are in that space', await until(() => treeItem(title), 3000), title);
+  // To the top of a space's list.
+  await choosePlace(made, startSpace);
+  check('The row of a space: the notes go to the top of its list, and the sidebar goes with them', await until(() => !crumbs().includes('Far inner') && placeNow(made) === startSpace && label() === startSpace && treeItem(title), 3000), `${crumbs().join(' / ')} | ${placeNow(made)} | ${label()}`);
+  // And back: the place stays for the next meeting at this time.
+  await choosePlace(made, 'Far inner');
+  await until(() => label() === 'Far space');
+  $('#meeting-place-done', made).click();
+  check('"Done" puts the question away', await until(() => !$('#meeting-place', made), 2000));
+  const backHome = async () => {
+    await oneTab();
+    $('.ws-name').click();
+    menuItem(await until(() => $('.space-menu')), startSpace).click();
+    await until(() => $('.ws-label')?.textContent === startSpace);
+    await until(() => !$('.side-ghost'), 1500);
+  };
+  await backHome();
+  T().command('meeting_notes');
+  const next = await until(() => $$('.pane').find((p) => datedName.test(p.querySelector('.title-input')?.value || '') && p.offsetParent), 4000);
+  check('The next meeting at this time starts in the space on the screen', next && $$('.pagebar .crumb', next).some((c) => c.textContent.trim() === 'Meeting notes'), next && $('.crumbs', next)?.textContent);
+  if (next) {
+    $('.pagebar .icon-btn[title="Page options"]', next).click();
+    $('#move-page', await until(() => $('.page-menu'))).click();
+    const same = await until(() => $('.place-same', next), 3000);
+    check('Its question proposes the place of the last time, in the other space', same?.textContent.trim() === 'Far inner', same?.textContent);
+    same?.click();
+    check('One click keeps the notes there', await until(() => placeNow(next) === 'Far inner' && label() === 'Far space', 3000), `${placeNow(next)} | ${label()}`);
+    await choosePlace(next, 'Meeting notes');
+    await until(() => label() === startSpace && placeNow(next) === 'Meeting notes', 3000);
+    $('#meeting-place-done', next)?.click();
+    await until(() => !$('#meeting-place', next));
+  }
+  await backHome();
+  T().command('forget_meeting_slots');
+});
+
 await run('Meeting recap by voice', async () => {
   const dated = / – [A-Z][a-z]{2} \d{1,2}, \d{4}$/;
   const row = $$('.sidebar .tree-item').find((r) => {
     const t = r.querySelector('.tree-title')?.textContent || '';
-    return dated.test(t) && !t.startsWith('Voice note');
+    return dated.test(t) && !t.startsWith('Voice note') && !r.closest('.side-ghost');
   });
   check('The meeting page from before is in the sidebar', row);
   if (!row) return;
@@ -2926,15 +4015,12 @@ await run('Listen to a meeting', async () => {
   check('Undo takes the name back', await until(() => names().includes(was) && !names().includes('Sam'), 3000), names().join(', '));
   // The meeting is over: its page asks which page to keep it in.
   const place = await until(() => $('#meeting-place'), 4000);
-  const places = () => [...$('#meeting-place').options].map((o) => o.textContent.trim());
-  check('When the meeting is over, its page asks which page to keep it in', place && place.selectedOptions[0]?.textContent.trim() === 'Meeting notes' && places().includes('Getting Started') && !places().some((o) => datedName.test(o)), place && places().join(' | '));
+  const places = place ? await placeNames(page) : [];
+  check('When the meeting is over, its page asks which page to keep it in', place && placeNow(page) === 'Meeting notes' && places.includes('Getting Started') && !places.some((o) => datedName.test(o)), places.join(' | '));
   await wait(120);
   snap('meeting-place');
-  if (place) {
-    place.value = [...place.options].find((o) => o.textContent.trim() === 'Getting Started').value;
-    place.dispatchEvent(new Event('change', { bubbles: true }));
-  }
-  check('A choice moves the page there at once', await until(() => $('.crumbs', page)?.textContent.includes('Getting Started') && $('#meeting-place')?.selectedOptions[0]?.textContent.trim() === 'Getting Started', 3000), $('.crumbs', page)?.textContent);
+  if (place) await choosePlace(page, 'Getting Started');
+  check('A choice moves the page there at once', await until(() => $('.crumbs', page)?.textContent.includes('Getting Started') && placeNow(page) === 'Getting Started', 3000), $('.crumbs', page)?.textContent);
   $('#meeting-place-done')?.click();
   check('"Done" puts the question away', await until(() => !$('#meeting-place'), 2000));
   // A page that is not a meeting's has none of this.
@@ -2972,25 +4058,30 @@ await padRun('Meeting pad', async () => {
   const notepad = () => until(() => window.__n2pad && $('#pad-notes')?.dataset.ready, 3000);
   // The next meeting: its page opens in a tab of its own (the pane on screen
   // may be the same element as before, with the new page in it).
+  // A call makes no page the person sees until they say yes (Listen, Notes
+  // only, or a click on the small form): then its page opens in a tab.
   const meeting = async () => {
-    const tabs = $$('.tab').length;
     T().command('meeting_ended');
     T().command('forget_meeting');
     T().command('meeting_started');
-    await until(() => $$('.tab').length > tabs, 5000);
-    return until(() => form() && shown(), 5000);
+    return until(() => form() === 'ask', 5000);
   };
+  const opened = () => until(shown, 5000);
+  const dated = () => $$('.sidebar .tree-item .tree-title').filter((t) => datedName.test(t.textContent)).length;
   T().command('pad_inline');
 
-  // 1. A meeting starts: the pad asks; nothing listens.
+  // 1. A meeting starts: the pad asks; nothing listens, and no page opens.
+  const tabsAtStart = $$('.tab').length;
   T().command('meeting_started');
-  const page = await until(shown, 4000);
   const ask = await until(() => form() === 'ask' && $('#pad-listen'), 4000);
-  check('When a meeting starts, its pad asks whether to listen, and the app does not listen by itself', page && ask && /Tell the others first\. The sound stays on this Mac\./.test(pad().textContent) && !$('.listen-bar.on') && !$('#listening-row'), pad()?.textContent);
+  check('When a meeting starts, its pad asks whether to listen, and the app does not listen by itself', ask && /Tell the others first\. The sound stays on this Mac\./.test(pad().textContent) && !$('.listen-bar.on') && !$('#listening-row'), pad()?.textContent);
   if (!ask) return T().command('pad_inline_off');
+  check('While the pad asks, no page of the call opens', !shown() && $$('.tab').length === tabsAtStart, `${$$('.tab').length - tabsAtStart} new tabs`);
   check('The page itself does not ask while the pad does', !$('#listen-start'));
-  const name = page.querySelector('.title-input').value.replace(datedName, '');
-  check('The pad has the name of the meeting and when it started', $('.pad-title b').textContent === name && /^(Started \d|\d)/.test($('.pad-title span').textContent), $('.pad-title').textContent);
+  // (Its page is in the sidebar, under the name the pad shows.)
+  const name = $('.pad-title b')?.textContent || '';
+  const listedNames = () => $$('.sidebar .tree-item .tree-title').map((t) => t.textContent).filter((t) => datedName.test(t)).map((t) => t.replace(datedName, ''));
+  check('The pad has the name of the meeting and when it started', name && listedNames().includes(name) && /^(Started \d|\d)/.test($('.pad-title span').textContent), `${$('.pad-title').textContent} / ${listedNames().join(', ')}`);
   const look = getComputedStyle(pad());
   check('The pad is drawn as a card: its width, its round corners, its buttons on one line', Math.round(pad().getBoundingClientRect().width) === 328 && look.borderTopLeftRadius === '13px' && look.display === 'flex' && Math.abs($('#pad-listen').getBoundingClientRect().top - $('#pad-notes-only').getBoundingClientRect().top) < 6, `${Math.round(pad().getBoundingClientRect().width)} wide, corners ${look.borderTopLeftRadius}, ${look.display}`);
   check('The question has three ways out: Listen, Notes only, and not now', $('#pad-listen') && $('#pad-notes-only') && $('#pad-not-now') && $$('#pad-card button').length === 3, $$('#pad-card button').length);
@@ -3000,10 +4091,13 @@ await padRun('Meeting pad', async () => {
   // No answer: it becomes the small form, and does not listen.
   T().command('pad_old');
   check('With no answer, the question becomes the small form, and the app does not listen', (await until(() => form() === 'small', 3000)) && !$('.listen-bar.on') && $('#pad-away') && $('.pad-pill-name').textContent === name, form());
-  check('The page asks again then (the person may not have seen the pad)', await until(() => $('#listen-start', page), 3000));
+  check('Still no page opens: the pad asks, nothing else', !shown());
   await wait(120);
   snap('pad-small');
   $('#pad-pill').click();
+  const page = await opened();
+  check('A click on the small form is a yes: the page of the call opens', page);
+  if (!page) return T().command('pad_inline_off');
   check('A click on the small form opens the notepad, which says that it does not listen', (await until(() => form() === 'open' && $('#pad-notes'))) && /Not listening/.test($('.pad-foot').textContent) && $('#pad-listen'), $('.pad-foot')?.textContent);
 
   // What is typed goes into the page.
@@ -3036,31 +4130,38 @@ await padRun('Meeting pad', async () => {
   await notepad();
   check('Opened again, the notepad has what was typed', window.__n2pad.lines().join('|') === 'Beta moves to Friday the 14th', window.__n2pad.lines().join('|'));
 
-  // Stop: the last card.
+  // Stop while the meeting goes on: a pause (the person may not want a part
+  // heard). The notes of what was heard are written; the pad stays.
   $('#pad-stop').click();
-  check('Stop turns the pad into its last card', await until(() => form() === 'end' && /^Over · \d+ min$/.test($('.pad-title span').textContent), 4000), pad()?.textContent);
-  check('The card says when the notes are in the page', await until(() => $('#pad-status')?.textContent === 'The notes are in the page.', 12000), $('#pad-status')?.textContent);
+  check('Stop while the meeting goes on is a pause: the pad stays the notepad, says that it does not listen, and offers Listen again', (await until(() => !$('.listen-bar.on') && /Not listening/.test($('.pad-foot')?.textContent || '') && $('#pad-listen'), 12000)) && form() === 'open' && !$('#meeting-place') && !$('#pad-keep-in'), `${form()} | ${$('.pad-foot')?.textContent}`);
+  check('The notes of what was heard are written in the page then', await until(() => rowsOf(page).includes('kind-text:For the weekend.'), 12000), rowsOf(page).join(' | '));
+  // The meeting ends: the last card.
+  T().command('meeting_ended');
+  check('When the meeting ends, the pad turns into its last card', await until(() => form() === 'end' && /^Over · \d+ min$/.test($('.pad-title span').textContent), 4000), pad()?.textContent);
+  check('The card says that the notes are in the page', await until(() => $('#pad-status')?.textContent === 'The notes are in the page.', 12000), $('#pad-status')?.textContent);
   const r = rowsOf(page);
   const n = r.indexOf('kind-heading2:Notes');
   check('The notes of the AI come after the typed ones', r[n + 1] === 'kind-bulleted:Beta moves to Friday the 14th' && r[n + 2] === 'kind-text:For the weekend.', r.join(' | '));
   check('The card asks where to keep the notes, and the page does not', $('#pad-keep-in') && $('#pad-keep-name').textContent === 'Meeting notes' && !$('#meeting-place'), $('#pad-keep-name')?.textContent);
   $('#pad-keep-in').click();
-  const places = () => $$('#pad-places .pad-place').map((b) => b.textContent.trim());
-  check('The list of pages is the app’s own, with the page the notes are in marked', (await until(() => $('#pad-places'))) && !$('#pad-inline select') && places()[0] === 'No page (top of the list)' && places().includes('Getting Started') && !places().some((p) => datedName.test(p)) && $('#pad-places .pad-place.active')?.textContent.trim() === 'Meeting notes', places().join(' | '));
+  const places = () => $$('#pad-places .pad-place .pad-place-name').map((b) => b.textContent.trim());
+  const spacesNow = $$('.side-foot .space-dot').map((d) => d.title);
+  check('The list of places is the app’s own, with the page the notes are in marked', (await until(() => $('#pad-places'))) && !$('#pad-inline select') && (spacesNow.length > 1 ? spacesNow.every((s) => places().includes(s)) : places()[0] === 'No page (top of the list)') && places().includes('Getting Started') && !places().some((p) => datedName.test(p)) && $('#pad-places .pad-place.active .pad-place-name')?.textContent.trim() === 'Meeting notes', places().join(' | '));
   await wait(220);
   snap('pad-places');
   key($('#pad-card'), 'Escape');
   check('Escape shuts the list', await until(() => !$('#pad-places')));
   $('#pad-keep-in').click();
-  (await until(() => $$('#pad-places .pad-place').find((b) => b.textContent.trim() === 'Getting Started'))).click();
+  (await until(() => $$('#pad-places .pad-place').find((b) => b.querySelector('.pad-place-name')?.textContent.trim() === 'Getting Started'))).click();
   check('A choice keeps the notes there, and the pad says so', (await until(() => form() === 'kept' && $('#pad-kept').textContent.trim() === 'Kept in Getting Started', 3000)) && $('.crumbs', page)?.textContent.includes('Getting Started'), `${pad()?.textContent} | ${$('.crumbs', page)?.textContent}`);
   check('Then the pad goes, and the page asks no more', (await until(() => !$('#pad-inline'), 4000)) && !$('#meeting-place'));
 
   // 2. Notes only, then the meeting ends by itself: the page of the last time, as one click.
-  const second = await meeting();
-  check('The next meeting gets a pad of its own', second && form() === 'ask', form());
+  check('The next meeting gets a pad of its own', await meeting(), form());
   $('#pad-notes-only').click();
   await until(() => form() === 'open');
+  const second = await opened();
+  check('"Notes only" is a yes: the page of the call opens', second);
   await notepad();
   window.__n2pad.type(['Only typed']);
   await until(() => rowsOf(second).includes('kind-bulleted:Only typed'), 4000);
@@ -3073,9 +4174,10 @@ await padRun('Meeting pad', async () => {
   await until(() => !$('#pad-inline'), 4000);
 
   // 3. The notes of the next meeting at this time start there: the card only says so.
-  const third = await meeting();
+  await meeting();
   $('#pad-notes-only')?.click();
   await until(() => form() === 'open');
+  const third = await opened();
   await notepad();
   window.__n2pad.type(['Third']);
   await until(() => rowsOf(third).includes('kind-bulleted:Third'), 4000);
@@ -3084,16 +4186,23 @@ await padRun('Meeting pad', async () => {
   $('#pad-done').click();
   check('"Done" puts that card away', await until(() => !$('#pad-inline'), 4000));
 
-  // 4. A pad that was not used goes when the meeting ends; a question nobody answers goes too.
+  // 4. A pad that was not used goes when the meeting ends, and so does its empty page; the × leaves no page.
+  T().command('meeting_ended');
+  const before = dated();
   await meeting();
   T().command('meeting_ended');
-  check('A pad that was not used goes when the meeting ends, with no question', await until(() => !$('#pad-inline'), 3000));
-  const fifth = await meeting();
+  check('A pad that was not used goes when the meeting ends, with no question, and leaves no page', (await until(() => !$('#pad-inline'), 3000)) && (await until(() => dated() === before, 3000)), `${dated() - before} pages more`);
+  await meeting();
+  const tabsNow = $$('.tab').length;
   $('#pad-not-now').click();
-  check('"Not now" puts the pad away, and then the page asks as before', (await until(() => !$('#pad-inline'), 3000)) && (await until(() => $('#listen-start', fifth), 3000)));
-  const sixth = await meeting();
+  check('The × of the question is a no: the pad goes, and no page of the call is kept or opened', (await until(() => !$('#pad-inline'), 3000)) && (await until(() => dated() === before, 3000)) && $$('.tab').length === tabsNow && !$('#listen-start'), `${dated() - before} pages more`);
+  T().command('meeting_started');
+  await wait(600);
+  check('After a no, the same call asks no more', !$('#pad-inline') && dated() === before);
+  await meeting();
   $('#pad-notes-only').click();
   await until(() => form() === 'open');
+  const sixth = await opened();
   await notepad();
   window.__n2pad.type(['Sixth']);
   await until(() => rowsOf(sixth).includes('kind-bulleted:Sixth'), 4000);
@@ -3105,6 +4214,105 @@ await padRun('Meeting pad', async () => {
   $('#meeting-place-done')?.click();
   T().command('meeting_ended');
   T().command('pad_inline_off');
+});
+
+// One meeting has one page: when the person stops the listening for a part
+// and starts it again, when the app takes the meeting as over while the call
+// goes on (the call went quiet), when the page was put in the Trash, and when
+// the app was closed and opened again during the call.
+await padRun('One meeting has one page', async () => {
+  T().command('forget_meeting_slots');
+  T().command('forget_meeting');
+  await oneTab();
+  const datedName = / – [A-Z][a-z]{2} \d{1,2}, \d{4}$/;
+  const pad = () => $('#pad-inline #pad-card');
+  const form = () => pad()?.dataset.form;
+  const shown = () => $$('.pane').find((p) => datedName.test(p.querySelector('.title-input')?.value || '') && p.offsetParent);
+  const rowsOf = (page) => $$('.block-row', page).map((r) => `${[...r.classList].find((c) => c.startsWith('kind-'))}:${(r.querySelector('.blk') || r).textContent.trim()}`);
+  const count = (page, row) => rowsOf(page).filter((r) => r === row).length;
+  // Each notes page that the app makes opens in a tab of its own.
+  const tabs = () => $$('.tab').length;
+  const heard = () => until(() => $('.listen-bar.on') && ($('.pad-latest')?.textContent || '').includes('Friday'), 6000);
+  // The sound of the meeting's program comes back, with no microphone in use.
+  const back = async () => {
+    delete document.body.dataset.meetingBack;
+    T().command('meeting_back');
+    return until(() => document.body.dataset.meetingBack, 2000);
+  };
+  T().command('pad_inline');
+
+  // 1. The person listens, stops for a part, and listens again.
+  T().command('meeting_started');
+  if (!(await until(() => form() === 'ask' && $('#pad-listen'), 4000))) return;
+  $('#pad-listen').click();
+  const page = await until(shown, 4000);
+  if (!page) return;
+  const made = tabs();
+  const line = () => page.querySelector('.blk')?.textContent || '';
+  await heard();
+  $('#pad-stop').click();
+  await until(() => !$('.listen-bar.on') && rowsOf(page).includes('kind-text:For the weekend.'), 14000);
+  check('Stop during the meeting: the notes of what was heard are in the page, the pad stays, and nothing asks yet where to keep the notes', form() === 'open' && $('#pad-listen') && !$('#meeting-place') && !$('#pad-keep-in') && count(page, 'kind-toggle:Transcript') === 1, `${form()} | ${rowsOf(page).join(' | ')}`);
+  $('#pad-listen').click();
+  await heard();
+  await wait(300);
+  T().command('meeting_ended');
+  check('Listen again, then the end of the meeting: one page, with one Notes part, one Action items part and one transcript', (await until(() => form() === 'end' && $('#pad-status')?.textContent === 'The notes are in the page.', 16000)) && tabs() === made && count(page, 'kind-heading2:Notes') === 1 && count(page, 'kind-heading2:Action items') === 1 && count(page, 'kind-toggle:Transcript') === 1, `${tabs() - made} new tabs | ${$('#pad-status')?.textContent} | ${rowsOf(page).join(' | ')}`);
+  check('The date line has the end of the meeting', /\(\d+ min\)/.test(line()), line());
+
+  // 2. The call goes on after all (it only went quiet): it is noticed again.
+  T().command('meeting_started');
+  check('A call that is noticed again is the same meeting: no second page, the pad is the notepad again, the date line has no end, and nothing asks where to keep the notes', (await until(() => form() === 'open', 4000)) && tabs() === made && (await until(() => !/\(\d+ min\)/.test(line()), 3000)) && !$('#meeting-place') && !$('#pad-keep-in'), `${form()} | ${tabs() - made} new tabs | ${line()}`);
+  check('The app does not listen again by itself: the pad says that listening stopped and offers it with one press, and so does the page', !$('.listen-bar.on') && /Listening stopped/.test($('.pad-foot')?.textContent || '') && $('#pad-listen') && (await until(() => $('#listen-start', page), 3000)), $('.pad-foot')?.textContent);
+  await wait(150);
+  snap('pad-goes-on');
+
+  // 3. Over again; the last card goes by itself. Then the sound of the
+  // meeting's program alone (the person is muted) says that it goes on.
+  T().command('meeting_ended');
+  await until(() => form() === 'end', 4000);
+  T().command('pad_old');
+  await until(() => !$('#pad-inline'), 4000);
+  check('Sound alone after the end is the same meeting too: no new page, the pad comes back in its small form, and the page asks nothing', (await back()) === 'yes' && (await until(() => form() === 'small', 4000)) && tabs() === made && !$('#meeting-place'), `${document.body.dataset.meetingBack} | ${form()} | ${tabs() - made} new tabs`);
+
+  // 4. The person puts the page in the Trash while the app listens to it.
+  $('#pad-pill').click();
+  await until(() => form() === 'open' && $('#pad-listen'), 3000);
+  $('#pad-listen').click();
+  await heard();
+  $('.pagebar .icon-btn[title="Page options"]', page).click();
+  menuItem(await until(() => $('.page-menu')), 'Move to Trash').click();
+  check('A page that goes to the Trash is not listened to any more, and its pad goes', (await until(() => !$('.listen-bar.on') && !$('#listening-row') && !$('#pad-inline'), 6000)), `${!!$('.listen-bar.on')} ${!!$('#pad-inline')}`);
+  await wait(400);
+  const left = tabs();
+  T().command('meeting_ended');
+  await wait(300);
+  T().command('meeting_started');
+  await wait(600);
+  check('When that meeting ends, and when its call is noticed again, no other page is made, and nothing listens', tabs() === left && !$('#pad-inline') && !$('.listen-bar.on') && !shown(), `${tabs() - left} new tabs`);
+
+  // 5. Half an hour after a meeting went quiet, sound alone makes nothing;
+  // a call that starts then is a new meeting.
+  T().command('meeting_ended');
+  T().command('meeting_old');
+  check('Half an hour after the last meeting went quiet, sound alone makes no page', (await back()) === 'no' && tabs() === left && !$('#pad-inline'), `${document.body.dataset.meetingBack} | ${tabs() - left} new tabs`);
+  T().command('meeting_started');
+  const next = await until(() => tabs() === left && form() === 'ask' && !shown(), 5000);
+  check('A call that starts then is a new meeting, with a pad of its own (its page opens on a yes)', next, `${tabs() - left} new tabs | ${form()}`);
+
+  // 6. The app is closed and opened again during the call (an update does that).
+  T().command('meeting_restart');
+  await until(() => !$('#pad-inline'), 3000);
+  T().command('meeting_started');
+  check('After the app was closed and opened again, the call is the same meeting: no other page, and its pad comes back', (await until(() => $('#pad-inline') && form() === 'small', 4000)) && tabs() === left, `${form()} | ${tabs() - left} new tabs`);
+  // The same, while the person is muted: the app knows the program of the
+  // call, and the sound of that program is enough.
+  delete document.body.dataset.meetingApp;
+  T().command('meeting_restart');
+  await until(() => !$('#pad-inline'), 3000);
+  check('After the app was closed and opened again, it knows the program of the call, and the sound of that program alone is the same meeting', (await until(() => document.body.dataset.meetingApp === 'Microsoft Teams', 2000)) && (await back()) === 'yes' && (await until(() => $('#pad-inline') && form() === 'small', 4000)) && tabs() === left, `${document.body.dataset.meetingApp} | ${document.body.dataset.meetingBack} | ${form()} | ${tabs() - left} new tabs`);
+  T().command('meeting_ended');
+  T().command('forget_meeting');
 });
 
 // Only when asked for (NOTION2_REAL_PAD=1): opens the meeting pad's real
@@ -3137,7 +4345,7 @@ if (window.__n2_real_pad) {
     const rows = (page) => $$('.block-row', page).map((r) => `${[...r.classList].find((c) => c.startsWith('kind-'))}:${(r.querySelector('.blk') || r).textContent.trim()}`);
     T().command('pad_window');
     T().command('meeting_started');
-    const page = await until(() => $$('.pane').find((p) => datedName.test(p.querySelector('.title-input')?.value || '') && p.offsetParent), 4000);
+    const pageNow = () => $$('.pane').find((p) => datedName.test(p.querySelector('.title-input')?.value || '') && p.offsetParent);
     let p = await probed((p) => p.open && p.shown && p.form === 'ask' && p.wide);
     check('The pad opens in a window of its own, as big as its card', !p.failed && p.wide === 328 && p.high > 110 && p.high < 190 && !$('#pad-inline'), JSON.stringify(p));
     check('The window is a panel that does not make the app the active one, on every desktop and beside a full screen', p.panel && p.nonactivating && p.all_spaces && p.beside_full_screen && p.level === 3, JSON.stringify(p));
@@ -3150,6 +4358,7 @@ if (window.__n2_real_pad) {
     const press = (selector) => T().command('pad_press:' + selector);
     press('#pad-listen');
     check('A press of the mouse on Listen acts at the first press, and starts the listener of the app', await until(() => $('.listen-bar.on') && $('#listening-row'), 5000));
+    const page = await until(pageNow, 4000);
     p = await probed((p) => p.form === 'open' && p.high > 200);
     check('…and the pad still does not have the keyboard, nor is the app the active one', !p.failed && !p.key && !p.app_active, JSON.stringify(p));
     check('As the notepad the pad may take the keyboard, and says that a first press acts', p.can_key && p.first_press && p.hit === 'WryWebView', JSON.stringify(p));
@@ -3173,9 +4382,12 @@ if (window.__n2_real_pad) {
     }
     check('A press of the mouse on the pill opens the notepad again, at the first press', !p.failed, JSON.stringify(p.result) + ' ' + JSON.stringify(p));
     press('#pad-stop');
-    p = await probed((p) => p.form === 'end' && p.high > 120);
-    check('A press on Stop turns it into the last card', !p.failed && p.wide === 328, JSON.stringify(p));
     await until(() => !$('.listen-bar.on'), 12000);
+    p = await probed((p) => p.form === 'open' && !$('.listen-bar.on'));
+    check('A press on Stop during the meeting pauses the listening, and the pad stays the notepad', !p.failed && p.wide === 328, JSON.stringify(p));
+    T().command('meeting_ended');
+    p = await probed((p) => p.form === 'end' && p.high > 120);
+    check('When the meeting ends, the pad turns into its last card', !p.failed && p.wide === 328, JSON.stringify(p));
     press('#pad-keep-in');
     const withList = await probed((q) => q.form === 'end' && q.high > p.high + 100);
     check('A press of the mouse on the field opens the list of pages, and the window grows for it', !withList.failed, JSON.stringify(withList));

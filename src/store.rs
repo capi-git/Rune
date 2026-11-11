@@ -28,7 +28,7 @@ pub struct Version {
 /// The form of the notes file that this program writes. Make it one larger
 /// with each change that an older program would damage: a column it would
 /// write back empty, a kind of line it does not know.
-pub const SCHEMA: i64 = 5;
+pub const SCHEMA: i64 = 6;
 
 impl Store {
     /// `~/Library/Application Support/Notion 2.0/workspace.db`, or the file named
@@ -211,6 +211,11 @@ impl Store {
         if !has_font_column {
             self.conn.execute_batch("ALTER TABLE pages ADD COLUMN font TEXT NOT NULL DEFAULT ''")?;
         }
+        let has_row_column: bool =
+            self.conn.prepare("SELECT 1 FROM pragma_table_info('pages') WHERE name='row_of'")?.exists([])?;
+        if !has_row_column {
+            self.conn.execute_batch("ALTER TABLE pages ADD COLUMN row_of TEXT")?;
+        }
         let has_due_column: bool =
             self.conn.prepare("SELECT 1 FROM pragma_table_info('blocks') WHERE name='due'")?.exists([])?;
         if !has_due_column {
@@ -386,7 +391,7 @@ impl Store {
     pub fn load(&self) -> rusqlite::Result<Loaded> {
         let mut pages = HashMap::new();
         let mut stmt = self.conn.prepare(
-            "SELECT id, parent_id, title, icon, position, favorite, trashed, created_at, updated_at, space_id, cover, cover_y, font FROM pages",
+            "SELECT id, parent_id, title, icon, position, favorite, trashed, created_at, updated_at, space_id, cover, cover_y, font, row_of FROM pages",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(Page {
@@ -403,6 +408,7 @@ impl Store {
                 cover: r.get(10)?,
                 cover_y: r.get::<_, i64>(11)?.clamp(0, 100) as u8,
                 font: r.get::<_, Option<String>>(12)?.unwrap_or_default(),
+                row_of: r.get::<_, Option<String>>(13)?.filter(|id| !id.is_empty()),
             })
         })?;
         // A page an agent wrote without a space joins the first one.
@@ -452,10 +458,10 @@ impl Store {
 
     pub fn save_page(&self, p: &Page) -> rusqlite::Result<()> {
         self.conn.prepare_cached(
-            "INSERT INTO pages(id, parent_id, title, icon, position, favorite, trashed, created_at, updated_at, space_id, cover, cover_y, font)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            "INSERT INTO pages(id, parent_id, title, icon, position, favorite, trashed, created_at, updated_at, space_id, cover, cover_y, font, row_of)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(id) DO UPDATE SET parent_id=?2, title=?3, icon=?4, position=?5,
-                favorite=?6, trashed=?7, updated_at=MAX(updated_at, ?9), space_id=?10, cover=?11, cover_y=?12, font=?13",
+                favorite=?6, trashed=?7, updated_at=MAX(updated_at, ?9), space_id=?10, cover=?11, cover_y=?12, font=?13, row_of=?14",
         )?.execute(
             params![
                 p.id,
@@ -470,7 +476,8 @@ impl Store {
                 p.space_id,
                 p.cover,
                 p.cover_y as i64,
-                p.font
+                p.font,
+                p.row_of
             ],
         )?;
         Ok(())
@@ -778,6 +785,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_page_of_a_row_and_a_table_beside_another_are_kept() {
+        let store = Store::open_in_memory().unwrap();
+        let page = Page::new(None, 1.0);
+        let mut row = Page::new(Some(page.id.clone()), 0.0);
+        row.row_of = Some("block-1/row-1".into());
+        store.save_page(&page).unwrap();
+        store.save_page(&row).unwrap();
+        let mut table = Block::new(BlockKind::Table, "");
+        table.place.beside = true;
+        store.save_blocks(&page.id, &[Block::new(BlockKind::Table, ""), table]).unwrap();
+        let (pages, blocks) = store.load().unwrap();
+        assert_eq!(pages.get(&row.id).and_then(|p| p.row_of.as_deref()), Some("block-1/row-1"));
+        assert_eq!(pages.get(&page.id).and_then(|p| p.row_of.as_deref()), None);
+        assert_eq!(blocks.get(&page.id).map(|b| (b[0].place.beside, b[1].place.beside)), Some((false, true)));
+        // A page saved again by a program that leaves the row alone keeps it.
+        store.save_page(&row).unwrap();
+        assert!(store.load().unwrap().0.get(&row.id).is_some_and(|p| p.row_of.is_some()));
+    }
+
+    #[test]
     fn a_page_keeps_its_face_and_a_picture_its_caption() {
         let store = Store::open_in_memory().unwrap();
         let mut page = Page::new(None, 1.0);
@@ -875,7 +902,7 @@ mod tests {
         // A picture keeps where it was put and how wide it was made.
         let mut picture = Block::new(BlockKind::Image, "");
         picture.data = "abcdefghij0123456789.png".into();
-        picture.place = crate::model::Place { free: true, right: true, x: -40, y: 0, w: 320 };
+        picture.place = crate::model::Place { free: true, right: true, x: -40, y: 0, w: 320, beside: false };
         let blocks = vec![Block::text("one"), todo, code, Block::page_link("abc".into()), picture];
         store.save_blocks(&page.id, &blocks).unwrap();
         // Saving again replaces rather than duplicates.

@@ -12,7 +12,7 @@
 
 use crate::markdown;
 use crate::model::{now_ms, Block, BlockKind, Id, Page, Space};
-use crate::state::{children_of, roots_in};
+use crate::state::{children_of, roots_in, written_row_pages};
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
@@ -64,15 +64,19 @@ fn unique(name: String, taken: &mut HashSet<String>) -> String {
 /// Where each page goes, as path parts without the ".md" ending:
 /// ["Projects", "Website"] is Projects/Website.md, and the pages inside it go
 /// in Projects/Website/. Pages in the Trash are left out. With more than one
-/// space, each space is a folder of its own.
-fn plan(spaces: &[Space], pages: &HashMap<Id, Page>) -> Vec<(Id, Vec<String>)> {
-    fn place(list: &[Page], dir: &[String], pages: &HashMap<Id, Page>, out: &mut Vec<(Id, Vec<String>)>) {
+/// space, each space is a folder of its own. The page of a row of a table
+/// goes with the pages inside the page of the table, if something is
+/// written in it.
+fn plan(spaces: &[Space], pages: &HashMap<Id, Page>, blocks: &HashMap<Id, Vec<Block>>) -> Vec<(Id, Vec<String>)> {
+    fn place(list: &[Page], dir: &[String], pages: &HashMap<Id, Page>, blocks: &HashMap<Id, Vec<Block>>, out: &mut Vec<(Id, Vec<String>)>) {
         let mut taken = HashSet::new();
         for p in list {
             let mut path = dir.to_vec();
             path.push(unique(file_name(p.display_title()), &mut taken));
             out.push((p.id.clone(), path.clone()));
-            place(&children_of(pages, Some(&p.id)), &path, pages, out);
+            let mut inside = children_of(pages, Some(&p.id));
+            inside.extend(written_row_pages(pages, blocks, &p.id));
+            place(&inside, &path, pages, blocks, out);
         }
     }
     let mut out = Vec::new();
@@ -80,7 +84,7 @@ fn plan(spaces: &[Space], pages: &HashMap<Id, Page>) -> Vec<(Id, Vec<String>)> {
     for space in spaces {
         let base: Vec<String> =
             if spaces.len() > 1 { vec![unique(file_name(&space.name), &mut space_names)] } else { Vec::new() };
-        place(&roots_in(pages, &space.id), &base, pages, &mut out);
+        place(&roots_in(pages, &space.id), &base, pages, blocks, &mut out);
     }
     out
 }
@@ -144,7 +148,7 @@ pub fn export_all(
     pages: &HashMap<Id, Page>,
     blocks: &HashMap<Id, Vec<Block>>,
 ) -> std::io::Result<usize> {
-    let plan = plan(spaces, pages);
+    let plan = plan(spaces, pages, blocks);
     let paths: HashMap<&str, &[String]> = plan.iter().map(|(id, p)| (id.as_str(), p.as_slice())).collect();
     for (id, path) in &plan {
         let page = &pages[id];

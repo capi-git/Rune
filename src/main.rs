@@ -14,6 +14,7 @@ mod update;
 mod voice;
 mod drawing;
 mod files;
+mod formula;
 mod glass;
 mod history;
 mod inline;
