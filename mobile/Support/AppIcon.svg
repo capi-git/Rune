@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="100 100 824 824" width="1024" height="1024">
+  <!-- Rune's icon for the iPhone: the tile of assets/logo.svg to its edges
+       (iOS rounds the corners itself), with no shadow and no rim. -->
+  <defs>
+    <linearGradient id="bg" x1="0.15" y1="0" x2="0.85" y2="1">
+      <stop offset="0" stop-color="#3A3B3E"/>
+      <stop offset="0.55" stop-color="#1D1E21"/>
+      <stop offset="1" stop-color="#08080A"/>
+    </linearGradient>
+    <radialGradient id="sheen" cx="0.3" cy="0.12" r="0.75">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.18"/>
+      <stop offset="0.6" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="cut" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#D5D9DD"/>
+    </linearGradient>
+    <clipPath id="stem"><rect x="370" y="0" width="654" height="1024"/></clipPath>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" fill="url(#bg)"/>
+  <rect x="100" y="100" width="824" height="824" fill="url(#sheen)"/>
+  <g clip-path="url(#stem)">
+  <path d="M404 752 V288 L630 414 L404 540 L630 752" fill="none" stroke="#000000" stroke-opacity="0.35" stroke-width="68" stroke-linejoin="miter" stroke-miterlimit="6" stroke-linecap="square" transform="translate(0 10)"/>
+  <path d="M404 752 V288 L630 414 L404 540 L630 752" fill="none" stroke="url(#cut)" stroke-width="68" stroke-linejoin="miter" stroke-miterlimit="6" stroke-linecap="square"/>
+  </g>
+</svg>

@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- A workspace file sent to the iPhone (AirDrop, Files) can be opened with this app. -->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Rune notes</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Owner</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.jackhagan.notion2.workspace</string>
+			</array>
+		</dict>
+	</array>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.jackhagan.notion2.workspace</string>
+			<key>UTTypeDescription</key>
+			<string>Rune notes</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.database</string>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>db</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
+	<!-- The app works on its own copy; it never opens a file where it is. -->
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<false/>
+	<!-- The app's folder in iCloud Drive. The Mac app reads and writes the same
+	     folder: ~/Library/Mobile Documents/iCloud~com~jackhagan~notion2/Documents -->
+	<key>NSUbiquitousContainers</key>
+	<dict>
+		<key>iCloud.com.jackhagan.notion2</key>
+		<dict>
+			<key>NSUbiquitousContainerIsDocumentScopePublic</key>
+			<true/>
+			<key>NSUbiquitousContainerName</key>
+			<string>Rune</string>
+			<key>NSUbiquitousContainerSupportedFolderLevels</key>
+			<string>Any</string>
+		</dict>
+	</dict>
+	<!-- The QR code that the Mac shows holds a link "notion2://pair?…": the
+	     camera opens the app with it (docs/sync-wifi.md). -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.jackhagan.notion2.mobile</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>notion2</string>
+				<string>rune</string>
+			</array>
+		</dict>
+	</array>
+	<!-- Sync straight from the Mac, with no cloud between. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Rune gets your notes from your Mac over your Wi-Fi.</string>
+	<!-- The Mac is reached by its local name or address, with a certificate
+	     that only the QR code vouches for; the app checks it itself
+	     (WifiClient). The rule for the rest of the internet is not changed. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+</dict>
+</plist>

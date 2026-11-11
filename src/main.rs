@@ -33,6 +33,7 @@ mod slots;
 mod state;
 mod store;
 mod sync;
+mod devsync;
 mod table;
 mod ui;
 mod video;
@@ -101,6 +102,10 @@ fn main() {
     }
     store::install(store);
     meeting::load_setting();
+    // Sync with the iPhone, when it was turned on in Settings.
+    if std::env::var_os("NOTION2_SELFTEST").is_none() {
+        devsync::start_from_settings();
+    }
     // A newer build waiting? Install it and start again (never in a test run).
     if std::env::var_os("NOTION2_SELFTEST").is_none() {
         update::at_launch();

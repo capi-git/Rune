@@ -1,6 +1,6 @@
 [package]
 name = "notion2"
-version = "0.1.10"
+version = "0.1.11"
 edition = "2021"
 description = "A Notion-style workspace app written in Rust"
 
@@ -30,6 +30,15 @@ rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] 
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 # A pasted or dropped picture comes from the page as base64 text.
 base64 = "0.22"
+# Sync over Wi-Fi (src/devsync/wifi.rs): HTTPS with a certificate of the
+# Mac's own (ECDSA P-256), the QR code of the pairing link, and one listening
+# socket for IPv4 and IPv6. ring is the crypto: no C or assembler toolchain
+# beyond what is already built.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = { version = "0.14", default-features = false, features = ["ring"] }
+ring = "0.17"
+qrcode = { version = "0.14", default-features = false }
+socket2 = "0.6"
 
 [profile.dev.package."*"]
 opt-level = 2

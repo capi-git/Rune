@@ -209,19 +209,21 @@ enum Section {
     Appearance,
     Space,
     Calendar,
+    Sync,
     Ai,
     Notifications,
     Data,
 }
 
 impl Section {
-    const ALL: [Section; 6] = [Section::Appearance, Section::Space, Section::Calendar, Section::Ai, Section::Notifications, Section::Data];
+    const ALL: [Section; 7] = [Section::Appearance, Section::Space, Section::Calendar, Section::Sync, Section::Ai, Section::Notifications, Section::Data];
 
     fn label(self) -> &'static str {
         match self {
             Section::Appearance => "Appearance",
             Section::Space => "Space",
             Section::Calendar => "Calendar",
+            Section::Sync => "Sync",
             Section::Ai => "AI",
             Section::Notifications => "Notifications",
             Section::Data => "Data",
@@ -233,6 +235,7 @@ impl Section {
             Section::Appearance => "palette",
             Section::Space => "folder",
             Section::Calendar => "calendar",
+            Section::Sync => "phone",
             Section::Ai => "sparkles",
             Section::Notifications => "bell",
             Section::Data => "inbox",
@@ -244,6 +247,7 @@ impl Section {
             Section::Appearance => "The look of the window.",
             Section::Space => "The space you're in.",
             Section::Calendar => "Other calendars, and reminders.",
+            Section::Sync => "Your notes on your iPhone too, with no server between.",
             Section::Ai => "Ask AI uses a tool on this Mac, with your own account. It sees only the page you ask about.",
             Section::Notifications => "Reminders, and notes for meetings.",
             Section::Data => "Your notes are in one file on this Mac.",
@@ -301,6 +305,7 @@ pub fn SettingsView() -> Element {
                                 Section::Appearance => rsx! { AppearanceSettings {} },
                                 Section::Space => rsx! { SpaceSettings {} },
                                 Section::Calendar => rsx! { CalendarSettings {} },
+                                Section::Sync => rsx! { SyncSettings {} },
                                 Section::Ai => rsx! {
                                     AiSettings {}
                                     VoiceSettings {}
@@ -910,6 +915,166 @@ fn ModelPicker(provider: Provider, current: String) -> Element {
 
 /// The calendar: the calendars of this Mac (off until the person turns
 /// them on), and the reminder a new event starts with.
+/// Sync with the iPhone (src/devsync.rs): two switches, both off at first,
+/// the code that connects an iPhone over Wi-Fi, and where things stand.
+#[component]
+fn SyncSettings() -> Element {
+    let state = use_context::<AppState>();
+    let mut status = use_signal(crate::devsync::status);
+    let mut paired = use_signal(crate::devsync::paired);
+    let mut offer = use_signal(|| None::<crate::devsync::wifi::Offer>);
+    let mut busy = use_signal(|| false);
+    // Where things stand changes in the background: look every two seconds.
+    use_future(move || async move {
+        loop {
+            crate::ai::sleep_ms(2_000).await;
+            let now = crate::devsync::status();
+            if *status.peek() != now {
+                status.set(now);
+            }
+            paired.set(crate::devsync::paired());
+            if offer.peek().as_ref().is_some_and(|o| o.expires_ms < crate::model::now_ms()) {
+                offer.set(None);
+            }
+        }
+    });
+    // The code dies with the screen that shows it.
+    use_drop(crate::devsync::withdraw);
+    let s = status();
+    let mut switch = move |icloud: bool, wifi: bool| {
+        busy.set(true);
+        if let Err(e) = crate::devsync::set(icloud, wifi) {
+            state.toast(format!("Sync did not start: {e}"));
+        }
+        if !wifi {
+            offer.set(None);
+        }
+        status.set(crate::devsync::status());
+        busy.set(false);
+    };
+    let icloud_note = if !s.icloud {
+        "Works anywhere, also while this Mac sleeps."
+    } else if s.icloud_ready {
+        "On. Through your own iCloud Drive."
+    } else {
+        "Waiting for the iPhone: open Rune on it once, with iCloud Drive on."
+    };
+    let state_note = if let Some(fault) = &s.fault {
+        format!("Sync stopped: {fault}")
+    } else if s.needs_update {
+        "Another device writes a newer form. Update Rune on this Mac.".to_string()
+    } else if s.last_ms > 0 {
+        let ago = crate::when::ago(s.last_ms).to_lowercase();
+        if s.waiting { format!("Synced {ago}. Some files are still on their way.") } else { format!("Synced {ago}.") }
+    } else {
+        "Starting…".to_string()
+    };
+    let (icloud, wifi) = (s.icloud, s.wifi);
+    let state_tone: &'static str = if s.fault.is_some() { "err" } else { "" };
+    let icloud_tone: &'static str = if icloud && s.icloud_ready { "ok" } else { "" };
+    rsx! {
+        Group { title: "Ways to sync",
+            Row { label: "Through iCloud Drive", note: icloud_note, tone: icloud_tone,
+                button {
+                    id: "sync-icloud-switch",
+                    class: if icloud { "switch on" } else { "switch" },
+                    role: "switch",
+                    "aria-checked": "{icloud}",
+                    "aria-label": "Sync through iCloud Drive",
+                    disabled: busy(),
+                    onclick: move |_| switch(!icloud, wifi),
+                    span { class: "knob" }
+                }
+            }
+            Row { label: "Over Wi-Fi", note: "Straight from this Mac, when the iPhone is on the same Wi-Fi and Rune is open on both.",
+                button {
+                    id: "sync-wifi-switch",
+                    class: if wifi { "switch on" } else { "switch" },
+                    role: "switch",
+                    "aria-checked": "{wifi}",
+                    "aria-label": "Sync over Wi-Fi",
+                    disabled: busy(),
+                    onclick: move |_| switch(icloud, !wifi),
+                    span { class: "knob" }
+                }
+            }
+        }
+        if wifi {
+            Group { title: "iPhones",
+                if let Some(o) = offer() {
+                    div { class: "sync-code",
+                        div { class: "sync-qr", dangerous_inner_html: "{o.qr_svg}" }
+                        div { class: "sync-code-copy",
+                            div { class: "set-label", "Point the camera of your iPhone at this code" }
+                            div { class: "set-note", "It opens Rune on the iPhone and connects it. The code works once, for 10 minutes." }
+                            button {
+                                class: "secondary-btn",
+                                onclick: move |_| {
+                                    crate::devsync::withdraw();
+                                    offer.set(None);
+                                },
+                                "Done"
+                            }
+                        }
+                    }
+                } else {
+                    Row { label: "Connect an iPhone", note: "Shows a code for the iPhone's camera.",
+                        button {
+                            id: "sync-connect",
+                            class: "secondary-btn",
+                            onclick: move |_| match crate::devsync::offer() {
+                                Ok(o) => offer.set(Some(o)),
+                                Err(e) => state.toast(format!("No code: {e}")),
+                            },
+                            "Connect an iPhone…"
+                        }
+                    }
+                }
+                for p in paired() {
+                    div { key: "{p.device}", class: "set-row",
+                        div { class: "set-copy",
+                            div { class: "set-label", "{p.name}" }
+                            div { class: "set-note", "Connected {crate::when::ago(p.at_ms).to_lowercase()}" }
+                        }
+                        div { class: "set-control",
+                            button {
+                                class: "ghost-btn",
+                                onclick: {
+                                    let device = p.device.clone();
+                                    move |_| {
+                                        if let Err(e) = crate::devsync::forget(&device) {
+                                            state.toast(format!("Not removed: {e}"));
+                                        }
+                                        paired.set(crate::devsync::paired());
+                                    }
+                                },
+                                "Remove"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if icloud || wifi {
+            Group { title: "Where it stands",
+                Row { label: "This Mac", note: state_note.clone(), tone: state_tone }
+                for (key, name, seen) in s.devices.iter().map(|d| (
+                    d.device.clone(),
+                    if d.name.is_empty() { "A device".to_string() } else { d.name.clone() },
+                    format!("{}, seen {}", if d.kind == "iphone" { "iPhone" } else { "Mac" }, crate::when::ago(d.at).to_lowercase()),
+                )) {
+                    div { key: "{key}", class: "set-row",
+                        div { class: "set-copy",
+                            div { class: "set-label", "{name}" }
+                            div { class: "set-note", "{seen}" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 fn CalendarSettings() -> Element {
     use crate::maccal::Access;

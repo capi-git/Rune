@@ -587,7 +587,7 @@ await run('Settings: transparency', async () => {
   check('At the usual amount the frame and the page card are as clear as in Aven', alpha('frame-d') === 0.635 && alpha('card-d') === 0.476 && alpha('frame-l') === 0.749 && alpha('card-l') === 0.863, `dark ${alpha('frame-d')} / ${alpha('card-d')}, light ${alpha('frame-l')} / ${alpha('card-l')}`);
   check('No API key option is left', !$('.settings-view input[type=password]') && !document.body.textContent.includes('abliteration'));
   snap('settings');
-  check('Settings lists its sections down the left', $$('.settings-nav-item').map((b) => b.textContent).join(', ') === 'Appearance, Space, Calendar, AI, Notifications, Data', $$('.settings-nav-item').map((b) => b.textContent).join(', '));
+  check('Settings lists its sections down the left', $$('.settings-nav-item').map((b) => b.textContent).join(', ') === 'Appearance, Space, Calendar, Sync, AI, Notifications, Data', $$('.settings-nav-item').map((b) => b.textContent).join(', '));
   let opened = 0;
   for (const name of ['Space', 'AI', 'Notifications', 'Data', 'Appearance']) {
     if (await settingsSection(name)) opened++;
@@ -1680,6 +1680,38 @@ await run('Backups', async () => {
   check('Settings → Data says which build this is and how it updates', updates && /^Version \d/.test(about) && $('#update-auto')?.classList.contains('on'), about);
   check('A build from the build folder says it does not update itself', about.includes('does not update itself') && !$('#update-now') && !$('#update-ready'), about);
   snap('settings-data');
+  key(document.body, 'Escape');
+  await until(() => !$('.settings-view'));
+});
+
+// Sync with the iPhone (src/devsync.rs). In a test run the Wi-Fi server
+// listens on this Mac only, so macOS asks nothing; the folder in iCloud
+// Drive is the one NOTION2_ICLOUD_SYNC names, when the runner gives one.
+await run('Sync with the iPhone', async () => {
+  await openSettings();
+  check('Settings has a part for sync', await settingsSection('Sync'));
+  const icloud = () => $('#sync-icloud-switch');
+  const wifi = () => $('#sync-wifi-switch');
+  check('Both ways of sync are off until they are turned on', icloud()?.getAttribute('aria-checked') === 'false' && wifi()?.getAttribute('aria-checked') === 'false' && !$('#sync-connect'));
+  await wait(250);
+  snap('settings-sync-off');
+  icloud().click();
+  check('Turned on, iCloud Drive syncs and says where it stands', await until(() => icloud()?.getAttribute('aria-checked') === 'true' && $$('.set-note').some((n) => /^Synced /.test(n.textContent)), 8000), $$('.set-note').map((n) => n.textContent).join(' | ').slice(0, 300));
+  wifi().click();
+  const connect = await until(() => $('#sync-connect'), 6000);
+  check('Over Wi-Fi offers to connect an iPhone', connect && wifi()?.getAttribute('aria-checked') === 'true', $$('.set-note').map((n) => n.textContent).join(' | ').slice(0, 300));
+  if (connect) connect.click();
+  const qr = await until(() => $('.sync-qr svg path'), 4000);
+  check('Connect an iPhone shows a QR code', qr && $('.sync-qr svg').getAttribute('viewBox'), ($('.sync-code') || document.body).outerHTML.slice(0, 200));
+  await wait(300);
+  snap('settings-sync');
+  const done = $$('.sync-code button').find((b) => b.textContent === 'Done');
+  if (done) done.click();
+  check('Done takes the code away', await until(() => !$('.sync-code') && $('#sync-connect')));
+  wifi().click();
+  await until(() => wifi()?.getAttribute('aria-checked') === 'false', 4000);
+  icloud().click();
+  check('Both ways turn off again', await until(() => icloud()?.getAttribute('aria-checked') === 'false' && wifi()?.getAttribute('aria-checked') === 'false', 4000));
   key(document.body, 'Escape');
   await until(() => !$('.settings-view'));
 });

@@ -8160,3 +8160,33 @@ body.ev-dragging .cal-event {
     animation: none;
   }
 }
+
+/* Settings > Sync: the code an iPhone's camera reads, beside what to do. */
+.sync-code {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 16px;
+}
+.sync-qr {
+  flex: none;
+  width: 168px;
+  height: 168px;
+  padding: 10px;
+  border-radius: 12px;
+  /* A camera reads dark on light best, in either theme. */
+  background: #fff;
+  color: #111;
+}
+.sync-qr svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.sync-code-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
