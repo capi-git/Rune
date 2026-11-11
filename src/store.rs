@@ -221,6 +221,12 @@ impl Store {
         if !has_due_column {
             self.conn.execute_batch("ALTER TABLE blocks ADD COLUMN due TEXT NOT NULL DEFAULT ''")?;
         }
+        // The time of a to-do's reminder (an older program leaves it as it is).
+        let has_remind_column: bool =
+            self.conn.prepare("SELECT 1 FROM pragma_table_info('blocks') WHERE name='remind'")?.exists([])?;
+        if !has_remind_column {
+            self.conn.execute_batch("ALTER TABLE blocks ADD COLUMN remind TEXT NOT NULL DEFAULT ''")?;
+        }
         self.upgrade_text_format()?;
         self.ensure_space()?;
         // Mark the file with its form. The mark is never made smaller: a file
@@ -427,7 +433,7 @@ impl Store {
 
         let mut blocks: HashMap<Id, Vec<Block>> = HashMap::new();
         let mut stmt = self.conn.prepare(
-            "SELECT page_id, id, kind, text, checked, indent, collapsed, icon, language, target, data, place, due
+            "SELECT page_id, id, kind, text, checked, indent, collapsed, icon, language, target, data, place, due, remind
              FROM blocks ORDER BY page_id, position",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -446,6 +452,7 @@ impl Store {
                     data: r.get::<_, Option<String>>(10)?.unwrap_or_default(),
                     place: crate::model::Place::from_column(&r.get::<_, Option<String>>(11)?.unwrap_or_default()),
                     due: Block::due_from_column(&r.get::<_, Option<String>>(12)?.unwrap_or_default()),
+                    remind: Block::remind_from_column(&r.get::<_, Option<String>>(13)?.unwrap_or_default()),
                 },
             ))
         })?;
@@ -487,7 +494,7 @@ impl Store {
     /// The blocks of one page as they are on disk now.
     pub fn load_page_blocks(&self, page_id: &str) -> rusqlite::Result<Vec<Block>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, kind, text, checked, indent, collapsed, icon, language, target, data, place, due
+            "SELECT id, kind, text, checked, indent, collapsed, icon, language, target, data, place, due, remind
              FROM blocks WHERE page_id=?1 ORDER BY position",
         )?;
         let rows = stmt.query_map(params![page_id], |r| {
@@ -504,6 +511,7 @@ impl Store {
                 data: r.get::<_, Option<String>>(9)?.unwrap_or_default(),
                 place: crate::model::Place::from_column(&r.get::<_, Option<String>>(10)?.unwrap_or_default()),
                 due: Block::due_from_column(&r.get::<_, Option<String>>(11)?.unwrap_or_default()),
+                remind: Block::remind_from_column(&r.get::<_, Option<String>>(12)?.unwrap_or_default()),
             })
         })?;
         rows.collect()
@@ -529,8 +537,8 @@ impl Store {
         }
         {
             let mut stmt = tx.prepare_cached(
-                "INSERT INTO blocks(id, page_id, position, kind, text, checked, indent, collapsed, icon, language, target, data, place, due)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                "INSERT INTO blocks(id, page_id, position, kind, text, checked, indent, collapsed, icon, language, target, data, place, due, remind)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             )?;
             for (i, b) in blocks.iter().enumerate() {
                 stmt.execute(params![
@@ -547,7 +555,8 @@ impl Store {
                     b.target,
                     b.data,
                     b.place.to_column(),
-                    b.due_column()
+                    b.due_column(),
+                    b.remind_column()
                 ])?;
             }
         }
@@ -567,8 +576,8 @@ impl Store {
         tx.prepare_cached("DELETE FROM blocks WHERE page_id=?1")?.execute(params![page_id])?;
         {
             let mut stmt = tx.prepare_cached(
-                "INSERT INTO blocks(id, page_id, position, kind, text, checked, indent, collapsed, icon, language, target, data, place, due)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                "INSERT INTO blocks(id, page_id, position, kind, text, checked, indent, collapsed, icon, language, target, data, place, due, remind)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             )?;
             for (i, b) in blocks.iter().enumerate() {
                 stmt.execute(params![
@@ -585,7 +594,8 @@ impl Store {
                     b.target,
                     b.data,
                     b.place.to_column(),
-                    b.due_column()
+                    b.due_column(),
+                    b.remind_column()
                 ])?;
             }
         }
@@ -829,6 +839,8 @@ mod tests {
         let day = chrono::NaiveDate::from_ymd_opt(2026, 11, 12).unwrap();
         let mut todo = Block::new(BlockKind::Todo, "Call Sam");
         todo.due = Some(day);
+        // (And a reminder at a time of that day.)
+        todo.remind = chrono::NaiveTime::from_hms_opt(9, 30, 0);
         let plain = Block::new(BlockKind::Todo, "No day");
         store.save_blocks("p", &[todo.clone(), plain.clone()]).unwrap();
         assert_eq!(store.load_page_blocks("p").unwrap(), vec![todo.clone(), plain.clone()]);

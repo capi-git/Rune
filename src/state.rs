@@ -7002,9 +7002,49 @@ impl AppState {
         self.edit_blocks(page, |bs| {
             if let Some(i) = index_of(bs, id) {
                 bs[i].due = due;
+                // (A reminder needs a day.)
+                if due.is_none() {
+                    bs[i].remind = None;
+                }
             }
         });
+        crate::notify::mark_dirty();
         self.set_popover(None);
+    }
+
+    /// The time of a to-do's reminder (None: no reminder). A to-do with no
+    /// day gets today, or tomorrow when the time has passed today.
+    pub fn set_reminder(self, page: &str, id: &str, time: Option<chrono::NaiveTime>) {
+        let today = crate::when::today();
+        let now = now_ms();
+        self.edit_blocks(page, |bs| {
+            if let Some(i) = index_of(bs, id) {
+                bs[i].remind = time;
+                if let (Some(t), None) = (time, bs[i].due) {
+                    bs[i].due = Some(if crate::when::at(today, t) > now { today } else { crate::when::next_day(today) });
+                }
+            }
+        });
+        crate::notify::mark_dirty();
+    }
+
+    /// Every open to-do with a reminder still to come, in all spaces:
+    /// (its page, its line, the page's name, the words, when).
+    pub fn todo_reminders(&self) -> Vec<(Id, Id, String, String, i64)> {
+        let now = now_ms();
+        let pages = self.pages.peek();
+        let blocks = self.blocks.peek();
+        let mut out = Vec::new();
+        for (page, list) in blocks.iter() {
+            let Some(p) = pages.get(page).filter(|p| !p.trashed) else { continue };
+            for b in list {
+                if let Some(at) = b.remind_at().filter(|&t| t > now) {
+                    out.push((page.clone(), b.id.clone(), p.display_title().to_string(), b.plain_text(), at));
+                }
+            }
+        }
+        out.sort_by_key(|r| r.4);
+        out
     }
 
     pub fn toggle_check(self, page: &str, id: &str) {
@@ -7013,6 +7053,8 @@ impl AppState {
                 bs[i].checked = !bs[i].checked;
             }
         });
+        // (A done to-do sends no reminder.)
+        crate::notify::mark_dirty();
     }
 
     pub fn toggle_collapsed(self, page: &str, id: &str) {

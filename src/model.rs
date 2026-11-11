@@ -218,6 +218,10 @@ pub struct Block {
     /// in that day of the calendar. Other kinds of line do not use it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub due: Option<chrono::NaiveDate>,
+    /// A to-do with a day can have a time on that day: Rune sends a Mac
+    /// notification then (a reminder). None: no reminder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remind: Option<chrono::NaiveTime>,
 }
 
 /// Where a picture sits. A free picture is at one side of the page, at the
@@ -301,7 +305,23 @@ impl Block {
             data: String::new(),
             place: Place::default(),
             due: None,
+            remind: None,
         }
+    }
+
+    /// The reminder's time as the notes file keeps it: "09:00", or nothing.
+    pub fn remind_column(&self) -> String {
+        self.remind.map(|t| t.format("%H:%M").to_string()).unwrap_or_default()
+    }
+
+    pub fn remind_from_column(s: &str) -> Option<chrono::NaiveTime> {
+        chrono::NaiveTime::parse_from_str(s.trim(), "%H:%M").ok()
+    }
+
+    /// When a to-do's reminder goes off (ms), if it has one and is not done.
+    pub fn remind_at(&self) -> Option<i64> {
+        (self.kind == BlockKind::Todo && !self.checked).then_some(())?;
+        Some(crate::when::at(self.due?, self.remind?))
     }
 
     /// The due day as the notes file keeps it: "2026-11-12", or nothing.

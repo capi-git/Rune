@@ -186,10 +186,15 @@ pub fn to_blocks(md: &str) -> Vec<Block> {
         } else if let Some(rest) = line.strip_prefix("# ") {
             Some(Block::new(BlockKind::Heading1, clean_inline(rest)))
         } else if let Some((checked, rest)) = todo_item(line) {
-            let (rest, due) = split_due(rest);
+            let (words, remind) = split_remind(rest);
+            let (words, due) = split_due(words);
+            // (A time with no day before it is no reminder: the words stay as written.)
+            let (rest, due) = if remind.is_some() && due.is_none() { split_due(rest) } else { (words, due) };
             let mut b = Block::new(BlockKind::Todo, clean_inline(rest)).with_indent(indent);
             b.checked = checked;
             b.due = due;
+            // (A time with no day is no reminder: it needs a day.)
+            b.remind = remind.filter(|_| due.is_some());
             Some(b)
         } else if let Some(rest) = ["- ", "* ", "+ ", "• "].iter().find_map(|p| line.strip_prefix(p)) {
             Some(Block::new(BlockKind::Bulleted, clean_inline(rest)).with_indent(indent))
@@ -223,6 +228,19 @@ pub fn to_blocks(md: &str) -> Vec<Block> {
 /// The sign before the day a to-do is due, at the end of its line:
 /// "- [ ] Call Sam 📅 2026-11-12". Other note apps write it the same way.
 pub const DUE_MARK: &str = "📅";
+
+/// The sign before a to-do's reminder time, after its day.
+pub const REMIND_MARK: &str = "⏰";
+
+/// A to-do's words and day, and the time of its reminder when the line ends
+/// with one ("… 📅 2026-11-12 ⏰ 09:00").
+fn split_remind(text: &str) -> (&str, Option<chrono::NaiveTime>) {
+    let Some(at) = text.rfind(REMIND_MARK) else { return (text, None) };
+    match Block::remind_from_column(&text[at + REMIND_MARK.len()..]) {
+        Some(time) => (text[..at].trim_end(), Some(time)),
+        None => (text, None),
+    }
+}
 
 /// A to-do's words, and the day it is due when its line ends with one.
 fn split_due(text: &str) -> (&str, Option<chrono::NaiveDate>) {
@@ -281,7 +299,8 @@ pub fn render(title: &str, blocks: &[Block], mut special: impl FnMut(&Block) -> 
             BlockKind::Bulleted | BlockKind::Toggle => format!("{pad}- {}", b.text),
             BlockKind::Numbered => format!("{pad}{}. {}", n.unwrap_or(1), b.text),
             BlockKind::Todo => {
-                let due = b.due.map(|d| format!(" {DUE_MARK} {}", d.format("%Y-%m-%d"))).unwrap_or_default();
+                let due = b.due.map(|d| format!(" {DUE_MARK} {}", d.format("%Y-%m-%d"))).unwrap_or_default()
+                    + &b.remind.filter(|_| b.due.is_some()).map(|t| format!(" {REMIND_MARK} {}", t.format("%H:%M"))).unwrap_or_default();
                 format!("{pad}- [{}] {}{due}", if b.checked { "x" } else { " " }, b.text)
             }
             BlockKind::Quote => b.text.lines().map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n"),
@@ -455,6 +474,28 @@ mod tests {
         assert_eq!((back[2].text.as_str(), back[2].due), ("No day", None));
         // A sign with no day after it is only text.
         assert_eq!((back[3].text.as_str(), back[3].due), ("Not a day \u{1F4C5} soon", None));
+    }
+
+    #[test]
+    fn a_to_do_keeps_its_reminder_through_markdown() {
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 11, 12).unwrap();
+        let nine = chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap();
+        let mut todo = Block::new(BlockKind::Todo, "Call Sam");
+        todo.due = Some(day);
+        todo.remind = Some(nine);
+        let md = from_blocks("Plan", &[todo], |_| String::new());
+        assert_eq!(md, "# Plan\n\n- [ ] Call Sam \u{1F4C5} 2026-11-12 \u{23F0} 09:00");
+        let back = to_blocks("- [ ] Call Sam \u{1F4C5} 2026-11-12 \u{23F0} 09:00\n- [ ] At 2 \u{1F4C5} 2026-11-12 \u{23F0} 14:30\n- [ ] No day \u{23F0} 09:00\n- [ ] Not a time \u{1F4C5} 2026-11-12 \u{23F0} soon");
+        assert_eq!((back[0].text.as_str(), back[0].due, back[0].remind), ("Call Sam", Some(day), Some(nine)));
+        assert_eq!(back[1].remind, chrono::NaiveTime::from_hms_opt(14, 30, 0));
+        // A time needs a day; a sign with no time after it is only text (and the day is not read past it).
+        assert_eq!((back[2].text.as_str(), back[2].remind, back[2].due), ("No day \u{23F0} 09:00", None, None));
+        assert_eq!(back[3].remind, None);
+        // A done to-do sends no reminder.
+        let mut done = back[0].clone();
+        assert!(done.remind_at().is_some());
+        done.checked = true;
+        assert_eq!(done.remind_at(), None);
     }
 
     #[test]

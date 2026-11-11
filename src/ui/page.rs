@@ -168,7 +168,7 @@ fn MeetingBand(page_id: String, voices: crate::listen::Voices) -> Element {
 /// choose from. A to-do without a day shows a small calendar there while the
 /// pointer is on its line.
 #[component]
-fn DueChip(page_id: String, id: String, due: Option<chrono::NaiveDate>, done: bool, open: bool) -> Element {
+fn DueChip(page_id: String, id: String, due: Option<chrono::NaiveDate>, #[props(default)] remind: Option<chrono::NaiveTime>, done: bool, open: bool) -> Element {
     let state = use_context::<AppState>();
     let today = crate::when::today();
     let late = !done && due.is_some_and(|d| d < today);
@@ -177,11 +177,17 @@ fn DueChip(page_id: String, id: String, due: Option<chrono::NaiveDate>, done: bo
         (Some(_), true) => "due-chip late",
         (Some(_), false) => "due-chip",
     };
-    let label = due.map(|d| crate::when::due_label(d, today));
-    let said = match due {
-        Some(d) => format!("Due {}. Change the day", d.format("%A, %B %-d")),
-        None => "Give it a day".to_string(),
+    let at = due.zip(remind).map(|(d, t)| crate::when::at(d, t));
+    let label = due.map(|d| match at {
+        Some(at) => format!("{} {}", crate::when::due_label(d, today), crate::when::time_label(at)),
+        None => crate::when::due_label(d, today),
+    });
+    let said = match (due, at) {
+        (Some(d), Some(at)) => format!("Due {}, reminder at {}. Change the day or the reminder", d.format("%A, %B %-d"), crate::when::time_label(at)),
+        (Some(d), None) => format!("Due {}. Change the day, or set a reminder", d.format("%A, %B %-d")),
+        (None, _) => "Give it a day or a reminder".to_string(),
     };
+    let time_value = remind.map(|t| t.format("%H:%M").to_string()).unwrap_or_default();
     // The first day of the week after this one.
     let monday = crate::when::add_days(today, i64::from(7 - chrono::Datelike::weekday(&today).num_days_from_monday()));
     let choices = [("Today", today), ("Tomorrow", crate::when::next_day(today)), ("Next week", monday)];
@@ -198,6 +204,9 @@ fn DueChip(page_id: String, id: String, due: Option<chrono::NaiveDate>, done: bo
                 "aria-expanded": if open { "true" } else { "false" },
                 onclick: move |_| state.set_popover((!open).then(|| Popover::Due { block_id: menu_id.clone() })),
                 if let Some(l) = label {
+                    if remind.is_some() {
+                        Icon { name: "bell", size: 12 }
+                    }
                     "{l}"
                 } else {
                     Icon { name: "calendar", size: 14 }
@@ -234,6 +243,37 @@ fn DueChip(page_id: String, id: String, due: Option<chrono::NaiveDate>, done: bo
                                     }
                                 }
                             },
+                        }
+                    }
+                    // A reminder: a Mac notification at a time of that day.
+                    label { class: "due-other",
+                        span { "Remind me at" }
+                        input {
+                            r#type: "time",
+                            class: "ed-input",
+                            "aria-label": "Remind me at",
+                            "data-remind": "",
+                            value: "{time_value}",
+                            onchange: {
+                                let (pid, bid) = (page_id.clone(), id.clone());
+                                move |e: FormEvent| {
+                                    if let Some(t) = crate::model::Block::remind_from_column(&e.value()) {
+                                        state.set_reminder(&pid, &bid, Some(t));
+                                    }
+                                }
+                            },
+                        }
+                    }
+                    if remind.is_some() {
+                        button {
+                            class: "menu-item compact",
+                            role: "menuitem",
+                            "data-remind-off": "",
+                            onclick: {
+                                let (pid, bid) = (page_id.clone(), id.clone());
+                                move |_| state.set_reminder(&pid, &bid, None)
+                            },
+                            span { "No reminder" }
                         }
                     }
                     if due.is_some() {
@@ -1088,7 +1128,7 @@ fn BlockRow(
                     },
                     BlockKind::Todo => rsx! {
                         {editor}
-                        DueChip { page_id: page_id.clone(), id: id.clone(), due: block.due, done: block.checked, open: due_open }
+                        DueChip { page_id: page_id.clone(), id: id.clone(), due: block.due, remind: block.remind, done: block.checked, open: due_open }
                     },
                     _ => editor,
                 }

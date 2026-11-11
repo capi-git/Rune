@@ -307,7 +307,7 @@ await run('Block menu', async () => {
     await wait(200);
     const r = m && m.getBoundingClientRect();
     const items = m ? $$('.menu-item', m) : [];
-    check('The menu of a line at the foot of the window is all in the window, with no scroll', r && r.top >= 0 && r.bottom <= innerHeight && items.length && onTop(items[items.length - 1]), r ? `${Math.round(r.top)}..${Math.round(r.bottom)} of ${innerHeight}, line at ${Math.round(low.getBoundingClientRect().top)}` : 'no menu');
+    check('The menu of a line at the foot of the window is all in the window, with no scroll', r && r.top >= 0 && r.bottom <= innerHeight && items.length && onTop(items[items.length - 1]), r ? `${Math.round(r.top)}..${Math.round(r.bottom)} of ${innerHeight}, line at ${Math.round(low.getBoundingClientRect().top)}, over the last item: ${(() => { const b = items[items.length - 1].getBoundingClientRect(); const e = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2); const chain = []; for (let n = e; n && n !== document.body && chain.length < 6; n = n.parentElement) chain.push(n.className && n.className.baseVal === undefined ? n.className : n.tagName); return chain.join(' < '); })()}` : 'no menu');
     key(document.body, 'Escape');
     await until(() => !$('.block-menu'));
   }
@@ -4890,6 +4890,17 @@ await run('Dates on to-dos and the day of the calendar', async () => {
   const weekday = dayFrom(3).toLocaleDateString('en-US', { weekday: 'short' });
   check('A day in the week ahead shows as the name of the day', await until(() => chip(1)?.textContent.trim() === weekday), `${chip(1)?.textContent} for ${weekday}`);
 
+  // A reminder at a time of that day: a bell and the time on the chip.
+  chip(1).click();
+  const remindAt = await until(() => $('.due-menu input[data-remind]'));
+  check('The menu of the day has a time for a reminder', remindAt && remindAt.type === 'time');
+  remindAt.value = '09:30';
+  remindAt.dispatchEvent(new Event('change', { bubbles: true }));
+  check('A time puts a bell and the time on the chip', await until(() => chip(1)?.textContent.trim() === `${weekday} 9:30 AM` && chip(1).querySelector('svg, .ico'), 3000), chip(1)?.textContent);
+  check('The menu then offers to take the reminder away', await until(() => $('.due-menu [data-remind-off]'), 2000));
+  key(document.body, 'Escape');
+  await until(() => !$('.due-menu'), 2000);
+
   // The third: yesterday. It is late.
   const b1 = $('.blk', rows()[1]);
   b1.focus();
@@ -4906,6 +4917,7 @@ await run('Dates on to-dos and the day of the calendar', async () => {
   T().command('copy_markdown');
   const copied = await until(() => document.body.dataset.copied);
   check('Markdown keeps the day at the end of the line', copied && copied.includes(`- [ ] Send the update list 📅 ${iso(new Date())}`) && copied.includes(`- [ ] Look at the import story 📅 ${iso(dayFrom(-1))}`), copied);
+  check('…and the time of a reminder after the day', copied && copied.includes(`- [ ] Book the room 📅 ${iso(dayFrom(3))} ⏰ 09:30`), copied);
 
   // Home: those with a day come first.
   await oneTab();

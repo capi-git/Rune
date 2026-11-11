@@ -133,9 +133,21 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
             return;
         }
         let mut since_plan = 0u32;
+        let mut ticks = 0u32;
+        let mut todos_seen = String::new();
         loop {
             crate::ai::sleep_ms(500).await;
             since_plan += 1;
+            ticks += 1;
+            // A to-do's reminder came, changed or went (here, in another
+            // window, or by the AI): plan again.
+            if ticks % 4 == 0 {
+                let seen = format!("{:?}", state.todo_reminders().iter().map(|r| (&r.1, r.4)).collect::<Vec<_>>());
+                if seen != todos_seen {
+                    todos_seen = seen;
+                    crate::notify::mark_dirty();
+                }
+            }
             // Replan when events change (debounced), and hourly so the
             // two-week window keeps moving.
             if (since_plan >= 4 && crate::notify::take_dirty()) || since_plan >= 7200 {
@@ -143,14 +155,15 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
                 // Every event and repeat in the next fortnight (and a day).
                 let now = crate::model::now_ms();
                 let events = crate::repeat::expand(state.events.peek().values(), now, now + 15 * 24 * crate::when::HOUR);
-                crate::notify::plan_reminders(events).await;
+                crate::notify::plan_reminders(events, state.todo_reminders()).await;
             }
             if let Some(id) = crate::notify::take_clicked() {
                 let window = dioxus::desktop::window();
                 window.set_visible(true);
                 window.set_focus();
                 if let Some(page) = id.strip_prefix("page:") {
-                    state.open_page(page);
+                    // ("page:<id>#todo:…": a to-do's reminder.)
+                    state.open_page(page.split('#').next().unwrap_or(page));
                 } else if let Some(page) = id.strip_prefix("recap:") {
                     // "The meeting ended": its page, with the AI box to take a recap.
                     state.open_page(page);

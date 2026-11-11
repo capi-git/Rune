@@ -221,8 +221,20 @@ fn post(identifier: &str, title: &str, body: &str, after_secs: Option<f64>) {
     UNUserNotificationCenter::currentNotificationCenter().addNotificationRequest_withCompletionHandler(&request, None);
 }
 
-/// Hand macOS the reminders for the coming two weeks (replacing the old plan).
-pub async fn plan_reminders(events: Vec<Event>) {
+/// A to-do's reminder: its page, its line, the page's name, the words, when.
+pub type TodoReminder = (String, String, String, String, i64);
+
+/// What a to-do's reminder says: (its id, title, body). A click on it opens
+/// the page (see `take_clicked`: the id starts with "page:").
+fn todo_notice(r: &TodoReminder) -> (String, String, String) {
+    let (page, block, page_title, words, at) = r;
+    let title = if words.trim().is_empty() { page_title.clone() } else { words.trim().to_string() };
+    (format!("page:{page}#todo:{block}:{at}"), title, format!("Reminder · {} · {page_title}", when::time_label(*at)))
+}
+
+/// Hand macOS the reminders for the coming two weeks (replacing the old
+/// plan): those of events, and those of to-dos.
+pub async fn plan_reminders(events: Vec<Event>, todos: Vec<TodoReminder>) {
     if !available() {
         return;
     }
@@ -232,8 +244,9 @@ pub async fn plan_reminders(events: Vec<Event>) {
         .filter_map(|e| fire_time(&e).map(|t| (t, e)))
         .filter(|(t, _)| *t > now && *t < now + PLAN_DAYS * 24 * when::HOUR)
         .collect();
+    let todos: Vec<TodoReminder> = todos.into_iter().filter(|r| r.4 > now && r.4 < now + PLAN_DAYS * 24 * when::HOUR).collect();
     let mut state = permission().await;
-    if state == Permission::NotAsked && !due.is_empty() && !ASKED.with(|a| a.get()) {
+    if state == Permission::NotAsked && (!due.is_empty() || !todos.is_empty()) && !ASKED.with(|a| a.get()) {
         state = request_permission().await;
     }
     let center = UNUserNotificationCenter::currentNotificationCenter();
@@ -242,10 +255,18 @@ pub async fn plan_reminders(events: Vec<Event>) {
     if state != Permission::Allowed {
         return;
     }
-    due.sort_by_key(|(t, _)| *t);
-    for (t, e) in due.into_iter().take(MAX_PLANNED) {
-        let id = format!("{EVENT_PREFIX}{}:{}:{}", e.id, e.start, e.remind.unwrap_or(0));
-        post(&id, e.display_title(), &reminder_text(&e), Some((t - now) as f64 / 1000.0));
+    // The soonest first, of both kinds, as many as macOS keeps.
+    let mut plan: Vec<(i64, String, String, String)> = due
+        .into_iter()
+        .map(|(t, e)| (t, format!("{EVENT_PREFIX}{}:{}:{}", e.id, e.start, e.remind.unwrap_or(0)), e.display_title().to_string(), reminder_text(&e)))
+        .collect();
+    plan.extend(todos.iter().map(|r| {
+        let (id, title, body) = todo_notice(r);
+        (r.4, id, title, body)
+    }));
+    plan.sort_by_key(|p| p.0);
+    for (t, id, title, body) in plan.into_iter().take(MAX_PLANNED) {
+        post(&id, &title, &body, Some((t - now) as f64 / 1000.0));
     }
 }
 
@@ -274,6 +295,16 @@ pub fn take_dirty() -> bool {
 mod tests {
     use super::*;
     use chrono::{NaiveDate, NaiveTime};
+
+    #[test]
+    fn a_to_do_reminder_says_what_and_opens_its_page() {
+        let at = when::at(NaiveDate::from_ymd_opt(2026, 11, 12).unwrap(), NaiveTime::from_hms_opt(9, 0, 0).unwrap());
+        let (id, title, body) = todo_notice(&("p1".into(), "b1".into(), "Plan".into(), "Call Sam".into(), at));
+        assert!(id.starts_with("page:p1#todo:b1:"), "{id}");
+        assert_eq!((title.as_str(), body.as_str()), ("Call Sam", "Reminder · 9 AM · Plan"));
+        // A to-do with no words is named by its page.
+        assert_eq!(todo_notice(&("p1".into(), "b2".into(), "Plan".into(), " ".into(), at)).1, "Plan");
+    }
 
     #[test]
     fn reminders_fire_before_the_start() {

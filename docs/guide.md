@@ -59,8 +59,11 @@ not touched by an update.
    beside it opens the call and the notes of the event. The calendar shows
    the events of every space, each with a small mark for its space; the
    control at its top shows this space only.
-7. **To-dos with a day.** On a to-do, press **Give it a day**. It then shows
-   on Home and in the calendar. Drag it onto a time to plan it.
+7. **To-dos with a day, and reminders.** On a to-do, press **Give it a day**.
+   It then shows on Home and in the calendar. Drag it onto a time to plan it.
+   Set **Remind me at** in the same menu, and Rune sends a notification at
+   that time (a click on it opens the page). You can also ask the AI:
+   "remind me to call the dentist tomorrow at 9".
 8. **Meetings.** When a call starts, Rune makes a notes page for it: in Teams,
    Zoom, Webex, Slack, Discord or FaceTime, or a call in Chrome, Arc, Edge,
    Brave or Firefox (you can turn this off in Settings → Notifications). For

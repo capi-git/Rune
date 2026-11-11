@@ -1517,6 +1517,9 @@ const placeBlockMenu = (menu) => {
   const cb = containingBlock(menu);
   menu.classList.add('anchored');
   const z = zoomOf(menu);
+  // As tall as all its items, up to the height of the window: no scroll
+  // inside it while the window has room.
+  menu.style.maxHeight = (innerHeight - 16) / z + 'px';
   const w = menu.offsetWidth * z;
   const h = menu.offsetHeight * z;
   // The first line of the row (a toggle with its children is a tall row).

@@ -26,6 +26,8 @@ Page content is Markdown: # / ## / ### headings, paragraphs, - bullets, 1. numbe
 ``` code fences and --- dividers; indent list items by two spaces to nest them. \
 A line that is exactly [Title](notion2://page/<id>) is a link to another page; sub-pages appear in their parent this way. \
 A to-do can end with the day it is due, as 📅 2026-11-12 (the sign, then the date): it then shows in that day of the calendar. Keep that ending when you rewrite a to-do; leave it out to take the day away. \
+After the day it can have a reminder, as 📅 2026-11-12 ⏰ 09:00 (a time of that day, 24 hours): Rune sends a notification then. \
+When the person asks to be reminded of something, make it a to-do with its day and that time (or set them with set_todo). \
 A picture or a drawing shows in read_page as a line [Image](notion2://block/<id>) or [Drawing](notion2://block/<id>): keep that line as it is to keep the picture or drawing in its place when you replace a page (one that you leave out is kept at the end of the page, never lost). \
 Tables are Markdown pipe tables. A table's columns can have kinds, given on a comment line right under it, one part for each column: \
 <!-- columns: text count | date | choice | number km sum | number USD sum | time sum | pace average | checkbox checked | formula USD sum = Price * Qty --> \
@@ -687,8 +689,13 @@ impl Server {
             Some("") => Some(None),
             Some(day) => Some(Some(crate::when::parse_date(day).ok_or_else(|| format!("due must be a day as 2026-11-12, or empty to take the day away; not “{day}”."))?)),
         };
-        if done.is_none() && due.is_none() {
-            return Err("Say what to change: done (true or false), due (a day as 2026-11-12, or empty), or both.".into());
+        let remind = match arg_str(args, "remind").map(str::trim) {
+            None => None,
+            Some("") => Some(None),
+            Some(time) => Some(Some(crate::model::Block::remind_from_column(time).ok_or_else(|| format!("remind must be a time as 09:00 or 14:30, or empty to take the reminder away; not “{time}”."))?)),
+        };
+        if done.is_none() && due.is_none() && remind.is_none() {
+            return Err("Say what to change: done (true or false), due (a day as 2026-11-12, or empty), remind (a time as 09:00, or empty), or more of them.".into());
         }
         let (pages, blocks) = self.load()?;
         live_page(&pages, &id)?;
@@ -705,6 +712,17 @@ impl Server {
         }
         if let Some(due) = due {
             page_blocks[i].due = due;
+            if due.is_none() {
+                page_blocks[i].remind = None;
+            }
+        }
+        if let Some(remind) = remind {
+            page_blocks[i].remind = remind;
+            // A reminder needs a day: today, or tomorrow when the time has passed.
+            if let (Some(t), None) = (remind, page_blocks[i].due) {
+                let today = crate::when::today();
+                page_blocks[i].due = Some(if crate::when::at(today, t) > crate::model::now_ms() { today } else { crate::when::next_day(today) });
+            }
         }
         let todo = &page_blocks[i];
         let answer = json!({
@@ -712,6 +730,7 @@ impl Server {
             "todo": todo.plain_text(),
             "done": todo.checked,
             "due": todo.due.map(|d| d.format("%Y-%m-%d").to_string()),
+            "remind": todo.remind.map(|t| t.format("%H:%M").to_string()),
         });
         self.save_blocks(&id, &page_blocks)?;
         Ok(pretty(&answer))
@@ -1251,15 +1270,16 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "set_todo",
-            "title": "Tick a to-do or set its day",
-            "description": "Tick or clear a to-do of a page, or set or take away the day it is due, without writing the page again. The to-do is found by words of its text.",
+            "title": "Tick a to-do, set its day or a reminder",
+            "description": "Tick or clear a to-do of a page, set or take away the day it is due, or set a reminder at a time of that day (Rune sends a notification then), without writing the page again. The to-do is found by words of its text.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "page_id": page_id,
                     "text": { "type": "string", "description": "Words of the to-do's text." },
                     "done": { "type": "boolean", "description": "true to tick it, false to clear it." },
-                    "due": { "type": "string", "description": "The day it is due, as 2026-11-12; empty to take the day away." }
+                    "due": { "type": "string", "description": "The day it is due, as 2026-11-12; empty to take the day away." },
+                    "remind": { "type": "string", "description": "A reminder at this time of its day, as 09:00 or 14:30 (with no day: today, or tomorrow when the time has passed); empty to take the reminder away." }
                 },
                 "required": ["page_id", "text"]
             },
@@ -1823,6 +1843,15 @@ mod tests {
         assert_eq!(json_of(&todo)["todo"], "Easy run, 4.5 km");
         let (page, _) = call(&mut s, "read_page", json!({ "page_id": log }));
         assert!(page.contains("- [x] Easy run, 4.5 km 📅 2026-12-01"), "{page}");
+        // A reminder at a time of its day; then taken away.
+        let (todo, err) = call(&mut s, "set_todo", json!({ "page_id": log, "text": "easy run", "remind": "07:15" }));
+        assert!(!err && json_of(&todo)["remind"] == "07:15", "{todo}");
+        let (page, _) = call(&mut s, "read_page", json!({ "page_id": log }));
+        assert!(page.contains("- [x] Easy run, 4.5 km 📅 2026-12-01 ⏰ 07:15"), "{page}");
+        let (wrong, err) = call(&mut s, "set_todo", json!({ "page_id": log, "text": "easy run", "remind": "soon" }));
+        assert!(err && wrong.contains("remind must be a time"), "{wrong}");
+        let (todo, _) = call(&mut s, "set_todo", json!({ "page_id": log, "text": "easy run", "remind": "" }));
+        assert!(json_of(&todo)["remind"].is_null(), "{todo}");
         // (A day is written the way its column writes, as if typed there.)
         let day = crate::table::format_day(chrono::NaiveDate::from_ymd_opt(2026, 11, 10).unwrap(), crate::when::today());
         assert!(page.contains(&format!("| {day} | 3.5 | 19:30 | 5:34 |")), "{page}");
