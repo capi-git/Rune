@@ -296,6 +296,21 @@ await run('Block menu', async () => {
   check('Block menu item is clickable (not covered)', item && onTop(item));
   key(document.body, 'Escape');
   await until(() => !$('.block-menu'));
+  // The menu of a line at the foot of the window opens where all of it is seen.
+  const rows = $$('.pane .blocks > .block-row').filter((r) => r.querySelector('.handle'));
+  const low = rows[rows.length - 1];
+  if (low) {
+    low.scrollIntoView({ block: 'end' });
+    await wait(200);
+    low.querySelector('.handle').click();
+    const m = await until(() => $('.block-menu.anchored'), 3000);
+    await wait(200);
+    const r = m && m.getBoundingClientRect();
+    const items = m ? $$('.menu-item', m) : [];
+    check('The menu of a line at the foot of the window is all in the window, with no scroll', r && r.top >= 0 && r.bottom <= innerHeight && items.length && onTop(items[items.length - 1]), r ? `${Math.round(r.top)}..${Math.round(r.bottom)} of ${innerHeight}, line at ${Math.round(low.getBoundingClientRect().top)}` : 'no menu');
+    key(document.body, 'Escape');
+    await until(() => !$('.block-menu'));
+  }
 });
 
 await run('Icon picker', async () => {
@@ -3212,6 +3227,32 @@ await run('Select all, copy and delete', async () => {
   key(document.body, 'Escape');
   check('Escape lets them go', await until(() => picked().length === 0, 3000));
 
+  // A drag of the text selection from one line into another picks the lines it goes over.
+  {
+    const lines = $$('.blk', pane());
+    const at = (el, dy = 0) => {
+      const r = el.getBoundingClientRect();
+      return { clientX: r.left + 20, clientY: r.top + r.height / 2 + dy };
+    };
+    const move = (el, type, opts) => el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, ...opts }));
+    move(lines[0], 'mousedown', { ...at(lines[0]), buttons: 1 });
+    move(lines[0], 'mousemove', { ...at(lines[0]), buttons: 1 });
+    await wait(80);
+    check('A drag inside one line does not pick it', picked().length === 0);
+    move(lines[1], 'mousemove', { ...at(lines[1]), buttons: 1 });
+    check('Dragged into another line, the drag picks both lines and what is between them', await until(() => picked().length === 3, 3000), String(picked().length));
+    move(lines[0], 'mousemove', { ...at(lines[0]), buttons: 1 });
+    check('Dragged back into the first line, it is a text selection again', await until(() => picked().length === 0, 3000), String(picked().length));
+    move($('.kind-divider', pane()), 'mousemove', { ...at($('.kind-divider', pane())), buttons: 1 });
+    await until(() => picked().length === 2, 3000);
+    window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0 }));
+    delete document.body.dataset.copied;
+    cmd(document.body, 'c');
+    check('Let go, ⌘C copies the picked lines', await until(() => document.body.dataset.copied === 'First line\n\n---', 3000), JSON.stringify(document.body.dataset.copied));
+    key(document.body, 'Escape');
+    await until(() => picked().length === 0, 3000);
+  }
+
   // A press on a block that is not text picks it; Delete takes it out.
   const mouse = (el, type, opts = {}) => el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, ...opts }));
   mouse($('.kind-divider .divider', pane()), 'mousedown');
@@ -5146,7 +5187,10 @@ await run('The graph of pages', async () => {
   check('Each page of the space is a dot', a >= 0 && b >= 0 && at('Getting Started') >= 0 && g.nodes.length === data.nodes.length && data.nodes.length === new Set(data.nodes.map((n) => n.id)).size, `${data.nodes.length} dots`);
   check('A link from one page to another is a line between their dots', data.edges.some((e) => e[0] === Math.min(a, b) && e[1] === Math.max(a, b) && e[2] === 0), JSON.stringify(data.edges));
   const links = data.edges.filter((e) => e[2] === 0).length;
-  check('The corner says how many pages and links there are', $('.graph-count').textContent === `${data.nodes.length} pages · ${links} ${links === 1 ? 'link' : 'links'}`, $('.graph-count').textContent);
+  const nested = data.edges.filter((e) => e[2] === 1).length;
+  const counted = `${data.nodes.length} pages${nested ? ` · ${nested} ${nested === 1 ? 'sub-page' : 'sub-pages'}` : ''} · ${links} ${links === 1 ? 'link' : 'links'}`;
+  check('The corner says how many pages, sub-pages and links there are', $('.graph-count').textContent === counted, `${$('.graph-count').textContent} / ${counted}`);
+  check('Every dot has a colour: its icon’s, or its group’s', data.nodes.every((n) => n.c), data.nodes.filter((n) => !n.c).map((n) => n.t).join(', '));
   check('The same is there as words for a screen reader', $$('.graph-words li').some((li) => li.textContent === 'Graph A: joined to Graph B') && $('.graph-canvas').getAttribute('role') === 'img');
 
   // It comes to rest, in view, with no two dots in one place.
@@ -5221,6 +5265,15 @@ await run('The graph of pages', async () => {
   $$('.tile').find((t) => t.title.startsWith('Graph')).click();
   const again = await until(() => $('.graph[data-graph]')?._graph?.fitted && $('.graph[data-graph]'));
   check('A new page is a dot the next time', again && JSON.parse(again.dataset.graph).nodes.some((n) => n.t === 'Graph C') && again._graph.nodes.length === data.nodes.length + 1);
+  await oneTab();
+  // The graph has one tab at most: opening it again from another tab goes to it.
+  $$('.tile').find((t) => t.title.startsWith('Graph')).click();
+  await until(() => $('.tab.active .tab-title')?.textContent === 'Graph', 3000);
+  treeItem('Graph A').click();
+  await until(() => $('.tab.active .tab-title')?.textContent === 'Graph A', 3000);
+  $$('.tile').find((t) => t.title.startsWith('Graph')).click();
+  const titles = () => $$('.tab .tab-title').map((t) => t.textContent);
+  check('Opening the graph again goes to its tab, and the page keeps its own', await until(() => $('.tab.active .tab-title')?.textContent === 'Graph' && titles().filter((t) => t === 'Graph').length === 1 && titles().includes('Graph A'), 3000), titles().join(' | '));
   await oneTab();
 });
 

@@ -373,15 +373,32 @@ pub enum VoiceFor {
 /// The tabs of one space, and which of them is in front.
 pub type TabSet = (Vec<Tab>, usize);
 
-/// A tab that only shows Home (one pane, on Home).
-fn is_home_tab(tab: &Tab) -> bool {
-    tab.panes.len() == 1 && *tab.panes[0].route() == Route::Home
+/// The views that have one tab at most: Home, the calendar, the graph.
+const ONE_TAB_VIEWS: [Route; 3] = [Route::Home, Route::Calendar, Route::Graph];
+
+/// The view a tab shows alone (one pane, on Home, the calendar or the graph).
+fn view_tab(tab: &Tab) -> Option<&Route> {
+    (tab.panes.len() == 1).then(|| tab.panes[0].route()).filter(|r| ONE_TAB_VIEWS.contains(r))
 }
 
-/// One Home tab at most in a row of tabs: the one in front if it is one,
-/// else the first. Says whether a tab went.
+/// A tab that only shows Home (one pane, on Home).
+fn is_home_tab(tab: &Tab) -> bool {
+    view_tab(tab) == Some(&Route::Home)
+}
+
+/// One tab at most for each of Home, the calendar and the graph in a row
+/// of tabs: the one in front if it is one, else the first. Says whether a
+/// tab went.
 fn one_home_tab(tabs: &mut Vec<Tab>, active: &mut usize) -> bool {
-    let homes: Vec<usize> = (0..tabs.len()).filter(|&i| is_home_tab(&tabs[i])).collect();
+    let mut any = false;
+    for view in ONE_TAB_VIEWS {
+        any |= one_tab_of(tabs, active, &view);
+    }
+    any
+}
+
+fn one_tab_of(tabs: &mut Vec<Tab>, active: &mut usize, view: &Route) -> bool {
+    let homes: Vec<usize> = (0..tabs.len()).filter(|&i| view_tab(&tabs[i]) == Some(view)).collect();
     if homes.len() < 2 {
         return false;
     }
@@ -1550,6 +1567,11 @@ impl Graph {
         self.edges.iter().filter(|e| !e.2).count()
     }
 
+    /// How many of the edges are a page inside another (and no link).
+    pub fn nested(&self) -> usize {
+        self.edges.iter().filter(|e| e.2).count()
+    }
+
     /// The names of the pages joined to the page at `i`.
     pub fn joined_to(&self, i: usize) -> Vec<&str> {
         self.edges
@@ -1585,7 +1607,9 @@ pub fn page_graph(pages: &HashMap<Id, Page>, blocks: &HashMap<Id, Vec<Block>>, s
         }
     };
     for (i, p) in shown.iter().enumerate() {
-        if let Some(parent) = p.parent_id.as_deref().and_then(|id| at.get(id)) {
+        // The page of a table's row is an entry of that table, not a page
+        // inside the page: it gets no line to it.
+        if let Some(parent) = p.parent_id.as_deref().and_then(|id| at.get(id)).filter(|_| p.row_of.is_none()) {
             join(*parent, i, true);
         }
         for b in blocks.get(&p.id).map(|b| b.as_slice()).unwrap_or_default() {
@@ -1608,15 +1632,42 @@ pub fn page_graph(pages: &HashMap<Id, Page>, blocks: &HashMap<Id, Vec<Block>>, s
             }
         }
     }
-    let nodes = shown
+    // A page's colour: that of its icon, else of the nearest page it is
+    // inside that has one, else one for the page at the top of its tree (in
+    // the order of the sidebar's pages). So a page and the pages in it are
+    // one group of one colour.
+    const GROUP_COLORS: [&str; 8] = ["blue", "purple", "green", "orange", "pink", "yellow", "red", "brown"];
+    let icon_color = |p: &Page| p.icon.as_deref().and_then(|i| i.split_once(':')).map(|(_, c)| c.to_string()).filter(|c| !c.is_empty() && c != "gray");
+    let mut tops: Vec<&Page> = shown.iter().copied().filter(|p| p.parent_id.as_deref().and_then(|id| at.get(id)).is_none()).collect();
+    tops.sort_by(|a, b| a.position.total_cmp(&b.position).then(a.created_at.cmp(&b.created_at)));
+    let color_of = |p: &Page| -> String {
+        let mut here = p;
+        for _ in 0..64 {
+            if let Some(c) = icon_color(here) {
+                return c;
+            }
+            match here.parent_id.as_deref().and_then(|id| at.get(id)) {
+                Some(&up) => here = shown[up],
+                None => break,
+            }
+        }
+        let top = tops.iter().position(|t| t.id == here.id).unwrap_or(0);
+        GROUP_COLORS[top % GROUP_COLORS.len()].to_string()
+    };
+    // The pages of table rows show only when a link joins them to a page.
+    let linked: std::collections::HashSet<usize> = pairs.keys().flat_map(|&(a, b)| [a, b]).collect();
+    let kept: Vec<usize> = (0..shown.len()).filter(|&i| shown[i].row_of.is_none() || linked.contains(&i)).collect();
+    let new_at: HashMap<usize, usize> = kept.iter().enumerate().map(|(n, &i)| (i, n)).collect();
+    let nodes = kept
         .iter()
-        .map(|p| GraphNode {
-            id: p.id.clone(),
-            title: p.display_title().to_string(),
-            color: p.icon.as_deref().and_then(|i| i.split_once(':')).map(|(_, c)| c.to_string()).unwrap_or_default(),
+        .map(|&i| GraphNode {
+            id: shown[i].id.clone(),
+            title: shown[i].display_title().to_string(),
+            color: color_of(shown[i]),
         })
         .collect();
-    Graph { nodes, edges: pairs.into_iter().map(|((a, b), nested)| (a, b, nested)).collect() }
+    let edges = pairs.into_iter().filter_map(|((a, b), nested)| Some((*new_at.get(&a)?, *new_at.get(&b)?, nested))).collect();
+    Graph { nodes, edges }
 }
 
 /// The page and every page nested under it.
@@ -2131,7 +2182,7 @@ impl AppState {
     fn save_ui(&self) {
         let doubled = {
             let ui = self.ui.peek();
-            let twice = |tabs: &Vec<Tab>| tabs.iter().filter(|t| is_home_tab(t)).count() > 1;
+            let twice = |tabs: &Vec<Tab>| ONE_TAB_VIEWS.iter().any(|v| tabs.iter().filter(|t| view_tab(t) == Some(v)).count() > 1);
             twice(&ui.tabs) || ui.parked.values().any(|set| twice(&set.0))
         };
         if doubled {
@@ -3279,10 +3330,10 @@ impl AppState {
     // ----- navigation ----------------------------------------------------
 
     pub fn navigate(mut self, route: Route) {
-        if route == Route::Home {
+        if ONE_TAB_VIEWS.contains(&route) {
             let other = {
                 let ui = self.ui.peek();
-                ui.tabs.iter().position(is_home_tab).filter(|&i| i != ui.active.min(ui.tabs.len() - 1))
+                ui.tabs.iter().position(|t| view_tab(t) == Some(&route)).filter(|&i| i != ui.active.min(ui.tabs.len() - 1))
             };
             if let Some(i) = other {
                 self.select_tab(i);
@@ -3634,6 +3685,13 @@ impl AppState {
     pub fn open_in_new_tab(mut self, route: Route) {
         if route == Route::Home {
             return self.new_tab();
+        }
+        // The calendar and the graph have one tab at most too: it comes forward.
+        let there = self.ui.peek().tabs.iter().position(|t| view_tab(t) == Some(&route));
+        if let Some(i) = there {
+            self.select_tab(i);
+            self.flash_active_tab();
+            return;
         }
         self.clear_slash();
         let made = self.enter_space_of(&route);
@@ -8888,8 +8946,24 @@ mod tests {
         let pages: HashMap<Id, Page> = [&plan, &notes, &ideas, &alone, &gone, &other].into_iter().map(|p| (p.id.clone(), p.clone())).collect();
         let g = page_graph(&pages, &blocks, "home");
         assert_eq!(g.nodes.iter().map(|n| n.title.as_str()).collect::<Vec<_>>(), ["Plan", "Notes", "Ideas", "Alone"]);
-        assert_eq!(g.nodes[0].color, "blue");
-        assert_eq!(g.nodes[3].color, "");
+        // The pages of a table's rows are no pages inside their page: a row
+        // page shows only when a page links to it, with that link.
+        let mut row = named("AAPL", Some(&plan), 7);
+        row.row_of = Some("table/r1".into());
+        let mut linked_row = named("TSLA", Some(&plan), 8);
+        linked_row.row_of = Some("table/r2".into());
+        let mut with_rows = pages.clone();
+        with_rows.insert(row.id.clone(), row.clone());
+        with_rows.insert(linked_row.id.clone(), linked_row.clone());
+        let mut blocks_rows = blocks.clone();
+        blocks_rows.insert(alone.id.clone(), vec![Block::text(link(&linked_row))]);
+        let r = page_graph(&with_rows, &blocks_rows, "home");
+        assert_eq!(r.nodes.iter().map(|n| n.title.as_str()).collect::<Vec<_>>(), ["Plan", "Notes", "Ideas", "Alone", "TSLA"]);
+        assert!(r.edges.contains(&(3, 4, false)), "{:?}", r.edges);
+        assert!(!r.edges.iter().any(|&(a, b, nested)| nested && (a == 4 || b == 4)), "no nesting line to a row: {:?}", r.edges);
+        // Its icon's colour; a page in it takes that colour; a page at the top
+        // with none takes one for its group (Plan, Ideas, Alone: the 1st, 2nd, 3rd).
+        assert_eq!(g.nodes.iter().map(|n| n.color.as_str()).collect::<Vec<_>>(), ["blue", "blue", "purple", "green"]);
         // Plan–Notes is nesting only; Plan–Ideas and Notes–Ideas are links, each one time.
         assert_eq!(g.edges, vec![(0, 1, true), (0, 2, false), (1, 2, false)]);
         assert_eq!(g.links(), 2);
@@ -9039,6 +9113,12 @@ mod tests {
         assert!(one_home_tab(&mut tabs, &mut active));
         assert_eq!((tabs.len(), tabs[active].id.clone()), (2, front));
         assert!(is_home_tab(&tabs[0]));
+        // Two graph tabs and two calendar tabs: one of each stays.
+        let mut tabs = vec![Tab::new(Route::Graph), page("a"), Tab::new(Route::Graph), Tab::new(Route::Calendar), Tab::new(Route::Calendar)];
+        let mut active = 1;
+        assert!(one_home_tab(&mut tabs, &mut active));
+        assert_eq!(tabs.iter().map(|t| t.panes[0].route().clone()).collect::<Vec<_>>(), vec![Route::Graph, Route::Page("a".into()), Route::Calendar]);
+        assert_eq!(active, 1);
         // A tab with two panes, one of them on Home, is no Home tab.
         let mut two = Tab::new(Route::Home);
         two.panes.push(Pane::new(Route::Page("x".into())));

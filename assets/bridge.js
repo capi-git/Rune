@@ -1507,6 +1507,27 @@ const placeSubMenu = (sub) => {
   if (over > 0) sub.style.top = `${parseFloat(getComputedStyle(sub).top) - over / zoomOf(sub)}px`;
 };
 const RAISED_MENUS = '.table-menu .column-sub, .own-menu, .kinds-menu';
+// The menu of a line (its handle, or a right click): under the line, at the
+// handle, and over the line when there is no room under it, so all of it is
+// in the window with no scroll.
+const placeBlockMenu = (menu) => {
+  const row = menu.parentElement;
+  if (!row) return;
+  const a = row.getBoundingClientRect();
+  const cb = containingBlock(menu);
+  menu.classList.add('anchored');
+  const z = zoomOf(menu);
+  const w = menu.offsetWidth * z;
+  const h = menu.offsetHeight * z;
+  // The first line of the row (a toggle with its children is a tall row).
+  const line = Math.min(a.height, 28 * z);
+  const left = Math.max(8, Math.min(a.left - 50 * z, innerWidth - w - 8));
+  let top = a.top + line;
+  if (top + h > innerHeight - 8) top = a.top - h - 4 >= 8 ? a.top - h - 4 : Math.max(8, innerHeight - h - 8);
+  menu.style.left = (left - cb.left) / z + 'px';
+  menu.style.top = (top - cb.top) / z + 'px';
+  menu.style.right = 'auto';
+};
 const TABLE_MENUS = '.table-block .popover:not(.column-sub)';
 
 // ----- the event panel's menus: the chosen row takes the keyboard -------------
@@ -2872,6 +2893,70 @@ document.addEventListener(
   true,
 );
 
+// A drag of the text selection out of one line and into another picks the
+// lines it goes over, as whole blocks (a line's text cannot be selected
+// together with another's): then ⌘C copies them, ⌘X cuts them, Delete takes
+// them out. Back in the first line, it is a text selection again.
+let dragPick = null;
+document.addEventListener(
+  'mousedown',
+  (e) => {
+    dragPick = null;
+    if (e.button !== 0 || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey) return;
+    const blk = blockOf(e.target);
+    const row = blk && blk.closest('.block-row[data-id]');
+    if (!row || !row.dataset.page) return;
+    dragPick = { page: row.dataset.page, id: row.dataset.id, x: e.clientX, y: e.clientY, at: '', on: false };
+  },
+  true,
+);
+document.addEventListener(
+  'mousemove',
+  (e) => {
+    const d = dragPick;
+    if (!d || !(e.buttons & 1)) return;
+    const under = document.elementFromPoint(e.clientX, e.clientY);
+    const row = under && under.closest && under.closest('.block-row[data-id]');
+    if (!row || row.dataset.page !== d.page) return;
+    const id = row.dataset.id;
+    if (id === d.at) return;
+    d.at = id;
+    if (id === d.id) {
+      // Back in the line it began in: its text again.
+      if (d.on) {
+        d.on = false;
+        document.body.classList.remove('drag-picking');
+        send({ t: 'pick_clear' });
+      }
+      return;
+    }
+    if (!d.on) {
+      d.on = true;
+      document.body.classList.add('drag-picking');
+      const a = document.activeElement;
+      if (a && isBlock(a)) a.blur();
+      hideBar();
+    }
+    const sel = getSelection();
+    if (sel) sel.removeAllRanges();
+    send({ t: 'pick', page: d.page, id: d.id, extend: false });
+    send({ t: 'pick', page: d.page, id, extend: true });
+  },
+  true,
+);
+window.addEventListener(
+  'mouseup',
+  () => {
+    if (dragPick && dragPick.on) {
+      const sel = getSelection();
+      if (sel) sel.removeAllRanges();
+    }
+    dragPick = null;
+    document.body.classList.remove('drag-picking');
+  },
+  true,
+);
+
 // ----- the AI box: a click outside puts it away while nothing is typed in it ----------
 // On the click, not on the press: a press on a line of the page must do its
 // own work first.
@@ -3214,6 +3299,7 @@ new MutationObserver((mutations) => {
       if (n.nodeType !== 1) return;
       if (n.tagName === 'TEXTAREA' || (n.querySelector && n.querySelector('textarea.title-input, textarea.ed-title'))) queueSizeAll();
       const menus = n.matches && n.matches('.sidebar-menu, .tab-menu, .due-menu, .ed-menu') ? [n] : n.querySelectorAll ? n.querySelectorAll('.sidebar-menu, .tab-menu, .due-menu, .ed-menu') : [];
+      (n.matches && n.matches('.block-menu') ? [n] : n.querySelectorAll ? [...n.querySelectorAll('.block-menu')] : []).forEach(placeBlockMenu);
       menus.forEach(anchorMenu);
       menus.forEach(focusEdMenu);
       // The menus that hang from the cells of a table; one whose rows changed keeps its place in the window.
@@ -3343,8 +3429,9 @@ const startGraph = (el) => {
         continue;
       }
       // A soft pull to the middle keeps the dots with no lines in view.
-      p.vx = (p.vx - p.x * 0.03 * a) * 0.78;
-      p.vy = (p.vy - p.y * 0.03 * a) * 0.78;
+      // (Stronger for a page with no lines: groups and lone pages stay close.)
+      p.vx = (p.vx - p.x * (p.n ? 0.075 : 0.1) * a) * 0.78;
+      p.vy = (p.vy - p.y * (p.n ? 0.075 : 0.1) * a) * 0.78;
       p.x += p.vx;
       p.y += p.vy;
     }
@@ -3365,7 +3452,7 @@ const startGraph = (el) => {
       y1 = Math.max(y1, n.y);
     }
     // Room at the edges for the dots themselves and the names under them.
-    const k = Math.max(0.12, Math.min(1.5, Math.min((g.w - 110) / (x1 - x0 + 1), (g.h - 130) / (y1 - y0 + 1))));
+    const k = Math.max(0.12, Math.min(1.15, Math.min((g.w - 160) / (x1 - x0 + 1), (g.h - 170) / (y1 - y0 + 1))));
     return { k, x: -((x0 + x1) / 2) * k, y: -((y0 + y1) / 2) * k + 8 };
   };
   const fit = () => {
@@ -3404,7 +3491,7 @@ const startGraph = (el) => {
     ctx.strokeStyle = ink;
     for (const [a, b, nested] of g.edges) {
       const on = focus >= 0 ? a === focus || b === focus : found ? found[a] && found[b] : false;
-      ctx.globalAlpha = on ? 0.75 : picking ? 0.06 : nested ? 0.2 : 0.3;
+      ctx.globalAlpha = on ? 0.8 : picking ? 0.06 : nested ? 0.28 : 0.4;
       ctx.setLineDash(nested ? [3, 4] : []);
       ctx.beginPath();
       ctx.moveTo(X(g.nodes[a]), Y(g.nodes[a]));
@@ -3416,7 +3503,15 @@ const startGraph = (el) => {
     const scale = dotScale();
     g.nodes.forEach((n, i) => {
       const color = tint(n.c);
-      ctx.globalAlpha = lit(i) ? (color ? 1 : 0.8) : 0.16;
+      const on = lit(i);
+      if (on && color) {
+        ctx.globalAlpha = 0.22;
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(X(n), Y(n), n.r * scale + 5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = on ? (color ? 1 : 0.85) : 0.16;
       ctx.fillStyle = color || ink;
       ctx.beginPath();
       ctx.arc(X(n), Y(n), n.r * scale, 0, Math.PI * 2);
@@ -3433,7 +3528,7 @@ const startGraph = (el) => {
     });
     // The names: all of them when there are few pages or the view is close;
     // else those of the pages with many lines, and of what is picked.
-    ctx.font = '11.5px -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif';
+    ctx.font = '12.5px -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
     ctx.fillStyle = ink;
@@ -3448,11 +3543,11 @@ const startGraph = (el) => {
       if (!strong && (picking || g.view.k < 0.42)) continue;
       const name = n.t.length > 30 ? n.t.slice(0, 29) + '…' : n.t;
       const w = ctx.measureText(name).width;
-      const box = { x0: X(n) - w / 2 - 4, x1: X(n) + w / 2 + 4, y0: Y(n) + n.r * scale + 3, y1: Y(n) + n.r * scale + 20 };
+      const box = { x0: X(n) - w / 2 - 4, x1: X(n) + w / 2 + 4, y0: Y(n) + n.r * scale + 4, y1: Y(n) + n.r * scale + 22 };
       if (i !== focus && taken.some((t) => box.x0 < t.x1 && box.x1 > t.x0 && box.y0 < t.y1 && box.y1 > t.y0)) continue;
       taken.push(box);
-      ctx.globalAlpha = strong ? 1 : 0.62;
-      ctx.fillText(name, X(n), box.y0 + 2);
+      ctx.globalAlpha = strong ? 1 : n.n > 1 ? 0.9 : 0.72;
+      ctx.fillText(name, X(n), box.y0 + 4);
     }
     ctx.globalAlpha = 1;
   };
@@ -3512,7 +3607,7 @@ const startGraph = (el) => {
       near[a].add(b);
       near[b].add(a);
     }
-    for (const n of nodes) n.r = 4.5 + Math.min(7, Math.sqrt(n.n) * 1.8);
+    for (const n of nodes) n.r = 6 + Math.min(9, Math.sqrt(n.n) * 2.6);
     const sig = nodes.map((n) => n.id).join(',') + '|' + edges.map((e) => e.join('-')).join(',');
     const changed = sig !== g.sig;
     g.nodes = nodes;

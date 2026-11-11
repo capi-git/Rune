@@ -1109,13 +1109,31 @@ impl Server {
 // Protocol pieces
 // ---------------------------------------------------------------------------
 
+/// Rune's logo, for the tools that show a connection with its icon (MCP
+/// 2025-11-25 `icons`): the drawing, and a small picture for those that
+/// take no drawings. Both are in the program, so they work offline.
+fn icons() -> Value {
+    use base64::Engine;
+    let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    json!([
+        { "src": format!("data:image/svg+xml;base64,{}", b64(include_bytes!("../assets/logo.svg"))), "mimeType": "image/svg+xml", "sizes": ["any"] },
+        { "src": format!("data:image/png;base64,{}", b64(include_bytes!("../assets/logo-64.png"))), "mimeType": "image/png", "sizes": ["64x64"] },
+    ])
+}
+
 fn initialize(params: &Value) -> Value {
     let requested = params.get("protocolVersion").and_then(Value::as_str).unwrap_or("");
     let version = if SUPPORTED_VERSIONS.contains(&requested) { requested } else { SUPPORTED_VERSIONS[0] };
     json!({
         "protocolVersion": version,
         "capabilities": { "tools": { "listChanged": false } },
-        "serverInfo": { "name": "notion2", "title": "Rune", "version": env!("CARGO_PKG_VERSION") },
+        "serverInfo": {
+            "name": "rune",
+            "title": "Rune",
+            "version": env!("CARGO_PKG_VERSION"),
+            "websiteUrl": "https://github.com/capi-git/Rune",
+            "icons": icons(),
+        },
         "instructions": INSTRUCTIONS,
     })
 }
@@ -1710,7 +1728,7 @@ fn iso8601(ms: i64) -> String {
 /// this program started with `--mcp` (see Settings ▸ AI ▸ Connect AI tools).
 pub mod connect {
     /// The name the tools list the connector under.
-    pub const NAME: &str = "notion2";
+    pub const NAME: &str = "rune";
 
     /// Where this program is (the app's own executable).
     pub fn program() -> String {
@@ -1938,7 +1956,10 @@ mod tests {
         let mut s = server();
         let v = request(&mut s, 1, "initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "t", "version": "1" } }));
         assert_eq!(v["result"]["protocolVersion"], "2025-06-18");
-        assert_eq!(v["result"]["serverInfo"]["name"], "notion2");
+        assert_eq!(v["result"]["serverInfo"]["name"], "rune");
+        let icons = v["result"]["serverInfo"]["icons"].as_array().cloned().unwrap_or_default();
+        assert!(icons.iter().any(|i| i["mimeType"] == "image/png" && i["src"].as_str().is_some_and(|s| s.starts_with("data:image/png;base64,iVBOR"))), "{icons:?}");
+        assert!(icons.iter().any(|i| i["mimeType"] == "image/svg+xml"));
         assert!(v["result"]["capabilities"]["tools"].is_object());
         // Unknown versions get our newest.
         let v = request(&mut s, 2, "initialize", json!({ "protocolVersion": "1999-01-01" }));
@@ -2033,13 +2054,13 @@ mod tests {
         assert_eq!(connect::command(program), "'/Applications/Rune.app/Contents/MacOS/notion2' --mcp");
         assert_eq!(
             connect::claude_code(program),
-            "claude mcp add --scope user notion2 -- '/Applications/Rune.app/Contents/MacOS/notion2' --mcp"
+            "claude mcp add --scope user rune -- '/Applications/Rune.app/Contents/MacOS/notion2' --mcp"
         );
         let parsed: Value = serde_json::from_str(&connect::json(program)).unwrap();
-        assert_eq!(parsed["mcpServers"]["notion2"]["command"], program);
-        assert_eq!(parsed["mcpServers"]["notion2"]["args"], json!(["--mcp"]));
+        assert_eq!(parsed["mcpServers"]["rune"]["command"], program);
+        assert_eq!(parsed["mcpServers"]["rune"]["args"], json!(["--mcp"]));
         let toml = connect::codex(program);
-        assert!(toml.starts_with("[mcp_servers.notion2]\ncommand = \"/Applications/Rune.app/Contents/MacOS/notion2\"\nargs = [\"--mcp\"]"), "{toml}");
+        assert!(toml.starts_with("[mcp_servers.rune]\ncommand = \"/Applications/Rune.app/Contents/MacOS/notion2\"\nargs = [\"--mcp\"]"), "{toml}");
         // A quote in the path cannot end the quoting early.
         assert_eq!(connect::command("/tmp/it's/notion2"), "'/tmp/it'\\''s/notion2' --mcp");
     }

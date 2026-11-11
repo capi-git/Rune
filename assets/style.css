@@ -1875,6 +1875,11 @@ body[data-resizing="rows"] * {
 .slash-menu {
   animation: none;
 }
+/* While a drag picks whole lines, no text is selected under it. */
+.drag-picking .blk {
+  -webkit-user-select: none;
+  user-select: none;
+}
 /* Menus lifted out of scrolling areas by bridge.js. */
 .popover.anchored {
   position: fixed;

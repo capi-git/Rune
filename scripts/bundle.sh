@@ -50,7 +50,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleVersion</key><string>${N2_BUILD_STAMP}</string>
-  <key>CFBundleShortVersionString</key><string>0.1.5</string>
+  <key>CFBundleShortVersionString</key><string>0.1.6</string>
   <key>LSMinimumSystemVersion</key><string>14.2</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSMicrophoneUsageDescription</key><string>Rune listens to your microphone only when you ask it to: to write what you say, or the notes of a meeting. The sound is not kept.</string>

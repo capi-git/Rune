@@ -278,15 +278,15 @@ in and out as Markdown, and sub-page links look like
   Arguments `--mcp`. Pick Claude and/or Codex (for Claude, *All my projects*).
 - **Claude Code:**
   ```bash
-  claude mcp add --scope user notion2 -- "/Applications/Rune.app/Contents/MacOS/notion2" --mcp
+  claude mcp add --scope user rune -- "/Applications/Rune.app/Contents/MacOS/notion2" --mcp
   ```
 - **Codex:**
   ```bash
-  codex mcp add notion2 -- "/Applications/Rune.app/Contents/MacOS/notion2" --mcp
+  codex mcp add rune -- "/Applications/Rune.app/Contents/MacOS/notion2" --mcp
   ```
 - **Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
   ```json
-  { "mcpServers": { "notion2": {
+  { "mcpServers": { "rune": {
       "command": "/Applications/Rune.app/Contents/MacOS/notion2",
       "args": ["--mcp"] } } }
   ```

@@ -15,12 +15,12 @@ pub fn GraphView() -> Element {
         page_graph(&state.pages.read(), &state.blocks.read(), &space)
     });
     let g = graph.read();
-    let (pages, links) = (g.nodes.len(), g.links());
-    let count = format!(
-        "{pages} {} · {links} {}",
-        if pages == 1 { "page" } else { "pages" },
-        if links == 1 { "link" } else { "links" }
-    );
+    let (pages, links, nested) = (g.nodes.len(), g.links(), g.nested());
+    let mut count = format!("{pages} {}", if pages == 1 { "page" } else { "pages" });
+    if nested > 0 {
+        count.push_str(&format!(" · {nested} {}", if nested == 1 { "sub-page" } else { "sub-pages" }));
+    }
+    count.push_str(&format!(" · {links} {}", if links == 1 { "link" } else { "links" }));
     let json = g.to_json();
     rsx! {
         div { class: "graph", id: "graph", "data-graph": "{json}",
@@ -36,7 +36,7 @@ pub fn GraphView() -> Element {
             div { class: "graph-count", "{count}" }
             if pages == 0 {
                 div { class: "graph-empty", "No pages yet. Each page you make shows here as a dot." }
-            } else if links == 0 {
+            } else if links == 0 && nested == 0 {
                 div { class: "graph-hint", "Type @ in a page to link it to another. Each link is a line here." }
             }
             // The same as words, for a reader that cannot see the picture.
