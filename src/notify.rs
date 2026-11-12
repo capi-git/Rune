@@ -196,14 +196,33 @@ fn reminder_text(e: &Event) -> String {
 
 fn reminder_when(e: &Event) -> String {
     if e.all_day {
-        return format!("{} · all day", when::day_label(when::date_of(e.start)));
+        // The day as it is named when the reminder shows, not when it is
+        // planned ("Tomorrow" was said on the day itself).
+        let day = when::date_of(e.start);
+        let shown = fire_time(e).map(when::date_of).unwrap_or(day);
+        return format!("{} · all day", day_from(day, shown));
     }
     let range = format!("{} – {}", when::time_label(e.start), when::time_label(e.end));
     match e.remind.unwrap_or(0) {
         0 => format!("Now · {range}"),
         m if m < 60 => format!("In {m} min · {range}"),
         m if m < 24 * 60 => format!("In {} hr · {range}", m / 60),
-        _ => format!("{} · {range}", when::day_label(when::date_of(e.start))),
+        _ => {
+            let day = when::date_of(e.start);
+            let shown = fire_time(e).map(when::date_of).unwrap_or(day);
+            format!("{} · {range}", day_from(day, shown))
+        }
+    }
+}
+
+/// The name of `day` for a reader on the day `seen`.
+fn day_from(day: chrono::NaiveDate, seen: chrono::NaiveDate) -> String {
+    if day == seen {
+        "Today".into()
+    } else if day == when::next_day(seen) {
+        "Tomorrow".into()
+    } else {
+        day.format("%a, %b %-d").to_string()
     }
 }
 
@@ -295,6 +314,12 @@ pub fn take_dirty() -> bool {
 mod tests {
     use super::*;
     use chrono::{NaiveDate, NaiveTime};
+
+    #[test]
+    fn a_reminder_names_the_day_as_it_is_when_it_shows() {
+        let d = |day| NaiveDate::from_ymd_opt(2026, 11, day).unwrap();
+        assert_eq!((day_from(d(14), d(14)), day_from(d(14), d(13)), day_from(d(14), d(11))), ("Today".to_string(), "Tomorrow".to_string(), "Sat, Nov 14".to_string()));
+    }
 
     #[test]
     fn a_to_do_reminder_says_what_and_opens_its_page() {

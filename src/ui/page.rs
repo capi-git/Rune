@@ -324,6 +324,16 @@ fn JotBox() -> Element {
 #[component]
 pub fn HomeView() -> Element {
     let state = use_context::<AppState>();
+    // Home says the day, the time now and what comes next: it is drawn again
+    // each minute (left open, it showed yesterday the next morning).
+    let mut tick = use_signal(|| 0u64);
+    use_future(move || async move {
+        loop {
+            crate::ai::sleep_ms(60_000).await;
+            tick += 1;
+        }
+    });
+    let _ = tick.read();
     // Every open to-do, from all pages (worked out again only when pages or
     // blocks change, and Home is redrawn only when the list itself does).
     let todos = use_memo(move || state.open_todos());
@@ -1692,6 +1702,45 @@ pub fn AiShot(id: String, src: String) -> Element {
     }
 }
 
+/// One thing that goes with the request (a file, a page, a web page, the
+/// picked part of the page): a small quiet chip with its name, and a way to
+/// take it out again.
+#[component]
+pub fn AiChip(id: String, icon: String, name: String, note: String, pending: bool) -> Element {
+    let state = use_context::<AppState>();
+    rsx! {
+        span { class: if pending { "ai-chip pending" } else { "ai-chip" }, role: "listitem", "data-given": "{id}", title: if note.is_empty() { "{name}" } else { "{name} · {note}" },
+            Icon { name: "{icon}", size: 13 }
+            span { class: "ai-chip-name", "{name}" }
+            if !note.is_empty() {
+                span { class: "ai-chip-note", "{note}" }
+            }
+            button {
+                class: "ai-chip-x",
+                title: "Take this out",
+                "aria-label": "Take {name} out",
+                onclick: move |e| {
+                    e.stop_propagation();
+                    state.ai_remove_given(&id);
+                    // (The keyboard goes back to the box: left on the page, a
+                    // Delete key would be for what is picked there.)
+                    document::eval("const box = document.getElementById('ai-input') || document.getElementById('ask-notes-input'); if (box) box.focus();");
+                },
+                Icon { name: "close", size: 11 }
+            }
+        }
+    }
+}
+
+/// The page name that is being typed after "@" at the end of a request:
+/// where the "@" is, and what follows it.
+fn mention_at_end(prompt: &str) -> Option<(usize, String)> {
+    let at = prompt.rfind('@')?;
+    let before_ok = prompt[..at].chars().next_back().is_none_or(char::is_whitespace);
+    let after = &prompt[at + 1..];
+    (before_ok && !after.starts_with(' ') && !after.contains("  ") && after.chars().count() <= 40).then(|| (at, after.to_string()))
+}
+
 /// How long a run of the AI goes on, as a small clock that counts.
 #[component]
 fn Elapsed(since: i64) -> Element {
@@ -1728,6 +1777,12 @@ fn AiPanel() -> Element {
         1 => format!("{caption} · 1 picture"),
         n => format!("{caption} · {n} pictures"),
     };
+    // (What else went with it: "2 files · 1 page", "the picked part".)
+    let caption = match crate::attach::count_words(&session.given).as_str() {
+        "" => caption,
+        with => format!("{caption} · {with}"),
+    };
+    let caption = if session.part.is_empty() { caption } else { format!("{caption} · the picked part only") };
     // Model picker: every model of every installed tool, grouped by tool.
     let groups = use_hook(|| {
         let installed = crate::ai::local::installed_cached().unwrap_or_default();
@@ -1747,6 +1802,37 @@ fn AiPanel() -> Element {
     // open it is a menu in the style of Aven's (see style.css).
     let mut menu = use_signal(|| false);
     let mut effort = use_signal(|| crate::ai::Prefs::load().effort);
+    // After "@" at the end of the request: the pages whose name has what is
+    // typed. The arrows choose one, Return gives it with the request.
+    let mut page_at = use_signal(|| 0usize);
+    let mut pages_shut = use_signal(String::new);
+    let mention = mention_at_end(&session.prompt).filter(|_| session.status == AiStatus::Prompting && *pages_shut.read() != session.prompt);
+    let found: Vec<(String, String)> = match &mention {
+        Some((_, query)) => {
+            let pages = state.pages.read();
+            let space = pages.get(&session.page_id).map(|p| p.space_id.clone()).unwrap_or_default();
+            crate::state::pages_to_link(&pages, &space, &session.page_id, query).into_iter().take(6).map(|p| (p.id.clone(), p.display_title().to_string())).collect()
+        }
+        None => Vec::new(),
+    };
+    let chosen = (*page_at.read()).min(found.len().saturating_sub(1));
+    let mention_from = mention.as_ref().map_or(0, |(at, _)| *at);
+    let give_page = use_callback(move |(id, from): (String, usize)| {
+        let prompt = state.ai.peek().as_ref().map(|s| s.prompt.clone()).unwrap_or_default();
+        let mut kept = prompt.get(..from).unwrap_or("").trim_end().to_string();
+        if !kept.is_empty() {
+            kept.push(' ');
+        }
+        page_at.set(0);
+        state.ai_give_page(&id, kept.clone());
+        // (The box holds its own words: they are set there too.)
+        document::eval(&format!("const box = document.getElementById('ai-input'); if (box) {{ box.value = {}; box.focus(); }}", serde_json::to_string(&kept).unwrap_or_default()));
+    });
+    let found_keys = found.clone();
+    let part_label = match session.part.len() {
+        1 => "The picked block only".to_string(),
+        n => format!("The {n} picked blocks only"),
+    };
     let dots = crate::ai::effort_dots(&effort.read());
     let shown = groups
         .iter()
@@ -1804,6 +1890,46 @@ fn AiPanel() -> Element {
                 // model in quiet words, the microphone and a round button to
                 // send (there once something is typed). Escape, or a press
                 // outside while it is empty, puts the box away.
+                // What goes with the request: the picked part of the page,
+                // files, pages, a web page. A web address in the words is
+                // only offered: the app gets its page when it is asked to.
+                if !session.part.is_empty() || !session.given.is_empty() || session.offer.is_some() {
+                    div { class: "ai-given", id: "ai-given", role: "list", "aria-label": "What goes with the request",
+                        if !session.part.is_empty() {
+                            AiChip { id: "part", icon: "text", name: part_label.clone(), note: "", pending: false }
+                        }
+                        for g in session.given.iter() {
+                            AiChip { key: "{g.id}", id: g.id.clone(), icon: g.kind.icon(), name: g.name.clone(), note: g.note.clone(), pending: g.pending }
+                        }
+                        if let Some(url) = session.offer.clone() {
+                            button {
+                                class: "ai-offer",
+                                id: "ai-offer",
+                                title: "Rune gets this page from the web now, and gives its words to the AI with your request",
+                                onclick: move |_| state.ai_give_web(&url),
+                                Icon { name: "globe", size: 13 }
+                                span { "Get the page {crate::attach::short_address(&url)}" }
+                            }
+                        }
+                    }
+                }
+                if !found.is_empty() {
+                    div { class: "ai-pages", id: "ai-pages", role: "listbox", "aria-label": "Pages to give with the request",
+                        for (i, (id, title)) in found.iter().cloned().enumerate() {
+                            button {
+                                key: "{id}",
+                                class: if i == chosen { "ai-page-row on" } else { "ai-page-row" },
+                                role: "option",
+                                "aria-selected": if i == chosen { "true" } else { "false" },
+                                // (The press must not take the keyboard out of the box.)
+                                onmousedown: move |e| e.prevent_default(),
+                                onclick: move |_| give_page.call((id.clone(), mention_from)),
+                                Icon { name: "file", size: 14 }
+                                span { "{title}" }
+                            }
+                        }
+                    }
+                }
                 div { class: "ai-compose",
                     for picture in session.pictures.iter() {
                         AiShot { key: "{picture.id}", id: picture.id.clone(), src: picture.data_url() }
@@ -1817,8 +1943,41 @@ fn AiPanel() -> Element {
                         onmounted: move |e: MountedEvent| async move {
                             let _ = e.set_focus(true).await;
                         },
-                        oninput: move |e: FormEvent| state.ai_set_prompt(e.value()),
+                        oninput: move |e: FormEvent| {
+                            page_at.set(0);
+                            state.ai_set_prompt(e.value())
+                        },
                         onkeydown: move |e: KeyboardEvent| {
+                            // With the list of pages open, the keys are for it.
+                            if !found_keys.is_empty() {
+                                let count = found_keys.len();
+                                match e.key() {
+                                    Key::ArrowDown => {
+                                        e.prevent_default();
+                                        page_at.set((chosen + 1) % count);
+                                        return;
+                                    }
+                                    Key::ArrowUp => {
+                                        e.prevent_default();
+                                        page_at.set((chosen + count - 1) % count);
+                                        return;
+                                    }
+                                    Key::Enter | Key::Tab => {
+                                        e.prevent_default();
+                                        if let Some((id, _)) = found_keys.get(chosen) {
+                                            give_page.call((id.clone(), mention_from));
+                                        }
+                                        return;
+                                    }
+                                    Key::Escape => {
+                                        e.prevent_default();
+                                        let now = state.ai.peek().as_ref().map(|s| s.prompt.clone()).unwrap_or_default();
+                                        pages_shut.set(now);
+                                        return;
+                                    }
+                                    _ => {}
+                                }
+                            }
                             if e.key() == Key::Enter {
                                 e.prevent_default();
                                 state.ai_run();

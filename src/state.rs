@@ -578,6 +578,18 @@ pub struct AiSession {
     pub started: i64,
     /// Pictures that go with the request (screenshots pasted or dropped in).
     pub pictures: Vec<ai::Picture>,
+    /// The page as it was given to the AI: a reply that is the whole page
+    /// again is put in its place only while the page is still that.
+    pub sent: String,
+    /// What the person gave with the request besides pictures: files, pages
+    /// of the notes, the words of a web page (see attach.rs).
+    pub given: Vec<crate::attach::Attached>,
+    /// The blocks of the page that were picked when the box opened: the
+    /// request is about that part only, and a reply that writes the page
+    /// again is that part as it must be, put in its place.
+    pub part: Vec<Id>,
+    /// A web address in the request that the person can ask the app to get.
+    pub offer: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -737,6 +749,9 @@ pub enum Bridge {
     SwipeTrace { lines: String },
     /// A picture pasted or dropped into the AI box (a data address).
     AiImage { data: String },
+    /// A file that is no picture, dropped or pasted into the AI box: its
+    /// name and its bytes in base64.
+    AiFile { name: String, data: String },
     /// An event was dragged in the calendar: so many days and minutes later
     /// (or earlier), or its end so many minutes later.
     EventMove { id: String, days: i64, minutes: i64, grow: i64 },
@@ -851,6 +866,8 @@ pub struct AppState {
     pub space_slide: Signal<i8>,
     /// Pictures for the box that asks all the notes (see `ai_add_picture`).
     pub ask_pictures: Signal<Vec<ai::Picture>>,
+    /// Files given with a question to all the notes (see attach.rs).
+    pub ask_given: Signal<Vec<crate::attach::Attached>>,
     /// Is an AI tool connected? Every part of the AI shows only then
     /// (see `ai::shown`); Settings is where a person connects one.
     pub ai_on: Signal<bool>,
@@ -1715,6 +1732,15 @@ pub fn ancestors(pages: &HashMap<Id, Page>, id: &str) -> Vec<Page> {
 }
 
 thread_local! {
+    /// An update is being put in place (see `install_update`).
+    static UPDATING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+thread_local! {
+    /// The blocks last copied or cut as a whole, with the words that went
+    /// to the clipboard for them (see `copy_picked` and `paste`).
+    static COPIED_BLOCKS: std::cell::RefCell<Option<(String, Vec<Block>)>> = const { std::cell::RefCell::new(None) };
+}
+thread_local! {
     /// The picture put last: (page, block), for several dropped together.
     static LAST_IMAGE: std::cell::RefCell<Option<(Id, Id)>> = const { std::cell::RefCell::new(None) };
 }
@@ -2094,6 +2120,7 @@ impl AppState {
             ai_done: Signal::new(None),
             ai_on: Signal::new(ai::shown()),
             ask_pictures: Signal::new(Vec::new()),
+            ask_given: Signal::new(Vec::new()),
             player_dock: Signal::new(store::setting("player_dock").and_then(|s| serde_json::from_str::<DockPlace>(&s).ok()).unwrap_or_default().tidy()),
             day_page: Signal::new(None),
             pad: Signal::new(None),
@@ -3343,8 +3370,23 @@ impl AppState {
 
     /// Copy the picked blocks; with `cut`, take them out of the page too.
     pub fn copy_picked(self, cut: bool) {
-        let Some(text) = self.picked_markdown() else { return };
+        let Some(mut text) = self.picked_markdown() else { return };
         let count = self.picked.peek().as_ref().map(|p| p.ids.len()).unwrap_or(0);
+        // The blocks themselves are kept beside the words on the clipboard:
+        // pasted in the app, they come back as they were (a picture, a
+        // drawing, a toggle, a table with its columns), not as the plain
+        // words that another program gets. One block that is no plain line
+        // gets a line end, so that the paste comes to the app and is not
+        // put in as typed words ("- [ ] Call Sam" became a bullet).
+        let blocks: Vec<Block> = {
+            let picked = self.picked.peek().clone();
+            let all = self.blocks.peek();
+            picked.and_then(|p| all.get(&p.page).map(|bs| bs.iter().filter(|b| p.ids.contains(&b.id)).cloned().collect())).unwrap_or_default()
+        };
+        if !text.contains('\n') && blocks.iter().any(|b| b.kind != BlockKind::Text) {
+            text.push('\n');
+        }
+        COPIED_BLOCKS.with(|c| *c.borrow_mut() = Some((text.clone(), blocks)));
         if let Err(e) = set_clipboard(text) {
             return self.toast(format!("Couldn't copy: {e}"));
         }
@@ -4295,14 +4337,18 @@ impl AppState {
     }
 
     fn edit_blocks_from<R>(mut self, page_id: &str, origin: Origin, f: impl FnOnce(&mut Vec<Block>) -> R) -> R {
-        let before = self.blocks.peek().get(page_id).cloned().unwrap_or_default();
+        let mut before = self.blocks.peek().get(page_id).cloned().unwrap_or_default();
         // Another program (an AI tool through the connector) wrote to the
         // workspace since this window last looked: take the page as it is on
         // disk first, so this edit is made on top of that and does not write
-        // the older page back over it.
+        // the older page back over it. The step that Undo takes back begins
+        // at that page too: begun at the older one, one Undo also took away
+        // what the other program had just added.
+        let mut on_screen = None;
         if sync::outside_change_pending() {
             if let Some(fresh) = store::with(|s| s.load_page_blocks(page_id)).filter(|fresh| !fresh.is_empty()) {
-                self.blocks.write().insert(page_id.to_string(), fresh);
+                self.blocks.write().insert(page_id.to_string(), fresh.clone());
+                on_screen = Some(std::mem::replace(&mut before, fresh));
             }
         }
         let (result, after) = {
@@ -4343,7 +4389,8 @@ impl AppState {
         let changed: Vec<Id> = if only_text {
             Vec::new()
         } else {
-            let shown_before: HashMap<&str, &str> = before.iter().map(|o| (o.id.as_str(), o.text.as_str())).collect();
+            // (What the window shows is the page of before the other program's change.)
+            let shown_before: HashMap<&str, &str> = on_screen.as_ref().unwrap_or(&before).iter().map(|o| (o.id.as_str(), o.text.as_str())).collect();
             after
                 .iter()
                 .filter(|b| {
@@ -4398,11 +4445,27 @@ impl AppState {
     /// Install the build that is ready, then start the app again.
     pub fn install_update(self) {
         let Some(update) = self.update.peek().clone() else { return };
+        // (The update starts the app again at once: not in the middle of a
+        // meeting that is listened to, or of an AI's work on the notes.)
+        if self.listening.peek().is_some() {
+            return self.toast("Rune is listening to a meeting. Stop listening first, then update.");
+        }
+        if self.ai.peek().as_ref().is_some_and(|s| s.status == AiStatus::Streaming) {
+            return self.toast("The AI is at work. Update when it is done.");
+        }
+        // (One install at a time: a second press while the first copies the
+        // app took its files away.)
+        if UPDATING.with(|u| u.replace(true)) {
+            return;
+        }
         self.toast("Updating…");
         spawn_forever(async move {
             match crate::update::install(update).await {
                 Ok((app, build)) => crate::update::relaunch(&app, build),
-                Err(e) => self.toast(format!("Couldn't update: {e}")),
+                Err(e) => {
+                    UPDATING.with(|u| u.set(false));
+                    self.toast(format!("Couldn't update: {e}"))
+                }
             }
         });
     }
@@ -6511,6 +6574,11 @@ impl AppState {
         if old == new {
             return;
         }
+        // (What comes to the page from outside the history, the lines of a
+        // transcript or an AI's words, ends the run of typing that is going
+        // on: joined into that one step, Undo of the typing also took the
+        // new lines away.)
+        self.history.write().seal();
         let changed: Vec<Id> = {
             let old_by_id: HashMap<&str, &Block> = old.iter().map(|o| (o.id.as_str(), o)).collect();
             new.iter()
@@ -6654,6 +6722,7 @@ impl AppState {
             Bridge::PlayerDock { h, v, x, y, w } => self.set_player_dock(DockPlace { h, v, x, y, w }),
             Bridge::SwipeTrace { lines } => swipe_trace(&lines),
             Bridge::AiImage { data } => self.ai_add_picture(&data),
+            Bridge::AiFile { name, data } => self.ai_add_file(&name, &data),
             Bridge::EventMove { id, days, minutes, grow } => self.move_event(&id, days, minutes, grow),
             Bridge::EventDraw { day, from, to } => self.draw_event(&day, from, to),
             Bridge::EventCopy { id } => self.copy_event(&id),
@@ -7298,6 +7367,8 @@ impl AppState {
         self.edit_blocks(page, |bs| {
             if let Some(i) = index_of(bs, id).filter(|&i| bs[i].kind == BlockKind::Table) {
                 let mut table = crate::table::Table::parse(&bs[i].data);
+                // (Days written before cells held their year get it now.)
+                table.keep_years(crate::when::today());
                 change(&mut table);
                 bs[i].data = table.to_data();
                 bs[i].text = table.plain_text();
@@ -7435,7 +7506,10 @@ impl AppState {
         let linked = self.edit_blocks(page, |bs| index_of(bs, id).map(|i| delete(bs, i)).unwrap_or_default());
         let mut trashed = Vec::new();
         for page_id in linked {
-            if self.pages.peek().get(&page_id).is_some_and(|p| p.parent_id.as_deref() == Some(page) && !p.trashed) {
+            // (Another line of this page that is still the page's own line:
+            // the page stays. Only its last line takes it to the Trash.)
+            let still_linked = self.blocks.peek().get(page).is_some_and(|bs| bs.iter().any(|b| b.kind == BlockKind::PageLink && b.target.as_deref() == Some(page_id.as_str())));
+            if !still_linked && self.pages.peek().get(&page_id).is_some_and(|p| p.parent_id.as_deref() == Some(page) && !p.trashed) {
                 self.set_trashed(&page_id, true);
                 trashed.push(page_id);
             }
@@ -7543,7 +7617,24 @@ impl AppState {
             }
             return;
         }
-        let mut items = markdown::to_blocks(text);
+        // What was copied or cut in the app as whole blocks, and is still what
+        // the clipboard holds: those blocks again, each with a new id.
+        let same = |a: &str, b: &str| a.replace("\r\n", "\n").trim() == b.replace("\r\n", "\n").trim();
+        let kept = COPIED_BLOCKS.with(|c| c.borrow().as_ref().filter(|(words, bs)| !bs.is_empty() && same(words, text)).map(|(_, bs)| bs.clone()));
+        let mut items = match kept {
+            Some(blocks) => {
+                let least = blocks.iter().map(|b| b.indent).min().unwrap_or(0);
+                blocks
+                    .into_iter()
+                    .map(|mut b| {
+                        b.id = new_id();
+                        b.indent -= least;
+                        b
+                    })
+                    .collect()
+            }
+            None => markdown::to_blocks_by_line(text),
+        };
         if items.is_empty() {
             return;
         }
@@ -7553,6 +7644,9 @@ impl AppState {
             let kind = bs[i].kind;
             let base = bs[i].indent;
             let (before, after) = inline::split_for(kind, &value, pos);
+            // (Pasted in an empty line, a list, a heading or a table takes
+            // the place of the line: no empty line stays over it.)
+            let in_place = kind == BlockKind::Text && before.is_empty() && after.is_empty() && items[0].kind != BlockKind::Text;
             bs[i].text = before;
             if items[0].kind == BlockKind::Text {
                 let first = items.remove(0);
@@ -7565,7 +7659,20 @@ impl AppState {
                 last = b.id.clone();
                 bs.insert(i + 1 + n, b);
             }
+            if in_place {
+                bs.remove(i);
+            }
             let li = index_of(bs, &last)?;
+            // (What ends the paste has no words of its own, a divider or a
+            // table: what was after the caret goes in a line after it, with
+            // the caret. Joined to it, those words were not seen again.)
+            if !bs[li].kind.is_editable() {
+                let mut tail = Block::text("").with_indent(base);
+                tail.text = inline::join_for(BlockKind::Text, "", kind, &after);
+                let id = tail.id.clone();
+                bs.insert(li + 1, tail);
+                return Some(Caret { id, pos: 0 });
+            }
             let at = inline::len_for(bs[li].kind, &bs[li].text);
             bs[li].text = inline::join_for(bs[li].kind, &bs[li].text, kind, &after);
             Some(Caret { id: last, pos: at })
@@ -7911,7 +8018,25 @@ impl AppState {
             working: None,
             started: 0,
             pictures: Vec::new(),
+            sent: String::new(),
+            given: Vec::new(),
+            part: Vec::new(),
+            offer: None,
         });
+        // What is picked on the page when the AI is asked: the request is
+        // about that. Picked blocks are the part of the page it gets (and
+        // may write again); picked rows of a table go with it as a table.
+        if self.ai.peek().as_ref().is_some_and(|s| s.action == AiAction::Ask) {
+            let part: Vec<Id> = match self.picked.peek().as_ref() {
+                Some(picked) if picked.page == page => self.blocks.peek().get(page).map(|bs| bs.iter().filter(|b| picked.ids.contains(&b.id)).map(|b| b.id.clone()).collect()).unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            let rows = self.picked_rows_for_ai(page);
+            if let Some(s) = self.ai.write().as_mut() {
+                s.part = part;
+                s.given.extend(rows);
+            }
+        }
         self.set_popover(None);
         if !prompting {
             self.ai_run();
@@ -7964,8 +8089,175 @@ impl AppState {
 
     pub fn ai_set_prompt(mut self, prompt: String) {
         if let Some(s) = self.ai.write().as_mut() {
+            // A web address in the words: the person can ask for its page.
+            s.offer = crate::attach::web_addresses(&prompt).into_iter().find(|url| !s.given.iter().any(|g| g.url == *url));
             s.prompt = prompt;
         }
+    }
+
+    // ----- what goes with a request besides pictures (see attach.rs) -----
+
+    /// A file dropped or pasted into the AI box: read off the window's
+    /// thread (a PDF takes a moment), then given with the request.
+    pub fn ai_add_file(self, name: &str, data: &str) {
+        use base64::Engine as _;
+        if data == "!large" {
+            return self.notice(format!("“{name}” is too large for the AI (20 MB at the most)."));
+        }
+        let data = data.split_once(";base64,").map(|(_, d)| d).unwrap_or(data);
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data.trim()) else {
+            return self.toast("That file could not be read");
+        };
+        let name = name.to_string();
+        // Its place shows at once, and the request waits for it: sent before
+        // a large PDF was read, the request went without it and said nothing.
+        let short = std::path::Path::new(&name).file_name().and_then(|n| n.to_str()).unwrap_or(&name).to_string();
+        let waiting = crate::attach::Attached::waiting(&short, crate::attach::Kind::Text, "Reading it…");
+        let id = waiting.id.clone();
+        if !self.ai_give(waiting) {
+            return self.toast("Open the AI box, and then give it the file");
+        }
+        spawn_forever(async move {
+            let read = ai::runtime().spawn_blocking(move || crate::attach::from_file(&name, &bytes)).await.unwrap_or_else(|_| Err("That file could not be read".to_string()));
+            self.ai_settle(&id, read);
+        });
+    }
+
+    /// What was being read or fetched is here, or could not be had: it
+    /// takes its place, or its place goes and the person is told why.
+    fn ai_settle(mut self, id: &str, got: Result<crate::attach::Attached, String>) {
+        let fill = |list: &mut Vec<crate::attach::Attached>| match (list.iter().position(|g| g.id == id), &got) {
+            (Some(at), Ok(it)) => list[at] = crate::attach::Attached { id: id.to_string(), ..it.clone() },
+            (Some(at), Err(_)) => {
+                list.remove(at);
+            }
+            (None, _) => {}
+        };
+        if let Some(s) = self.ai.write().as_mut() {
+            fill(&mut s.given);
+        }
+        fill(&mut self.ask_given.write());
+        if let Err(why) = got {
+            self.notice(why);
+        }
+    }
+
+    /// Give something with the request that is typed now: in the AI box of
+    /// the page, or in the box that asks all the notes.
+    /// Returns whether it was taken.
+    pub fn ai_give(mut self, it: crate::attach::Attached) -> bool {
+        let full = "No more than eight things go with one request";
+        let in_bar = self.ai.peek().as_ref().is_some_and(|s| s.status == AiStatus::Prompting);
+        // (The box that asks all the notes lies over the page: with both
+        // open, what is dropped is for the one in front.)
+        if self.ui.peek().modal == Some(Modal::AskNotes) {
+            if self.ask_given.peek().len() >= crate::attach::MOST {
+                self.toast(full);
+                return false;
+            }
+            self.ask_given.write().push(it);
+            true
+        } else if in_bar {
+            let mut ai = self.ai.write();
+            let Some(s) = ai.as_mut() else { return false };
+            if s.given.len() >= crate::attach::MOST {
+                drop(ai);
+                self.toast(full);
+                return false;
+            }
+            s.given.push(it);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Take one of them out again ("part": the picked part of the page).
+    pub fn ai_remove_given(mut self, id: &str) {
+        if let Some(s) = self.ai.write().as_mut() {
+            if id == "part" {
+                s.part.clear();
+            }
+            s.given.retain(|g| g.id != id);
+            let (prompt, given) = (s.prompt.clone(), &s.given);
+            s.offer = crate::attach::web_addresses(&prompt).into_iter().find(|url| !given.iter().any(|g| g.url == *url));
+        }
+        self.ask_given.write().retain(|g| g.id != id);
+        // (The part let go: its blocks are picked no more.)
+        if id == "part" {
+            self.picked.set(None);
+        }
+    }
+
+    /// Another page of the notes, chosen after "@" in the AI box: its words
+    /// go with the request. `prompt` is the request without the "@name".
+    pub fn ai_give_page(mut self, page_id: &str, prompt: String) {
+        let title = self.page_title(page_id);
+        let text = self.page_for_ai(page_id);
+        if let Some(s) = self.ai.write().as_mut() {
+            s.prompt = prompt;
+            if s.given.iter().any(|g| g.kind == crate::attach::Kind::Page && g.name == title) {
+                return;
+            }
+        }
+        let _ = self.ai_give(crate::attach::Attached::new(&title, crate::attach::Kind::Page, text, ""));
+    }
+
+    /// The person asked for the page of a web address: it is fetched now
+    /// (nothing is fetched unasked), and its words go with the request.
+    pub fn ai_give_web(mut self, url: &str) {
+        let Some(url) = crate::attach::web_address(url) else { return };
+        let mut waiting = crate::attach::Attached::waiting(&crate::attach::short_address(&url), crate::attach::Kind::Web, "Getting it…");
+        waiting.url = url.clone();
+        let id = waiting.id.clone();
+        if !self.ai_give(waiting) {
+            return;
+        }
+        // (The next address in the words that is not given yet, if any.)
+        if let Some(s) = self.ai.write().as_mut() {
+            let (prompt, given) = (s.prompt.clone(), &s.given);
+            s.offer = crate::attach::web_addresses(&prompt).into_iter().find(|url| !given.iter().any(|g| g.url == *url));
+        }
+        spawn_forever(async move {
+            let got = ai::runtime().spawn_blocking(move || crate::attach::from_web(&url)).await.unwrap_or_else(|_| Err("The web page could not be read".to_string()));
+            self.ai_settle(&id, got);
+        });
+    }
+
+    /// The rows of a table of this page that are picked, as a table the AI
+    /// can read: its headings and those rows.
+    fn picked_rows_for_ai(&self, page: &str) -> Vec<crate::attach::Attached> {
+        let blocks = self.blocks.peek().get(page).cloned().unwrap_or_default();
+        let mut out = Vec::new();
+        for b in blocks.iter().filter(|b| b.kind == BlockKind::Table) {
+            let table = crate::table::Table::parse(&b.data);
+            let rows = crate::ui::tables::picked(&b.id, &table).0;
+            if rows.is_empty() {
+                continue;
+            }
+            let line = |r: usize| format!("| {} |", (0..table.columns()).map(|c| if r == 0 { table.heading(c) } else { table.shown(r, c) }.replace('|', "\\|")).collect::<Vec<_>>().join(" | "));
+            let mut text = vec![line(0), format!("|{}", " --- |".repeat(table.columns()))];
+            text.extend(rows.iter().filter(|&&r| r >= 1 && r < table.rows.len()).map(|&r| format!("{} (row {r})", line(r))));
+            let name = if table.name.trim().is_empty() { "the table".to_string() } else { format!("“{}”", table.name.trim()) };
+            let label = format!("{} {} of {name}", rows.len(), if rows.len() == 1 { "row" } else { "rows" });
+            let mut it = crate::attach::Attached::new(&label, crate::attach::Kind::Part, format!("The person picked these rows of the table {name} on the page. The request is about them.\n\n{}", text.join("\n")), "");
+            it.id = format!("rows-{}", b.id);
+            out.push(it);
+        }
+        out
+    }
+
+    /// The picked part of a page as the AI is given it (see `page_for_ai`).
+    fn part_for_ai(&self, page_id: &str, part: &[Id]) -> String {
+        let pages = self.pages.peek();
+        let mut blocks: Vec<Block> = self.blocks.peek().get(page_id).map(|bs| bs.iter().filter(|b| part.contains(&b.id)).cloned().collect()).unwrap_or_default();
+        // (From the edge: the step in that the whole part has is put back
+        // when a reply takes its place, see `ai_revise`.)
+        let least = blocks.iter().map(|b| b.indent).min().unwrap_or(0);
+        for b in &mut blocks {
+            b.indent -= least;
+        }
+        crate::mcp::render_body(&pages, &blocks)
     }
 
     pub fn ai_run(mut self) {
@@ -7987,7 +8279,35 @@ impl AppState {
         // For a question or a request to change the page, the AI is given
         // the page with its pictures, drawings and links to pages as lines
         // it can keep in place (see `ai_revise`).
-        let page_text = if session.action == AiAction::Ask { self.page_for_ai(&session.page_id) } else { self.page_markdown(&session.page_id) };
+        if session.given.iter().any(|g| g.pending) {
+            return self.toast("Rune is still reading what you gave. Ask again in a moment.");
+        }
+        let no_room = crate::attach::no_room_for(&session.given);
+        if !no_room.is_empty() {
+            self.notice(format!("There was no room for {} with this request: the AI is told so.", no_room.iter().map(|n| format!("“{n}”")).collect::<Vec<_>>().join(", ")));
+        }
+        // (With a part of the page picked: that part is the page it gets.)
+        let whole = session.part.is_empty();
+        let page_text = match session.action {
+            AiAction::Ask if !whole => self.part_for_ai(&session.page_id, &session.part),
+            AiAction::Ask => self.page_for_ai(&session.page_id),
+            _ => self.page_markdown(&session.page_id),
+        };
+        let sent = if whole { self.page_for_ai(&session.page_id) } else { page_text.clone() };
+        if let Some(s) = self.ai.write().as_mut() {
+            s.sent = sent;
+            s.offer = None;
+        }
+        // The request with what was given with it, as words.
+        let mut asked = session.prompt.clone();
+        if !whole {
+            asked.push_str(&format!(
+                "\n\n(The person picked a part of the page, and only that part is given as the page. The request is about that part. \
+                 A reply that starts with `{}` is that part as it must be after the change, not the whole page.)",
+                ai::REVISE_MARK
+            ));
+        }
+        asked.push_str(&crate::attach::for_request(&session.given));
         // A request in the person's own words is run with the tools of Rune
         // (where the AI tool can use them): the AI can then do anything in
         // the app, and what it changes is written down for "Undo".
@@ -7999,12 +8319,12 @@ impl AppState {
                 let now = when::local(now_ms()).format("%Y-%m-%d %H:%M, %A").to_string();
                 // After the person's yes to a plan, the request says so.
                 let request = match &session.plan {
-                    Some(plan) => ai::approved(&session.prompt, plan),
-                    None => session.prompt.clone(),
+                    Some(plan) => ai::approved(&asked, plan),
+                    None => asked.clone(),
                 };
                 ai::build_agent_messages(&session.page_id, &title, &page_text, &request, &now)
             }
-            None => ai::build_messages(&session.action, &page_text, &block_text, &session.prompt),
+            None => ai::build_messages(&session.action, &page_text, &block_text, &asked),
         };
         let journal = tools.as_ref().map(|t| t.journal.clone());
         let run = session.run + 1;
@@ -8250,8 +8570,38 @@ impl AppState {
         let (body, wanted) = ai::split_pages(&body);
         let title = self.pages.peek().get(&session.page_id).map(|p| p.title.clone()).unwrap_or_default();
         let empty = |blocks: &[Block]| blocks.iter().all(|b| b.text.trim().is_empty() && b.kind.is_editable());
+        // (A part has no line with the page's name before it: a heading of
+        // that name in it is a heading of the person's.)
+        let title = if session.part.is_empty() { title } else { String::new() };
         if empty(&crate::mcp::parse_body(&self.pages.peek(), &crate::mcp::strip_title_heading(&body, &title))) {
             return self.toast("The AI sent an empty page, so nothing was changed");
+        }
+        // A long page is given to the AI cut short (see `ai::MAX_CONTEXT_CHARS`):
+        // its reply is then the page without its end, and to put it in place
+        // of the page would take the end away (the lines, the tables and
+        // their rows, a transcript in a closed toggle).
+        let whole = session.part.is_empty();
+        let given_now = if whole { self.page_for_ai(&session.page_id) } else { self.part_for_ai(&session.page_id, &session.part) };
+        if given_now.chars().count() > ai::MAX_CONTEXT_CHARS {
+            return self.toast(if whole {
+                "This page is too long for the AI to write again as a whole, so nothing was changed. Pick a part of it (drag a box over its lines) and ask about that part."
+            } else {
+                "This part is too long for the AI to write again, so nothing was changed. Pick a smaller part."
+            });
+        }
+        // The reply is the page as it was when the AI was asked, changed.
+        // Lines written on the page since then are not in it: put in place
+        // of the page, it would take them away. (What the AI's own tools
+        // changed in this run is the AI's, and no reason to refuse.)
+        // (A line put between the blocks of the part since then is not in
+        // the reply either: the part must still be one run of blocks.)
+        let apart = !whole && {
+            let blocks = self.blocks.peek();
+            let at: Vec<usize> = blocks.get(&session.page_id).map(|bs| bs.iter().enumerate().filter(|(_, b)| session.part.contains(&b.id)).map(|(i, _)| i).collect()).unwrap_or_default();
+            at.is_empty() || at[at.len() - 1] - at[0] + 1 != at.len()
+        };
+        if apart || (session.did.is_empty() && !session.sent.is_empty() && given_now != session.sent) {
+            return self.toast("The page was changed after you asked, so the AI's page was not put in its place. Ask again to get it with your changes.");
         }
         // The sub-pages first, so that the page can link to them.
         let mut made: Vec<(String, Id)> = Vec::new();
@@ -8275,11 +8625,40 @@ impl AppState {
             }
         }
         let new = crate::mcp::parse_body(&self.pages.peek(), &crate::mcp::strip_title_heading(&body, &title));
+        let part = session.part.clone();
         let caret = self.edit_blocks(&session.page_id, |bs| {
-            let merged = keep_unchanged(bs, crate::mcp::keep_media(bs, new));
-            *bs = merged;
-            bs.iter().rev().find(|b| b.kind.is_editable()).map(|b| Caret::end(&b.id))
+            if part.is_empty() {
+                let merged = keep_unchanged(bs, crate::mcp::keep_media(bs, new));
+                *bs = merged;
+                return bs.iter().rev().find(|b| b.kind.is_editable()).map(|b| Caret::end(&b.id));
+            }
+            // The picked part only: from its first block to its last, the
+            // reply takes its place. The rest of the page is not touched.
+            let at: Vec<usize> = bs.iter().enumerate().filter(|(_, b)| part.contains(&b.id)).map(|(i, _)| i).collect();
+            let (first, last) = (*at.first()?, *at.last()?);
+            if last - first + 1 != at.len() {
+                return None;
+            }
+            let mut old: Vec<Block> = bs[first..=last].to_vec();
+            let least = old.iter().map(|b| b.indent).min().unwrap_or(0);
+            // The part went to the AI from the edge (see `part_for_ai`): the
+            // blocks are matched from the edge too, and then all get the
+            // step of the part again. (Added only to list items, a toggle
+            // inside a toggle came back at the edge and left its parent.)
+            for b in old.iter_mut() {
+                b.indent -= least;
+            }
+            let mut merged = keep_unchanged(&old, crate::mcp::keep_media(&old, new));
+            for b in merged.iter_mut() {
+                b.indent = b.indent.saturating_add(least).min(MAX_INDENT);
+            }
+            let caret = merged.iter().rev().find(|b| b.kind.is_editable()).map(|b| Caret::end(&b.id));
+            bs.splice(first..=last, merged);
+            caret
         });
+        if !part.is_empty() {
+            self.picked.set(None);
+        }
         // (A row that the AI gave another name: its page takes the name.)
         self.name_row_pages_of(&session.page_id);
         *self.ai.write() = None;

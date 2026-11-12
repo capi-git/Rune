@@ -97,10 +97,24 @@ pub fn mention_query(text: &str) -> Option<(usize, bool, String)> {
 
 /// Convert Markdown (for example an AI reply) into blocks.
 pub fn to_blocks(md: &str) -> Vec<Block> {
+    read(md, false)
+}
+
+/// As `to_blocks`, for words that are pasted: each line is a line of the
+/// page. (In a Markdown file, lines one under the other are one paragraph;
+/// a list of names copied from another program is not.)
+pub fn to_blocks_by_line(md: &str) -> Vec<Block> {
+    read(md, true)
+}
+
+fn read(md: &str, each_line: bool) -> Vec<Block> {
     let mut out: Vec<Block> = Vec::new();
     let mut paragraph: Vec<String> = Vec::new();
     let mut quote: Vec<String> = Vec::new();
     let mut code: Option<(Option<String>, Vec<String>)> = None;
+    // How many backticks opened the code block: a longer fence holds lines
+    // that begin with three (see the writer), and ends only at its like.
+    let mut fence = 3;
 
     fn flush(out: &mut Vec<Block>, paragraph: &mut Vec<String>, quote: &mut Vec<String>) {
         if !paragraph.is_empty() {
@@ -133,7 +147,8 @@ pub fn to_blocks(md: &str) -> Vec<Block> {
             }
         }
         if let Some((lang, lines)) = code.as_mut() {
-            if raw.trim_start().starts_with("```") {
+            let ends = if fence > 3 { raw.trim().len() >= fence && raw.trim().bytes().all(|b| b == b'`') } else { raw.trim_start().starts_with("```") };
+            if ends {
                 let text = lines.join("\n");
                 let chart = lang.as_deref().filter(|l| l.eq_ignore_ascii_case("chart")).and_then(|_| crate::chart::Chart::from_markdown(&text));
                 match chart {
@@ -155,13 +170,15 @@ pub fn to_blocks(md: &str) -> Vec<Block> {
             continue;
         }
 
-        let leading = raw.len() - raw.trim_start().len();
+        // (A tab is one step in, as two spaces are.)
+        let leading: usize = raw.chars().take_while(|c| c.is_whitespace()).map(|c| if c == '\t' { 2 } else { 1 }).sum();
         let indent = (leading / 2).min(4) as u8;
         let line = raw.trim();
 
-        if let Some(rest) = line.strip_prefix("```") {
+        if line.starts_with("```") {
             flush(&mut out, &mut paragraph, &mut quote);
-            let lang = rest.trim();
+            fence = line.bytes().take_while(|b| *b == b'`').count();
+            let lang = line[fence..].trim();
             code = Some(((!lang.is_empty()).then(|| lang.to_string()), Vec::new()));
             continue;
         }
@@ -209,7 +226,7 @@ pub fn to_blocks(md: &str) -> Vec<Block> {
                 out.push(b);
             }
             None => {
-                if !quote.is_empty() {
+                if !quote.is_empty() || (each_line && !paragraph.is_empty()) {
                     flush(&mut out, &mut paragraph, &mut quote);
                 }
                 paragraph.push(line.to_string());
@@ -310,7 +327,13 @@ pub fn render(title: &str, blocks: &[Block], mut special: impl FnMut(&Block) -> 
                 Some(icon) => format!("> {icon} {}", b.text),
                 None => format!("> {}", b.text),
             },
-            BlockKind::Code => format!("```{}\n{}\n```", b.language.as_deref().unwrap_or(""), b.text),
+            // (A fence longer than any run of backticks that begins a line of
+            // the code: else such a line ended the block when it was read.)
+            BlockKind::Code => {
+                let longest = b.text.lines().map(|l| l.trim_start().bytes().take_while(|b| *b == b'`').count()).max().unwrap_or(0);
+                let fence = "`".repeat(longest.max(2) + 1);
+                format!("{fence}{}\n{}\n{fence}", b.language.as_deref().unwrap_or(""), b.text)
+            }
             BlockKind::Divider => "---".to_string(),
             BlockKind::Drawing => format!("{pad}[Drawing]"),
             BlockKind::Image if b.text.trim().is_empty() => format!("{pad}[Image]"),
@@ -337,6 +360,32 @@ pub fn table_markdown(b: &Block, pad: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pasted_lines_are_lines_of_the_page() {
+        let words = |bs: &[Block]| bs.iter().map(|b| (b.kind, b.indent, b.text.clone())).collect::<Vec<_>>();
+        assert_eq!(words(&to_blocks_by_line("Alice\nBob\nCarol")), vec![(BlockKind::Text, 0, "Alice".to_string()), (BlockKind::Text, 0, "Bob".to_string()), (BlockKind::Text, 0, "Carol".to_string())]);
+        // In a Markdown file they are one paragraph, as before.
+        assert_eq!(to_blocks("Alice\nBob").len(), 1);
+        // A list nested with a tab keeps its step.
+        assert_eq!(words(&to_blocks_by_line("- one\n\t- two")), vec![(BlockKind::Bulleted, 0, "one".to_string()), (BlockKind::Bulleted, 1, "two".to_string())]);
+        // Code and tables stay whole.
+        let code = to_blocks_by_line("```\na\nb\n```\nafter");
+        assert_eq!((code.len(), code[0].kind, code[0].text.as_str()), (2, BlockKind::Code, "a\nb"));
+    }
+
+    #[test]
+    fn code_that_holds_a_fence_is_read_back_whole() {
+        let mut code = Block::new(BlockKind::Code, "Write it so:\n```js\nlet a = 1;\n```\nand so on.");
+        code.language = Some("md".to_string());
+        let blocks = vec![Block::text("before"), code.clone(), Block::text("after")];
+        let md = from_blocks("", &blocks, |t| t.to_string());
+        let back = to_blocks(&md);
+        assert_eq!(back.iter().map(|b| (b.kind, b.text.as_str())).collect::<Vec<_>>(), vec![(BlockKind::Text, "before"), (BlockKind::Code, code.text.as_str()), (BlockKind::Text, "after")], "{md}");
+        assert_eq!(back[1].language.as_deref(), Some("md"));
+        // Plain code keeps the fence of three.
+        assert!(from_blocks("", &[Block::new(BlockKind::Code, "x")], |t| t.to_string()).contains("```\nx\n```"));
+    }
 
     #[test]
     fn a_chart_and_a_typed_table_there_and_back() {

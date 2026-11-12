@@ -800,7 +800,13 @@ pub async fn check(now: bool) -> (Option<Update>, Option<String>) {
         }
         let _ = tx.send((found, problem));
     });
-    rx.await.unwrap_or((None, None))
+    let (found, problem) = rx.await.unwrap_or((None, None));
+    // A check that got no answer (the Mac was offline at that moment) is
+    // tried again in an hour, not a day later.
+    if ask && problem.is_some() {
+        crate::store::set_setting("update_asked_at", &(at - ASK_EVERY_MS + 60 * 60 * 1000).to_string());
+    }
+    (found, problem)
 }
 
 /// Install `update` over this copy (off the UI thread). On success the

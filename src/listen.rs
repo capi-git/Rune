@@ -384,8 +384,16 @@ fn words_of(text: &str) -> Vec<String> {
 /// word or two heard differently. A line of "me" is such an echo when most
 /// of its words are in what the others said within these seconds of it.
 const ECHO_SECONDS: f64 = 8.0;
-/// The share of a line's words that must be the others' words.
-const ECHO_SHARE: f64 = 0.6;
+/// The share of a line's words that must be the others' words, in the order
+/// the others said them. (Counted in any order, and at 0.6, an answer that
+/// uses the words of the question was taken for an echo and left out:
+/// "Yes I can do that by Friday" after "Can you do that by Friday?".)
+const ECHO_SHARE: f64 = 0.75;
+/// A line this close (seconds) to a line of the others is heard at the same
+/// moment: an echo and not an answer, also with a word or two heard
+/// differently.
+const SAME_MOMENT: f64 = 1.5;
+const SAME_MOMENT_SHARE: f64 = 0.6;
 /// A short line ("OK", "Sounds good") is too little to tell by itself: it
 /// counts as an echo only close in time, and only in a meeting where longer
 /// echoes show that the microphone hears the speakers.
@@ -409,33 +417,46 @@ impl Transcript {
     }
 
     /// How much of line `i` (of "me") the others said within `seconds` of it:
-    /// the share of its words, each of the others' words counted once.
+    /// the share of its words that are the others' words in the same order
+    /// (the longest run of words, not always side by side, that both have).
     fn echoed(&self, i: usize, seconds: f64) -> f64 {
         let me = &self.lines[i];
         if me.words.is_empty() {
             return 0.0;
         }
-        let mut theirs: Vec<&str> = self
+        let theirs: Vec<&str> = self
             .lines
             .iter()
             .filter(|l| l.who == Who::Others && (l.at - me.at).abs() <= seconds)
             .flat_map(|l| l.words.iter().map(String::as_str))
             .collect();
-        let mut found = 0usize;
+        // (One row of the table at a time: the lines are short.)
+        let mut best = vec![0usize; theirs.len() + 1];
         for word in &me.words {
-            if let Some(at) = theirs.iter().position(|w| w == word) {
-                theirs.swap_remove(at);
-                found += 1;
+            let mut before = 0;
+            for (j, other) in theirs.iter().enumerate() {
+                let kept = best[j + 1];
+                best[j + 1] = if other == word { before + 1 } else { best[j + 1].max(best[j]) };
+                before = kept;
             }
         }
-        found as f64 / me.words.len() as f64
+        best[theirs.len()] as f64 / me.words.len() as f64
     }
 
     /// Work out the turns again from all the lines.
     fn rebuild(&mut self) {
         let mine: Vec<usize> = (0..self.lines.len()).filter(|&i| self.lines[i].who == Who::Me).collect();
+        let share = |i: usize| {
+            let at = self.lines[i].at;
+            let same_moment = self.lines.iter().any(|l| l.who == Who::Others && (l.at - at).abs() <= SAME_MOMENT);
+            if same_moment {
+                SAME_MOMENT_SHARE
+            } else {
+                ECHO_SHARE
+            }
+        };
         let long_echo: Vec<usize> =
-            mine.iter().copied().filter(|&i| self.lines[i].words.len() > SHORT_WORDS && self.echoed(i, ECHO_SECONDS) >= ECHO_SHARE).collect();
+            mine.iter().copied().filter(|&i| self.lines[i].words.len() > SHORT_WORDS && self.echoed(i, ECHO_SECONDS) >= share(i)).collect();
         // Word for word what the others said in the last moments, as before.
         let said_again = |i: usize| {
             let me = &self.lines[i];
@@ -1017,6 +1038,20 @@ mod tests {
         t.add(Who::Others, "Can you send the list today", 60.0);
         t.add(Who::Me, "I forgot to send it, I will send the list every day", 63.0);
         assert!(t.text().ends_with("Me: I forgot to send it, I will send the list every day"));
+        // An answer that uses the words of the question is an answer.
+        t.add(Who::Others, "Can you do that by Friday?", 70.0);
+        t.add(Who::Me, "Yes I can do that by Friday", 73.0);
+        assert!(t.text().ends_with("Others: Can you do that by Friday?\nMe: Yes I can do that by Friday"), "{}", t.text());
+        // At the same moment as the others' line, two words heard
+        // differently are still an echo.
+        let before = t.echoes();
+        t.add(Who::Others, "We need to move lunch to next week", 76.0);
+        t.add(Who::Me, "need to move launch to next weak", 76.5);
+        assert_eq!(t.echoes(), before + 1, "{}", t.text());
+        // The same words in another order are not an echo.
+        t.add(Who::Others, "The report goes to Sam on Monday and then to the board", 80.0);
+        t.add(Who::Me, "On Monday the report goes to the board and then to Sam", 84.0);
+        assert!(t.text().ends_with("Me: On Monday the report goes to the board and then to Sam"), "{}", t.text());
 
         // With headphones there are no echoes: a short answer in the others' words stays.
         let mut t = Transcript::default();

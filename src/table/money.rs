@@ -97,16 +97,24 @@ fn leading_sign(text: &str) -> Option<(&'static Currency, &str)> {
 /// `text` without a minus sign and a money sign at its start, and whether
 /// there was a minus: "-$5" and "$-5" are both (true, "5").
 pub fn strip_sign(text: &str) -> (bool, &str) {
+    // (The minus of a keyboard, and the ones that other programs write: "−", "–".)
+    const MINUS: [char; 3] = ['-', '\u{2212}', '\u{2013}'];
     let text = text.trim();
-    let (minus, text) = match text.strip_prefix('-') {
+    // An amount in brackets is less than zero, as in accounts: "(500)".
+    let (bracketed, text) = match text.strip_prefix('(').and_then(|t| t.strip_suffix(')')) {
+        Some(inner) => (true, inner.trim()),
+        None => (false, text),
+    };
+    let (minus, text) = match text.strip_prefix(MINUS) {
         Some(rest) => (true, rest.trim_start()),
         None => (false, text.strip_prefix('+').unwrap_or(text).trim_start()),
     };
     let text = leading_sign(text).map(|(_, rest)| rest).unwrap_or(text);
-    match text.strip_prefix('-') {
+    let (minus, text) = match text.strip_prefix(MINUS) {
         Some(rest) => (!minus, rest.trim_start()),
         None => (minus, text),
-    }
+    };
+    (minus != bracketed, text)
 }
 
 /// These words are a money sign or the code of a currency and no more:
@@ -163,10 +171,18 @@ pub fn grouped(value: f64, places: usize) -> String {
 /// A number as a format writes it. `places` is how many places after the
 /// point a format with no number of its own uses.
 pub fn write(format: &str, value: f64, places: Option<usize>) -> String {
+    // (An amount that rounds to nothing has no minus: "0.0", not "-0.0".)
+    let plain = |value: f64, places: usize| {
+        let text = format!("{value:.places$}");
+        match text.strip_prefix('-') {
+            Some(rest) if rest.bytes().all(|b| b == b'0' || b == b'.') => rest.to_string(),
+            _ => text,
+        }
+    };
     match format {
-        "" => format!("{:.*}", places.unwrap_or(0), value),
+        "" => plain(value, places.unwrap_or(0)),
         GROUPED => grouped(value, places.unwrap_or(0)),
-        PERCENT => format!("{:.*}%", places.unwrap_or(0), value),
+        PERCENT => format!("{}%", plain(value, places.unwrap_or(0))),
         code => match currency(code) {
             Some(cur) => {
                 let number = grouped(value, places.unwrap_or(cur.places as usize));

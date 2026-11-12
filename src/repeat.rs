@@ -216,7 +216,11 @@ pub fn apply(e: &mut Event, before: &Event, after: &Event) {
         e.end = e.start + (after.end - after.start);
     }
     if shift != 0 {
-        if let Some(r) = &mut e.repeat {
+        // (An event of every day, or of every weekday, is on the same days
+        // after the move: the days that were taken out stay those days.
+        // Moved with it, a deleted day came back and another one went.)
+        let same_days = |r: &Repeat| r.every == Every::Weekday || (r.every == Every::Day && r.interval <= 1);
+        if let Some(r) = e.repeat.as_mut().filter(|r| !same_days(r)) {
             for s in &mut r.skip {
                 if let Some(d) = when::parse_date(s) {
                     *s = when::date_value(when::add_days(d, shift));

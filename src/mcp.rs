@@ -123,8 +123,16 @@ pub enum Change {
     PageMade { id: Id, title: String },
     /// A page as it was (its name, place, Trash state…) before the change.
     PageWas { page: Page, title: String, what: String },
-    /// What was on a page before the change.
-    BlocksWere { id: Id, title: String, blocks: Vec<Block> },
+    /// What was on a page before the change, and (`left`) what the change
+    /// left on it: to take the change back, only what it changed is put
+    /// back, and what the person wrote on the page since stays.
+    BlocksWere {
+        id: Id,
+        title: String,
+        blocks: Vec<Block>,
+        #[serde(default)]
+        left: Vec<Block>,
+    },
     /// An event that was not there before.
     EventMade { id: Id, title: String },
     /// An event as it was before it was changed or removed.
@@ -168,7 +176,7 @@ fn changes_between(before: &Snap, after: &Snap) -> Vec<Change> {
         let empty = Vec::new();
         let (old, new) = (before.blocks.get(id).unwrap_or(&empty), after.blocks.get(id).unwrap_or(&empty));
         if old != new {
-            out.push(Change::BlocksWere { id: id.clone(), title: now.title.clone(), blocks: old.clone() });
+            out.push(Change::BlocksWere { id: id.clone(), title: now.title.clone(), blocks: old.clone(), left: new.clone() });
         }
     }
     let mut ids: Vec<&Id> = after.events.keys().chain(before.events.keys()).collect();
@@ -183,6 +191,22 @@ fn changes_between(before: &Snap, after: &Snap) -> Vec<Change> {
         }
     }
     out
+}
+
+/// Take away the records of AI runs of earlier days: each holds the words of
+/// the pages that a run changed, and nothing reads it after its run.
+pub fn clear_old_journals() {
+    let Ok(files) = std::fs::read_dir(std::env::temp_dir()) else { return };
+    for file in files.flatten() {
+        let name = file.file_name().to_string_lossy().into_owned();
+        if !((name.starts_with("rune-ai-") || name.starts_with("rune-ask-")) && name.ends_with(".jsonl")) {
+            continue;
+        }
+        let old = file.metadata().and_then(|m| m.modified()).ok().and_then(|at| at.elapsed().ok()).is_some_and(|age| age.as_secs() > 24 * 60 * 60);
+        if old {
+            let _ = std::fs::remove_file(file.path());
+        }
+    }
 }
 
 /// The record of an AI run, as the tools wrote it (nothing when there is none).
@@ -203,7 +227,15 @@ pub fn undo_changes(store: &Store, changes: &[Change]) -> rusqlite::Result<()> {
                 }
             }
             Change::PageWas { page, .. } => store.save_page(page)?,
-            Change::BlocksWere { id, blocks, .. } => store.save_blocks_at(id, blocks, now_ms())?,
+            Change::BlocksWere { id, blocks, left, .. } => {
+                // (The page as it is now, not as the run left it: lines
+                // written since are no part of the run, and stay. The whole
+                // page as it was, put back over them, lost those lines.)
+                let (_, all) = store.load()?;
+                let current = all.get(id).cloned().unwrap_or_default();
+                let back = if left.is_empty() { blocks.clone() } else { crate::history::rebase(&current, left, blocks) };
+                store.save_blocks_at(id, &back, now_ms())?
+            }
             Change::EventMade { id, .. } => store.delete_event(id)?,
             Change::EventWas { event, .. } => store.save_event(event)?,
         }
@@ -749,7 +781,11 @@ impl Server {
             page.updated_at = now_ms();
             self.save_page(&page)?;
         }
-        let mut body = non_empty(keep_media(old, parse_body(&pages, &strip_title_heading(markdown, &page.title))));
+        // (A line that comes back as it was is the block it was: a toggle
+        // stays a toggle, a callout keeps its icon, and a line of text under
+        // one keeps its step in. Markdown cannot say those, and each such
+        // block became a plain bullet, a quote or a line at the edge.)
+        let mut body = non_empty(crate::model::keep_unchanged(old, keep_media(old, parse_body(&pages, &strip_title_heading(markdown, &page.title)))));
         // A table of the page is the same table still (its view, the pages of its rows).
         keep_tables(old, &mut body);
         self.save_blocks(&id, &body)?;
@@ -793,6 +829,7 @@ impl Server {
         let (pages, _) = self.load()?;
         let mut page = live_page(&pages, &id)?.clone();
         let mut changed = Vec::new();
+        let mut new_space = None;
 
         if let Some(title) = arg_str(args, "title") {
             page.title = title.trim().to_string();
@@ -829,6 +866,14 @@ impl Server {
                 page.parent_id = new_parent;
                 // (The page of a row that goes to another page is a page like any other there.)
                 page.row_of = None;
+                // A page put in a page of another space is in that space,
+                // with its sub-pages (as a move in the app does it): left in
+                // its old space, it was filed there by search and opened the
+                // wrong space.
+                if let Some(space) = page.parent_id.as_ref().and_then(|np| pages.get(np)).map(|p| p.space_id.clone()).filter(|s| *s != page.space_id) {
+                    page.space_id = space.clone();
+                    new_space = Some(space);
+                }
             }
             changed.push("parent_id");
         }
@@ -837,6 +882,15 @@ impl Server {
         }
         page.updated_at = now_ms();
         self.save_page(&page)?;
+        if let Some(space) = new_space {
+            // (The list begins with the page itself, which is saved above:
+            // its old copy must not be written over it.)
+            for inner in descendants(&pages, &id).into_iter().filter(|inner| *inner != id) {
+                if let Some(sub) = pages.get(&inner) {
+                    self.save_page(&Page { space_id: space.clone(), ..sub.clone() })?;
+                }
+            }
+        }
         // (The name of a page that is a row of a table is the first cell of its row.)
         if changed.contains(&"title") {
             let (_, blocks) = self.load()?;
@@ -1827,7 +1881,7 @@ mod tests {
         assert_eq!(added["cells"]["km"], "6");
         assert_eq!(added["cells"]["Time"], "34:00");
         assert_eq!(added["cells"]["Pace"], "5:40");
-        assert_eq!(added["cells"]["Date"], crate::table::format_day(crate::when::today(), crate::when::today()));
+        assert_eq!(added["cells"]["Date"], crate::table::full_day(crate::when::today()));
         assert_eq!(added["columns_not_found"], json!(["Feel"]));
         // A row found by its day, then by its number.
         let (changed, err) = call(&mut s, "update_table_row", json!({ "page_id": log, "match": { "Date": "2026-11-10" }, "values": { "km": "3.5" } }));
@@ -1853,7 +1907,7 @@ mod tests {
         let (todo, _) = call(&mut s, "set_todo", json!({ "page_id": log, "text": "easy run", "remind": "" }));
         assert!(json_of(&todo)["remind"].is_null(), "{todo}");
         // (A day is written the way its column writes, as if typed there.)
-        let day = crate::table::format_day(chrono::NaiveDate::from_ymd_opt(2026, 11, 10).unwrap(), crate::when::today());
+        let day = crate::table::full_day(chrono::NaiveDate::from_ymd_opt(2026, 11, 10).unwrap());
         assert!(page.contains(&format!("| {day} | 3.5 | 19:30 | 5:34 |")), "{page}");
         assert!(page.contains("<!-- columns: date | number km sum | time sum | pace average -->"), "{page}");
         // Money: a row is written the way its column writes, and the name of the table stays.
@@ -1957,11 +2011,16 @@ mod tests {
         assert_eq!(count_line(&many), "8 pages made");
         let runs: Vec<Change> = (1..=5).map(|i| Change::EventMade { id: format!("e{i}"), title: format!("Run {i}") }).chain(many.iter().take(2).cloned()).collect();
         assert_eq!(describe(&runs), vec!["Added 5 events to the calendar", "Made the page “Week 1”", "Made the page “Week 2”"]);
+        // The person writes a line on the page after the run: it is no part
+        // of the run, and stays when the run is taken back.
+        let (_, mut now) = s.store.load().unwrap();
+        now.get_mut(&plan).unwrap().push(Block::text("Written since"));
+        s.store.save_blocks(&plan, &now[&plan]).unwrap();
         // Taken back: the old page as it was, the new page in the Trash, the events as before.
         undo_changes(&s.store, &changes).unwrap();
         let (pages, blocks) = s.store.load().unwrap();
         assert_eq!(pages[&plan].title, "Plan");
-        assert_eq!(blocks[&plan].iter().map(|b| b.text.as_str()).collect::<Vec<_>>(), vec!["Old line"]);
+        assert_eq!(blocks[&plan].iter().map(|b| b.text.as_str()).collect::<Vec<_>>(), vec!["Old line", "Written since"]);
         assert!(pages[&child].trashed, "a page that the run made goes to the Trash");
         let events: Vec<String> = s.store.load_events().unwrap().into_iter().map(|e| e.title).collect();
         assert_eq!(events, vec!["Run"]);
@@ -2023,6 +2082,28 @@ mod tests {
         assert!(err && text.contains("page_id"));
         let (text, err) = call(&mut s, "read_page", json!({ "page_id": "missing" }));
         assert!(err && text.contains("No page"));
+    }
+
+    #[test]
+    fn a_page_moved_into_a_page_of_another_space_goes_there_with_what_is_under_it() {
+        let mut s = server();
+        let home = Space::new("Home", "blue", 0.0);
+        let side = Space::new("Side project", "green", 1.0);
+        s.store.save_space(&home).unwrap();
+        s.store.save_space(&side).unwrap();
+        s.store.set_setting("space", &home.id).unwrap();
+        let made = |s: &mut Server, args: Value| json_of(&call(s, "create_page", args).0)["id"].as_str().unwrap().to_string();
+        let trip = made(&mut s, json!({ "title": "Trip" }));
+        let list = made(&mut s, json!({ "title": "Packing", "parent_id": trip }));
+        s.store.set_setting("space", &side.id).unwrap();
+        let shelf = made(&mut s, json!({ "title": "Shelf" }));
+        let (text, err) = call(&mut s, "update_page", json!({ "page_id": trip, "parent_id": shelf, "title": "Trip to Rome" }));
+        assert!(!err, "{text}");
+        let (pages, _) = s.store.load().unwrap();
+        let p = &pages[&trip];
+        assert_eq!((p.parent_id.as_deref(), p.title.as_str(), p.space_id.as_str()), (Some(shelf.as_str()), "Trip to Rome", side.id.as_str()), "the page itself is moved and named");
+        assert_eq!(pages[&list].space_id, side.id, "and what is under it goes with it");
+        assert_eq!(pages[&list].parent_id.as_deref(), Some(trip.as_str()));
     }
 
     #[test]

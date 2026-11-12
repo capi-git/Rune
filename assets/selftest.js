@@ -1527,7 +1527,8 @@ await run('Many pages in one tab, on any side', async () => {
   const sr = sash.getBoundingClientRect();
   sash.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: sr.left + 4, clientY: sr.top + 40 }));
   const pull = Math.min(60, Math.max(10, Math.round(before - 210)));
-  document.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: sr.left + 4 - pull, clientY: sr.top + 40 }));
+  // (With the button held, as in a real drag: a move with no button ends the drag.)
+  document.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, buttons: 1, clientX: sr.left + 4 - pull, clientY: sr.top + 40 }));
   await wait(60);
   document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: sr.left + 4 - pull, clientY: sr.top + 40 }));
   check('Dragging the line between panes resizes them', await until(() => Math.abs(cell.getBoundingClientRect().width - (before - pull)) < 12), `${before} - ${pull} -> ${cell.getBoundingClientRect().width}`);
@@ -1580,7 +1581,7 @@ await run('Split view', async () => {
   const lr = line.getBoundingClientRect();
   const y = lr.top + 60;
   const pullTo = async (x) => {
-    document.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: x, clientY: y }));
+    document.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, buttons: 1, clientX: x, clientY: y }));
     await wait(80);
   };
   line.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: lr.left + 4, clientY: y }));
@@ -2078,7 +2079,7 @@ await run('Typed tables and charts', async () => {
   snap('column-menu');
   $('[data-item="total"]', menu).click();
   (await until(() => $('.column-sub [data-item="average"]', menu))).click();
-  check('Choosing a total changes the foot of that column', await until(() => totals().includes('Avg 3.2')), totals());
+  check('Choosing a total changes the foot of that column', await until(() => totals().includes('Avg 3.17')), totals());
   (await until(() => $('.backdrop'))).click();
   check('A click elsewhere closes the menu', await until(() => !$('.column-menu')));
 
@@ -2482,7 +2483,7 @@ await run('A table with many columns', async () => {
   const rows = () => $$('tr[data-r]', box(2)).slice(1).map((tr) => $('.cell[data-c="0"]', tr).value).join('|');
   const caret = () => `${document.activeElement?.dataset.r},${document.activeElement?.dataset.c}`;
   $('[data-new-row]', wraps()[2]).click();
-  check('A row for today uses the empty row of a new table', (await until(() => /^\w{3} \d+ \w{3}$/.test(rows()) && caret() === '1,1', 3000)) && !$('.table-totals', wraps()[2])?.textContent.includes('0 rows'), `${rows()} caret ${caret()}`);
+  check('A row for today uses the empty row of a new table', (await until(() => /^\w{3} \d+ \w{3} \d{4}$/.test(rows()) && caret() === '1,1', 3000)) && !$('.table-totals', wraps()[2])?.textContent.includes('0 rows'), `${rows()} caret ${caret()}`);
   $('[data-new-row]', wraps()[2]).click();
   check('…and the next one is a new row under it, with the caret in it', await until(() => rows().split('|').length === 2 && rows().split('|').every((d) => d) && caret() === '2,1', 3000), `${rows()} caret ${caret()}`);
   check('The count at the foot says how many rows there are', $('.table-totals', wraps()[2])?.textContent.includes('2 rows'), $('.table-totals', wraps()[2])?.textContent);
@@ -3111,6 +3112,8 @@ await run('Cell editors, row boxes and row search', async () => {
     const m = d.toLocaleDateString('en-GB', { month: 'short' }).slice(0, 3);
     return `${w} ${d.getDate()} ${m}${d.getFullYear() === new Date().getFullYear() ? '' : ' ' + d.getFullYear()}`;
   };
+  // What a cell holds has its year (what it shows has not, this year).
+  const dayHeld = (d) => { const w = dayWords(d); return /\d{4}$/.test(w) ? w : `${w} ${d.getFullYear()}`; };
   const picker = () => $('.date-picker.anchored', frame());
 
   // ----- a date cell: a month to pick a day from -------------------------------
@@ -3120,20 +3123,20 @@ await run('Cell editors, row boxes and row search', async () => {
   let p = await until(picker);
   await wait(220);
   const field = p && $('.pick-input', p);
-  check('A click on it opens the day picker: the box with its day, its month, today marked', p && field && document.activeElement === field && field.value === date.value && $('.date-month', p)?.textContent === 'November 2026' && $('.date-day.on', p)?.dataset.day === '2026-11-03' && $('.date-day.today', p)?.dataset.day === (() => { const t = new Date(); return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`; })(), p && `${field?.value} | ${$('.date-month', p)?.textContent} | on ${$('.date-day.on', p)?.dataset.day} | today ${$('.date-day.today', p)?.dataset.day} | keys in ${document.activeElement?.className}`);
+  check('A click on it opens the day picker: the box with its day, its month, today marked', p && field && document.activeElement === field && field.value === date.textContent.trim() && /\d{4}$/.test(date.value) && $('.date-month', p)?.textContent === 'November 2026' && $('.date-day.on', p)?.dataset.day === '2026-11-03' && $('.date-day.today', p)?.dataset.day === (() => { const t = new Date(); return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`; })(), p && `${field?.value} | ${$('.date-month', p)?.textContent} | on ${$('.date-day.on', p)?.dataset.day} | today ${$('.date-day.today', p)?.dataset.day} | keys in ${document.activeElement?.className}`);
   check('…all of it in the window, on top, under its cell', p && inWindow(p) && onTopAt($('.date-day', p)) && onTopAt($('[data-item="clear"]', p)) && (Math.abs(rect(p).top - (rect(date.closest('td')).bottom + 4)) < 3 || (rect(p).bottom >= innerHeight - 10 && rect(p).top < rect(date.closest('td')).bottom + 4)), p && `${[rect(p).left, rect(p).top, rect(p).right, rect(p).bottom].map(Math.round)} under ${Math.round(rect(date.closest('td')).bottom)}`);
   snap('date-picker');
   $('.date-step[aria-label="Next month"]', p).click();
   await until(() => $('.date-month', p)?.textContent === 'December 2026');
   $('.date-day[data-day="2026-12-09"]', p).click();
-  check('A click on a day writes it in the cell and closes the picker', await until(() => !picker() && cell(1, 1).value === dayWords(new Date(2026, 11, 9))), `${cell(1, 1)?.value}`);
+  check('A click on a day writes it in the cell and closes the picker', await until(() => !picker() && cell(1, 1).value === dayHeld(new Date(2026, 11, 9))), `${cell(1, 1)?.value}`);
   // Typed in its box: the month follows, Return writes it.
   cell(2, 1).click();
   p = await until(picker);
   typeIn($('.pick-input', p), '14 Feb 2027');
   check('A day typed in the box moves the month to it', await until(() => $('.date-month', p)?.textContent === 'February 2027'), $('.date-month', p)?.textContent);
   key($('.pick-input', p), 'Enter');
-  check('…and Return writes it in the cell, as the column writes days, and gives the cell back the keyboard', await until(() => !picker() && cell(2, 1).value === dayWords(new Date(2027, 1, 14)) && document.activeElement === cell(2, 1)), `${cell(2, 1)?.value} | keys in ${document.activeElement?.className}`);
+  check('…and Return writes it in the cell, as the column writes days, and gives the cell back the keyboard', await until(() => !picker() && cell(2, 1).value === dayHeld(new Date(2027, 1, 14)) && document.activeElement === cell(2, 1)), `${cell(2, 1)?.value} | keys in ${document.activeElement?.className}`);
   // The keyboard: a letter opens it to type in; ↓ goes to the month, the arrows move the day, Return picks it.
   key(cell(2, 1), '3');
   p = await until(picker);
@@ -3151,7 +3154,7 @@ await run('Cell editors, row boxes and row search', async () => {
   const moved = await until(() => document.activeElement?.dataset.day === '2026-11-28' && document.activeElement);
   check('…where → moves a day and ↓ a week', moved, document.activeElement?.dataset.day);
   moved?.click();
-  check('…and that day is written', await until(() => !picker() && cell(2, 1).value === dayWords(new Date(2026, 10, 28))), cell(2, 1)?.value);
+  check('…and that day is written', await until(() => !picker() && cell(2, 1).value === dayHeld(new Date(2026, 10, 28))), cell(2, 1)?.value);
   // Clear, and Escape.
   cell(3, 1).click();
   p = await until(picker);
@@ -3160,10 +3163,10 @@ await run('Cell editors, row boxes and row search', async () => {
   cell(1, 1).click();
   p = await until(picker);
   key($('.pick-input', p), 'Escape');
-  check('Escape closes the picker, the day as it was, and the keyboard goes back to the cell', await until(() => !picker() && document.activeElement === cell(1, 1), 1500) && cell(1, 1).value === dayWords(new Date(2026, 11, 9)), `${cell(1, 1)?.value} | keys in ${document.activeElement?.className}`);
+  check('Escape closes the picker, the day as it was, and the keyboard goes back to the cell', await until(() => !picker() && document.activeElement === cell(1, 1), 1500) && cell(1, 1).value === dayHeld(new Date(2026, 11, 9)), `${cell(1, 1)?.value} | keys in ${document.activeElement?.className}`);
 
   // ----- an end date, a time of day, a reminder (as Notion's picker has) -------
-  const nine = dayWords(new Date(2026, 11, 9));
+  const nine = dayHeld(new Date(2026, 11, 9));
   cell(1, 1).click();
   p = await until(picker);
   $('[data-item="time"]', p).click();
@@ -3175,7 +3178,7 @@ await run('Cell editors, row boxes and row search', async () => {
   $('[data-item="end"]', picker()).click();
   check('End date gives it an end: an hour later the same day', await until(() => cell(1, 1).value === `${nine} 2:30 PM → 3:30 PM` && $('[data-item="end-time"]', picker())?.value === '3:30 PM'), cell(1, 1).value);
   $('.date-day[data-day="2026-12-12"]', picker()).click();
-  check('…a click on a day then sets the end, the picker stays open, and the days between are marked', await until(() => cell(1, 1).value === `${nine} 2:30 PM → ${dayWords(new Date(2026, 11, 12))} 3:30 PM` && picker() && $('.date-day[data-day="2026-12-10"]', picker())?.classList.contains('in-range') && $('.date-day[data-day="2026-12-12"]', picker())?.classList.contains('on')), cell(1, 1).value);
+  check('…a click on a day then sets the end, the picker stays open, and the days between are marked', await until(() => cell(1, 1).value === `${nine} 2:30 PM → ${dayHeld(new Date(2026, 11, 12))} 3:30 PM` && picker() && $('.date-day[data-day="2026-12-10"]', picker())?.classList.contains('in-range') && $('.date-day[data-day="2026-12-12"]', picker())?.classList.contains('on')), cell(1, 1).value);
   $('[data-item="remind"]', picker()).click();
   const fifteen = await until(() => $('[data-remind="15"]', picker()));
   check('Remind lists the times before it to be reminded', fifteen && $$('[data-remind]', picker()).length === 10, `${$$('[data-remind]', picker()).length} choices`);
@@ -3240,8 +3243,38 @@ await run('Cell editors, row boxes and row search', async () => {
   const inStrip = document.elementFromPoint(rect(box()).left + 4, fcs.top + 6);
   const boxNow = rect($('.row-check', tr(1)));
   check('A table scrolled sideways keeps its frozen first column right of the strip of the boxes, and its box beside it', box().scrollLeft > 100 && Math.abs(fcs.left - (rect(box()).left + strip)) < 1.5 && Math.abs(boxNow.left - cb.left) < 1 && (!inStrip || !inStrip.closest('td') || inStrip.closest('td').dataset.col === '0'), `scrolled ${box().scrollLeft}; first cell at ${Math.round(fcs.left)}, box ${Math.round(rect(box()).left)} + ${strip}; check at ${Math.round(boxNow.left)} (was ${Math.round(cb.left)}); in the strip: ${inStrip?.className} of column ${inStrip?.closest('td')?.dataset.col}`);
+  // The frozen cell and the strip are see-through, as in Notion (the page
+  // is glass: a colour of their own showed as a dark block), and a cell that
+  // slid under them is cut at their right edge, so its words do not show.
+  // (A column all under the frozen cell does not show; the one column partly
+  // under it is cut at its right edge; the others are whole.)
+  const cutsRight = () => {
+    const edge = rect($('td[data-col="0"]', tr(1))).right;
+    const bad = [];
+    for (const td of $$('td[data-col]:not(.frozen)', tr(1))) {
+      const r = rect(td);
+      const clip = getComputedStyle(td).clipPath;
+      const m = /inset\([^)]*?([\d.]+)px\)$/.exec(clip);
+      const ok = r.right <= edge + 0.25 ? clip === 'inset(50%)' : r.left < edge - 0.25 ? !!m && Math.abs(r.left + parseFloat(m[1]) - edge) < 1.5 : clip === 'none';
+      if (!ok) bad.push(`column ${td.dataset.col} from ${Math.round(r.left)} to ${Math.round(r.right)}, edge ${Math.round(edge)}: ${clip}`);
+    }
+    return bad;
+  };
+  check('A frozen cell is see-through, and the cells that slide under it are cut at its right edge', getComputedStyle($('td[data-col="0"]', tr(1))).backgroundColor === 'rgba(0, 0, 0, 0)' && cutsRight().length === 0, `background ${getComputedStyle($('td[data-col="0"]', tr(1))).backgroundColor}; ${cutsRight().join('; ')}`);
+  // A swipe sideways: the table and the cuts move in one step (no moment in
+  // which the words of a cell show under the frozen cell).
+  box().dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+  const slidAt = box().scrollLeft;
+  const swipe = (dx, dy = 0) => box().dispatchEvent(new WheelEvent('wheel', { deltaX: dx, deltaY: dy, bubbles: true, cancelable: true }));
+  const taken = [-37, -41, -23].map((dx) => {
+    const own = !swipe(dx);
+    return own && cutsRight().length === 0;
+  });
+  check('A swipe sideways moves the table and its cuts in one step', taken.every(Boolean) && Math.abs(slidAt - 101 - box().scrollLeft) < 1.5, `${taken}; scrolled from ${slidAt} to ${box().scrollLeft}; ${cutsRight().join('; ')}`);
+  check('…and a swipe up or down is left to the page', swipe(2, 30));
   box().scrollLeft = 0;
   await wait(100);
+  check('…and back at the start nothing is cut', await until(() => getComputedStyle($('td[data-col="1"]', tr(1))).clipPath === 'none'), getComputedStyle($('td[data-col="1"]', tr(1))).clipPath);
   check1.click();
   check('A click on the box picks the row, with no menu', await until(() => picked() === '1' && bar() === '1 row selected' && !$('.row-menu') && $('.row-check', tr(1)).getAttribute('aria-checked') === 'true'), `${picked()} | ${bar()}`);
   const head = () => $('.head-check', box());
@@ -3325,7 +3358,7 @@ await run('Cell editors, row boxes and row search', async () => {
   if (sidePicker && !$('.date-day[data-day="2026-12-24"]', sidePicker)) $('.date-step[aria-label="Next month"]', sidePicker)?.click();
   const eve = await until(() => sidePicker && $('.date-day[data-day="2026-12-24"]', sidePicker));
   eve?.click();
-  check('…and a day picked there is the day of the row in the table too', await until(() => cell(1, 1).value === dayWords(new Date(2026, 11, 24)) && $('.row-values .cell.pick.date[data-c="1"]', side)?.textContent.trim() === dayWords(new Date(2026, 11, 24))), `${cell(1, 1).value} | ${side && $('.row-values .cell.pick.date[data-c="1"]', side)?.textContent}`);
+  check('…and a day picked there is the day of the row in the table too', await until(() => cell(1, 1).value === dayHeld(new Date(2026, 11, 24)) && $('.row-values .cell.pick.date[data-c="1"]', side)?.textContent.trim() === dayWords(new Date(2026, 11, 24))), `${cell(1, 1).value} | ${side && $('.row-values .cell.pick.date[data-c="1"]', side)?.textContent}`);
   side && $('.row-values .cell.computed[data-c="4"]', side)?.click();
   const sideNote = await until(() => side && $('.row-values .worked-out', side));
   check("A formula at the top of a row's page says what it is worked out from", sideNote && /= Price \* Qty/.test(sideNote.textContent) && !$('[data-item="edit-formula"]', sideNote), sideNote?.textContent);
@@ -4107,6 +4140,161 @@ await run('The AI does things in Rune with its tools', async () => {
   await until(() => !$('.ai-panel'));
 });
 
+await run('More than pictures for the AI', async () => {
+  await oneTab();
+  const title = await newPage('Given things');
+  key(title, 'Enter');
+  const first = await until(() => document.activeElement?.classList.contains('blk') && document.activeElement);
+  const pane = () => shownPane('Given things');
+  const nextLine = async (from) => {
+    key(from, 'Enter');
+    return until(() => document.activeElement !== from && document.activeElement?.classList.contains('blk') && document.activeElement);
+  };
+  typeIn(first, 'Line one');
+  const second = await nextLine(first);
+  typeIn(second, 'Line two');
+  const third = await nextLine(second);
+  typeIn(third, 'Line three');
+  const lines = () => $$('.block-row', pane()).map((r) => r.querySelector('.blk')?.textContent.replace(/\u200b/g, '') ?? '').join('|');
+  const chips = () => $$('.ai-dock .ai-chip').map((c) => `${c.querySelector('.ai-chip-name').textContent}${c.querySelector('.ai-chip-note') ? ' · ' + c.querySelector('.ai-chip-note').textContent : ''}`);
+  const ask = async (words) => {
+    const box = $('.ai-dock #ai-input');
+    box.value = words;
+    box.dispatchEvent(new Event('input', { bubbles: true }));
+    await until(() => $('#ai-send'));
+    key(box, 'Enter');
+  };
+  // (The whole answer: its buttons come when it is complete.)
+  const answer = async () => {
+    await until(() => $$('.ai-actions button').some((b) => ['Discard', 'Done', 'Replace'].includes(b.textContent)), 10000);
+    return $('.ai-output')?.textContent ?? '';
+  };
+  const discard = async () => {
+    await answer();
+    $$('.ai-actions button').find((b) => b.textContent === 'Discard' || b.textContent === 'Done')?.click();
+    await until(() => !$('.ai-panel'), 4000);
+  };
+  // A small PDF with real words in it, written by hand.
+  const pdfFile = (words) => {
+    const text = `BT /F1 14 Tf 72 720 Td 18 TL ${words.map((w) => `(${w}) Tj T*`).join(' ')} ET`;
+    const objects = ['<< /Type /Catalog /Pages 2 0 R >>', '<< /Type /Pages /Kids [3 0 R] /Count 1 >>', '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>', `<< /Length ${text.length} >>\nstream\n${text}\nendstream`, '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>'];
+    let out = '%PDF-1.4\n';
+    const places = [];
+    objects.forEach((o, i) => {
+      places.push(out.length);
+      out += `${i + 1} 0 obj\n${o}\nendobj\n`;
+    });
+    const xref = out.length;
+    out += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${places.map((p) => `${String(p).padStart(10, '0')} 00000 n \n`).join('')}trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+    return new File([out], 'statement.pdf', { type: 'application/pdf' });
+  };
+  const give = (el, type, file) => {
+    const data = new DataTransfer();
+    data.items.add(file);
+    el.dispatchEvent(type === 'paste' ? new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }) : new DragEvent('drop', { dataTransfer: data, bubbles: true, cancelable: true }));
+  };
+
+  // ----- files: a table as CSV, a PDF -----------------------------------------
+  askAi();
+  const box = await until(() => $('.ai-dock #ai-input'));
+  const blocksBefore = $$('.block-row', pane()).length;
+  give(box, 'paste', new File(['Item,Amount\nRent,2000\n'], 'budget.csv', { type: 'text/csv' }));
+  check('A table file pasted into the AI box shows there as a small chip with its rows', await until(() => chips().join('|') === 'budget.csv · 2 rows', 4000), chips().join('|'));
+  give($('.ai-dock'), 'drop', pdfFile(['Statement for November', 'Rent 2,000.00']));
+  check('A PDF dropped on the box shows with its pages', await until(() => chips().join('|') === 'budget.csv · 2 rows|statement.pdf · 1 page', 8000), chips().join('|'));
+  check('…and neither is put into the page', $$('.block-row', pane()).length === blocksBefore);
+  snap('ai-given');
+  const dock = $('.ai-dock').getBoundingClientRect();
+  check('The chips are a quiet row over the box, inside the window', (() => { const row = $('#ai-given')?.getBoundingClientRect(); return row && row.height <= 40 && row.top >= dock.top - 1 && row.bottom <= $('.ai-dock #ai-input').getBoundingClientRect().top + 2 && dock.bottom <= innerHeight; })(), `${Math.round($('#ai-given')?.getBoundingClientRect().height ?? 0)}`);
+  give(box, 'paste', new File([new Uint8Array([0, 159, 146, 150, 0, 1])], 'photo.bin'));
+  check('A file that is no words is not taken, and the app says so', await until(() => /not a file of words/.test(document.body.textContent), 4000) && chips().length === 2, chips().join('|'));
+  $$('.ai-dock .ai-chip-x')[0].click();
+  check('A press on a chip takes it out again', await until(() => chips().join('|') === 'statement.pdf · 1 page', 2000), chips().join('|'));
+  give(box, 'paste', new File(['Item,Amount\nRent,2000\n'], 'budget.csv', { type: 'text/csv' }));
+  await until(() => chips().length === 2, 4000);
+  await ask('what is in these? [[reply: Got: {given}]]');
+  const got = await answer();
+  check('Their words go to the AI with the request, each with its name and kind', got && got.includes('statement.pdf (PDF): Statement for November') && got.includes('budget.csv (table): Item,Amount / Rent,2000'), got);
+  check('…and the line that says what was asked counts them', $('.ai-caption')?.textContent.includes('2 files'), $('.ai-caption')?.textContent);
+  await discard();
+
+  // ----- another page of the notes, after "@" ---------------------------------
+  askAi();
+  const at = await until(() => $('.ai-dock #ai-input'));
+  at.value = 'compare with @Getting';
+  at.dispatchEvent(new Event('input', { bubbles: true }));
+  const rows = await until(() => ($$('#ai-pages .ai-page-row').length ? $$('#ai-pages .ai-page-row') : null), 3000);
+  check('"@" and a few letters in the AI box list the pages with that name', rows && rows[0].textContent.trim() === 'Getting Started' && rows[0].classList.contains('on'), rows?.map((r) => r.textContent.trim()).join('|'));
+  snap('ai-pages');
+  key(at, 'Enter');
+  check('Return gives that page with the request, and takes the "@name" out of the words', await until(() => chips().join('|') === 'Getting Started' && $('.ai-dock #ai-input').value === 'compare with ' && !$('#ai-pages'), 3000), `${chips().join('|')} / "${$('.ai-dock #ai-input')?.value}"`);
+  check('…and the box is still open, with nothing sent', $('.ai-dock #ai-input') && !$('.ai-output'));
+  await ask('compare with [[reply: Got: {given}]]');
+  const page = await answer();
+  check('The words of that page go to the AI as a page of the notes', page && page.includes('Getting Started (page of the notes): '), page);
+  await discard();
+
+  // ----- a web address: offered, and fetched only when asked ------------------
+  askAi();
+  const web = await until(() => $('.ai-dock #ai-input'));
+  web.value = 'sum up https://example.com/rates please';
+  web.dispatchEvent(new Event('input', { bubbles: true }));
+  const offer = await until(() => $('#ai-offer'), 3000);
+  check('A web address in the request is only offered: "Get the page", and nothing is fetched by itself', offer && offer.textContent.trim() === 'Get the page example.com/rates' && chips().length === 0, `${offer?.textContent} / ${chips().join('|')}`);
+  snap('ai-offer');
+  web.value = 'sum up the rates please';
+  web.dispatchEvent(new Event('input', { bubbles: true }));
+  check('…and the offer goes when the address goes', await until(() => !$('#ai-offer'), 2000));
+  key(web, 'Escape');
+  await until(() => !$('.ai-panel'));
+
+  // ----- a part of the page: what is picked ------------------------------------
+  const rowOf = (words) => $$('.block-row', pane()).find((r) => r.querySelector('.blk')?.textContent === words);
+  const press = (el, opts = {}) => el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, ...opts }));
+  press(rowOf('Line two'));
+  await until(() => $$('.block-row.picked', pane()).length === 1, 3000);
+  press(rowOf('Line three'), { shiftKey: true });
+  await until(() => $$('.block-row.picked', pane()).length === 2, 3000);
+  // (A press on the AI button keeps what is picked.)
+  press($('.pane.focused .ai-dock-btn') || $$('.ai-dock-btn').find((b) => b.offsetParent));
+  await wait(150);
+  check('A press on the AI button keeps the picked blocks picked', $$('.block-row.picked', pane()).length === 2, String($$('.block-row.picked', pane()).length));
+  askAi();
+  await until(() => $('.ai-dock #ai-input'));
+  check('With blocks picked, the AI box says that the request is about that part only', await until(() => chips().join('|') === 'The 2 picked blocks only', 3000), chips().join('|'));
+  await ask('what is here? [[reply: Page: {page}]]');
+  const part = await answer();
+  check('The AI is given that part as the page, and not the rest', part && /Page: Line two[ \/]+Line three/.test(part) && !part.includes('Line one'), part);
+  await discard();
+  // (The caret is back in the page after the answer: the part is picked again.)
+  press(rowOf('Line two'));
+  await until(() => $$('.block-row.picked', pane()).length === 1, 3000);
+  press(rowOf('Line three'), { shiftKey: true });
+  await until(() => $$('.block-row.picked', pane()).length === 2, 3000);
+  askAi();
+  await until(() => $('.ai-dock #ai-input'));
+  await until(() => chips().join('|') === 'The 2 picked blocks only', 3000);
+  await ask('make them louder [[reply: @replace\\nLINE TWO\\n\\nLine three\\n\\nLine four]]');
+  const replace = await until(() => $('#ai-replace') || $$('.ai-actions button').find((b) => b.textContent === 'Replace'), 8000);
+  replace?.click();
+  check('Replace puts the AI\'s words in place of that part only: the line before it stays', await until(() => lines() === 'Line one|LINE TWO|Line three|Line four', 5000), lines());
+  T().command('undo');
+  check('…and one Undo brings the part back', await until(() => lines() === 'Line one|Line two|Line three', 4000), lines());
+
+  // ----- the box that asks all the notes takes files too ----------------------
+  T().command('ask_notes');
+  const all = await until(() => $('#ask-notes-input'), 3000);
+  if (all) {
+    give(all, 'paste', new File(['Item,Amount\nTea,4\n'], 'prices.csv', { type: 'text/csv' }));
+    check('A file pasted into the box that asks all the notes shows there too', await until(() => $('#ask-given .ai-chip-name')?.textContent === 'prices.csv', 4000), $('#ask-given')?.textContent);
+    key(all, 'Escape');
+    $('.modal-backdrop')?.click();
+    await until(() => !$('#ask-notes-input'), 2000);
+  } else {
+    check('The box that asks all the notes opens', false, 'no box');
+  }
+});
+
 await run('Select all, copy and delete', async () => {
   await oneTab();
   const title = await newPage('Pick me');
@@ -4194,6 +4382,60 @@ await run('Select all, copy and delete', async () => {
     await until(() => picked().length === 0, 3000);
   }
 
+  // A drag from the empty part of the page draws a box, and the blocks the
+  // box touches are picked (as in Notion).
+  {
+    const scroller = rows()[0].closest('.scroller');
+    const view = scroller.getBoundingClientRect();
+    const r = rows().map((row) => row.getBoundingClientRect());
+    const ev = (el, type, x, y, buttons = 1) => el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, buttons, clientX: x, clientY: y }));
+    const x0 = view.left + 6;
+    const y0 = r[0].top + 3;
+    const mid = (i) => r[i].top + r[i].height / 2;
+    const box = () => $('.marquee');
+    // (While the drag goes on, the page script marks the blocks itself.)
+    const marked = () => $$('.block-row[data-mq]', pane());
+    // (The press is the page script's own: the engine starts no selection of
+    // text with it, which would take the caret from line to line in the drag.)
+    const own = !ev(scroller, 'mousedown', x0, y0);
+    check('A press on the empty part of a page starts no selection of text', own);
+    ev(scroller, 'mousemove', x0 + 2, y0 + 2);
+    await wait(80);
+    check('A press on the empty part of a page that does not move draws no box and picks nothing', !box() && marked().length === 0 && picked().length === 0, `${!!box()} ${marked().length}`);
+    ev(scroller, 'mousemove', r[1].left + 60, mid(1));
+    const drawn = box()?.getBoundingClientRect();
+    check('A drag from there draws a box from the press to the pointer, and the box is seen', !!drawn && getComputedStyle(box()).backgroundColor !== 'rgba(0, 0, 0, 0)' && Math.abs(drawn.left - x0) < 1.5 && Math.abs(drawn.top - y0) < 1.5 && Math.abs(drawn.right - (r[1].left + 60)) < 1.5 && Math.abs(drawn.bottom - mid(1)) < 1.5, drawn ? `${[drawn.left, drawn.top, drawn.right, drawn.bottom].map(Math.round)}` : 'no box');
+    check('…and the blocks the box touches are marked at once: the line and the divider', marked().length === 2 && marked()[1].classList.contains('kind-divider') && getComputedStyle(marked()[0]).transitionDuration !== '0s', String(marked().length));
+    ev(scroller, 'mousemove', r[2].left + 60, mid(2));
+    check('The box made larger picks the next line too', await until(() => marked().length === 3, 3000), String(marked().length));
+    ev(scroller, 'mousemove', r[0].left + 60, y0 + 6);
+    check('…and made smaller lets the others go', await until(() => marked().length === 1 && marked()[0] === rows()[0], 3000), String(marked().length));
+    if (r[0].left - x0 > 12) {
+      ev(scroller, 'mousemove', x0 + 6, mid(2));
+      check('A box that touches no block picks none', await until(() => marked().length === 0, 3000), String(marked().length));
+    }
+    ev(scroller, 'mousemove', r[2].left + 60, mid(2));
+    await until(() => marked().length === 3, 3000);
+    window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0 }));
+    await wait(150);
+    check('Let go, the box goes and the blocks are picked, with the marks of the drag gone', (await until(() => picked().length === 3 && marked().length === 0, 3000)) && !box() && !document.body.classList.contains('drag-picking'), `${!!box()} ${picked().length} ${marked().length}`);
+    delete document.body.dataset.copied;
+    cmd(document.body, 'c');
+    check('…and ⌘C copies them', await until(() => document.body.dataset.copied === 'First line\n\n---\n\nLast line', 3000), JSON.stringify(document.body.dataset.copied));
+    // A press in the words of a line is for its text: no box.
+    key(document.body, 'Escape');
+    await until(() => picked().length === 0, 3000);
+    await wait(600);
+    const words = $$('.blk', pane())[0];
+    const w = words.getBoundingClientRect();
+    ev(words, 'mousedown', w.left + 10, w.top + w.height / 2);
+    ev(words, 'mousemove', w.left + 60, w.top + w.height / 2);
+    await wait(80);
+    check('A drag that begins in the words of a line draws no box', !box() && picked().length === 0, `${!!box()} ${picked().length}`);
+    window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0 }));
+    await wait(600);
+  }
+
   // A press on a block that is not text picks it; Delete takes it out.
   const mouse = (el, type, opts = {}) => el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, ...opts }));
   mouse($('.kind-divider .divider', pane()), 'mousedown');
@@ -4222,6 +4464,28 @@ await run('Select all, copy and delete', async () => {
   check('The caret is in that line', await until(() => document.activeElement === $('.blk', pane()), 2000));
   T().command('undo');
   check('One Undo brings the whole page back', await until(() => texts() === 'text:First line|divider:|text:Last line', 3000), texts());
+
+  // A block cut and pasted in the app comes back as it was: the app keeps
+  // the blocks beside the words that go to the clipboard. (As words alone,
+  // a large heading came back one size smaller.)
+  const lastLine = $$('.blk', pane()).pop();
+  lastLine.focus();
+  T().setSel(lastLine, 9);
+  const extra = await nextLine(lastLine);
+  typeIn(extra, '# ');
+  const big = await until(() => $('.block-row.kind-heading1 .blk', pane()), 3000);
+  if (big) typeIn(big, 'Big words');
+  const made = await until(() => texts().endsWith('heading1:Big words'), 3000);
+  mouse($('.block-row.kind-heading1', pane()), 'mousedown');
+  await until(() => picked().length === 1, 3000);
+  delete document.body.dataset.copied;
+  cmd(document.body, 'x');
+  await until(() => document.body.dataset.copied && !texts().includes('heading1'), 3000);
+  const firstLine = $$('.blk', pane())[0];
+  firstLine.focus();
+  T().setSel(firstLine, 10);
+  window.__n2.pasteText(document.body.dataset.copied || '');
+  check('A heading cut and pasted in the app is the same heading, not one a size smaller', made && (await until(() => texts().startsWith('text:First line|heading1:Big words|'), 3000)), `${made ? '' : 'no heading made; '}${texts()} / ${JSON.stringify(document.body.dataset.copied)}`);
 });
 
 await run('Links between notes', async () => {
@@ -4475,7 +4739,7 @@ await run('Pictures anywhere on a page, and large on a click', async () => {
   const apart = (a, b) => a.right <= b.left + 0.5 || b.right <= a.left + 0.5 || a.bottom <= b.top + 0.5 || b.bottom <= a.top + 0.5;
   // Is every line of the page clear of the picture (not under it, not over it)?
   const clear = () => $$('.block-row:not(.free) > .block-inner', pane()).every((el) => apart(at(el), at(box())));
-  const mouse = (el, type, x, y) => el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, clientX: x, clientY: y }));
+  const mouse = (el, type, x, y) => el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, buttons: type === 'mouseup' ? 0 : 1, clientX: x, clientY: y }));
   // Press on the middle of something and pull it; the answer lets it go.
   const pull = (el, dx, dy) => {
     const r = at(el);

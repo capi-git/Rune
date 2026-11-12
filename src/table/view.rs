@@ -369,7 +369,9 @@ impl Table {
         let compare = |ok: fn(f64, f64) -> bool| matches!((amount(text), amount(want)), (Some(a), Some(b)) if ok(a, b));
         let same = || match kind {
             Kind::Multi => parts(text).iter().any(|p| p.to_lowercase() == want.to_lowercase()),
-            _ if measured => compare(|a, b| a == b),
+            // (A formula can give words, "Win" or "Loss": those are
+            // compared as words.)
+            _ if measured && (amount(text).is_some() || amount(want).is_some()) => compare(|a, b| a == b),
             _ => text.to_lowercase() == want.to_lowercase(),
         };
         let has = || text.to_lowercase().contains(&want.to_lowercase());

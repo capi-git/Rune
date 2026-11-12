@@ -1883,6 +1883,40 @@ body[data-resizing="rows"] * {
   -webkit-user-select: none;
   user-select: none;
 }
+/* The box of a drag over the page: the blocks it touches are picked. */
+.marquee {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 60;
+  pointer-events: none;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--text) 12%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 28%, transparent);
+  will-change: transform, width, height;
+}
+/* The blocks the box touches, marked at once by the page script while the
+   drag goes on (as picked blocks are), with a short fade in and out. */
+.blocks[data-mq-on] > .block-row {
+  transition: background-color 140ms ease;
+}
+.block-row[data-mq] {
+  background: color-mix(in srgb, var(--text) 11%, transparent);
+  border-radius: 4px;
+}
+.block-row[data-mq] + .block-row[data-mq] {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+.drag-picking {
+  -webkit-user-select: none;
+  user-select: none;
+}
+/* While a box is drawn, what is under the pointer does not answer to it: no
+   handle, row box or pointer shape comes and goes as the box passes. */
+.box-picking .page {
+  pointer-events: none;
+}
 /* Menus lifted out of scrolling areas by bridge.js. */
 .popover.anchored {
   position: fixed;
@@ -3315,7 +3349,7 @@ body[data-resizing] .sash:active::after {
   flex-shrink: 0;
 }
 .cal-week-head {
-  padding: 0 0 6px;
+  padding: 0 10px 6px 0;
 }
 .cal-wday {
   display: flex;
@@ -3357,6 +3391,7 @@ body[data-resizing] .sash:active::after {
   border-top: 1px solid var(--sep);
   border-bottom: 1px solid var(--sep);
   min-height: 30px;
+  padding-right: 10px;
 }
 .cal-allday-cell {
   border-left: 1px solid var(--sep);
@@ -3377,7 +3412,8 @@ body[data-resizing] .sash:active::after {
 .cal-scroll {
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
+  /* (Always the room of its scroll bar: the row over it leaves the same.) */
+  overflow-y: scroll;
   position: relative;
 }
 .cal-hours {
@@ -4589,7 +4625,7 @@ body[data-dragging="seg"] .tab.seg-source {
   .cal-toolbar .primary-btn.with-icon {
     padding: 5px 7px;
   }
-  .cal-toolbar .primary-btn.with-icon span {
+  .cal-toolbar .primary-btn.with-icon span:not(.ico) {
     display: none;
   }
   .cal-week-head,
@@ -5826,15 +5862,27 @@ body[data-dragging] iframe {
   overflow-x: auto;
 }
 .table-block table {
-  border-collapse: collapse;
+  /* Each cell draws its own lines (at its right and below it; the first
+     column and the first row also at their left and above): a cell that
+     scrolls under a frozen column is cut with its lines, which a table
+     whose cells share their lines does not do in WebKit. */
+  border-collapse: separate;
+  border-spacing: 0;
   width: 100%;
   table-layout: fixed;
 }
 .table-block td {
   min-width: 90px;
   padding: 0;
-  border: 1px solid var(--sep);
+  border: 0 solid var(--sep);
+  border-width: 0 1px 1px 0;
   vertical-align: top;
+}
+.table-block tr > td:first-child {
+  border-left-width: 1px;
+}
+.table-block tbody > tr:first-child > td {
+  border-top-width: 1px;
 }
 .table-block td.head {
   background: var(--fill-4);
@@ -6163,7 +6211,11 @@ body[data-dragging] iframe {
   text-overflow: ellipsis;
 }
 .today-card-text {
-  flex: 1;
+  /* (Three lines high and no more: grown to fill the card, it showed the
+     top half of a fourth line under the dots of the third.) */
+  flex: 0 1 auto;
+  max-height: calc(13px * 1.45 * 3);
+  margin-bottom: auto;
   min-height: 0;
   font-size: 13px;
   line-height: 1.45;
@@ -8087,6 +8139,122 @@ body.ev-dragging .cal-event {
 .ai-shot:hover .ai-shot-x,
 .ai-shot-x:focus-visible {
   opacity: 1;
+}
+/* What goes with a request besides pictures: a row of small quiet chips
+   over the box (a file, a page, a web page, the picked part of the page). */
+.ai-given {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 10px 0;
+}
+.ai-given.in-ask {
+  padding: 10px 14px 0;
+}
+.ai-chip,
+.ai-offer {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 260px;
+  height: 24px;
+  padding: 0 4px 0 8px;
+  border-radius: 7px;
+  border: 1px solid color-mix(in srgb, var(--text) 13%, transparent);
+  background: var(--fill-4);
+  color: var(--text-2);
+  font-size: 12.5px;
+  line-height: 1;
+}
+.ai-chip .ico,
+.ai-offer .ico {
+  flex-shrink: 0;
+  color: var(--text-3);
+}
+.ai-chip-name {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text);
+}
+.ai-chip-note {
+  /* (It gives way before the name does: a long title of a web page.) */
+  flex: 0 4 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+.ai-chip.pending .ai-chip-name,
+.ai-chip.pending .ai-chip-note {
+  color: var(--text-3);
+}
+.ai-chip-x {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-3);
+  cursor: default;
+}
+.ai-chip-x:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+/* A web address in the request: the app gets its page only when asked. */
+.ai-offer {
+  padding-right: 9px;
+  border-style: dashed;
+  background: transparent;
+  cursor: default;
+  font: inherit;
+  font-size: 12.5px;
+}
+.ai-offer:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+/* The pages to choose from after "@". */
+.ai-pages {
+  display: flex;
+  flex-direction: column;
+  padding: 6px 6px 0;
+}
+.ai-page-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13.5px;
+  text-align: left;
+  cursor: default;
+}
+.ai-page-row span {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.ai-page-row .ico {
+  flex-shrink: 0;
+  color: var(--text-3);
+}
+.ai-page-row.on,
+.ai-page-row:hover {
+  background: var(--hover);
 }
 /* How long the run goes on: a quiet clock before "Stop". */
 .ai-clock {

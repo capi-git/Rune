@@ -377,10 +377,6 @@ button.table-chip:hover,
 .table-block td.frozen {
   position: sticky;
   z-index: 2;
-  background: var(--bg);
-}
-.table-block td.head.frozen {
-  background: color-mix(in srgb, var(--text) 7%, var(--bg));
 }
 /* Rows: picked, open as a page at the side, coloured by a rule, a place to drop. */
 .table-block tr.painted td {
@@ -392,34 +388,12 @@ button.table-chip:hover,
 .table-block tr.picked td {
   background: var(--active);
 }
-/* A frozen cell covers the cells that scroll under it: the colour of its
-   row lies on the colour of the page, not on what is under the cell. */
-.table-block tr.painted td.frozen {
-  background: var(--bg);
-  box-shadow: inset 0 0 0 100vmax var(--row-tint);
-}
-.table-block tr.open td.frozen {
-  background: var(--bg);
-  box-shadow: inset 0 0 0 100vmax var(--fill-3);
-}
-.table-block tr.picked td.frozen {
-  background: var(--bg);
-  box-shadow: inset 0 0 0 100vmax var(--active);
-}
-.table-block tr.open td.first.frozen {
-  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--text) 75%, transparent), inset 0 0 0 100vmax var(--fill-3);
-}
-.table-block tr.picked td.first.frozen {
-  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--text) 75%, transparent), inset 0 0 0 100vmax var(--active);
-}
+/* (A frozen cell is see-through, as every cell is: what scrolls is cut
+   where the frozen cells begin, by the page script.) */
 /* Columns that are picked: the colour of a picked row, down the column
    (over the colour of a row that has one). */
 .table-block tbody tr td.col-picked {
   background: linear-gradient(var(--active), var(--active)), var(--row-tint, transparent);
-}
-.table-block tbody tr td.col-picked.frozen {
-  background: var(--bg);
-  box-shadow: inset 0 0 0 100vmax var(--active), inset 0 0 0 100vmax var(--row-tint, transparent);
 }
 .table-block tbody tr td.head.col-picked {
   background: color-mix(in srgb, var(--text) 16%, var(--bg));
@@ -967,8 +941,8 @@ td:hover .cell-add,
 /* (Plain words under the table, not one more row of cells: no lines at
    their sides or below them.) */
 .table-block .table-totals td {
+  /* (The line above them is the line below the last row.) */
   border-color: transparent;
-  border-top-color: var(--sep);
   background: transparent;
 }
 .table-totals td {
@@ -1448,6 +1422,12 @@ span.value-name {
 }
 .board-card .card-facts span:first-child {
   color: var(--text);
+  /* (The first of the two, most times an amount, is never cut: "$2,10…"
+     says a wrong amount. The second gives way.) */
+  flex: none;
+}
+.board-card .card-facts span + span {
+  min-width: 0;
 }
 .board-card:hover,
 .gallery-card:hover,
@@ -2336,18 +2316,6 @@ span.value-name {
 /* (The bar of what is picked is over the strip of the boxes too.) */
 .table-frame:has(> .table-block.typed) > .picked-rail {
   left: -30px;
-}
-/* A frozen first column covers the strip at its left too: what scrolls
-   under the frozen columns does not show beside the boxes that pick rows. */
-.table-block.typed td.first.frozen::before,
-.table-block.typed tr.head-row > td.frozen:first-child::before {
-  content: '';
-  position: absolute;
-  top: -1px;
-  bottom: -1px;
-  left: calc(-1 * var(--gut) - 1px);
-  width: var(--gut);
-  background: var(--bg);
 }
 
 /* ----- the day picker: an end, a time, a reminder ------------------------- */

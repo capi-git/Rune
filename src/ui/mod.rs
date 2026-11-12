@@ -143,7 +143,9 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
             // A to-do's reminder came, changed or went (here, in another
             // window, or by the AI): plan again.
             if ticks % 4 == 0 {
-                let seen = format!("{:?}", state.todo_reminders().iter().map(|r| (&r.1, r.4)).collect::<Vec<_>>());
+                // (Its words and its page's name too: a reminder planned
+                // before the words changed said the old words.)
+                let seen = format!("{:?}", state.todo_reminders().iter().map(|r| (&r.1, &r.2, &r.3, r.4)).collect::<Vec<_>>());
                 if seen != todos_seen {
                     todos_seen = seen;
                     crate::notify::mark_dirty();
@@ -327,6 +329,7 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
         crate::ai::sleep_ms(30_000).await;
         loop {
             crate::backup::if_due().await;
+            crate::mcp::clear_old_journals();
             crate::ai::sleep_ms(60 * 60 * 1000).await;
         }
     });

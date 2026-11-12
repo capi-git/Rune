@@ -196,6 +196,17 @@ const domToRuns = (el) => {
     }
   };
   walk(el, noMarks(), null);
+  // At the end of a line, the engine keeps an empty last line (after
+  // Shift+Return, or Return in code) with one more line end, in the text
+  // itself, where the app writes a <br>. That one is no part of the words:
+  // kept, each such press at the end stored a line end too many.
+  if (trailing && trailing.nodeType === 3 && runs.length) {
+    const last = runs[runs.length - 1];
+    if (last.text.endsWith('\n')) {
+      last.text = last.text.slice(0, -1);
+      if (!last.text) runs.pop();
+    }
+  }
   return merge(runs);
 };
 
@@ -656,6 +667,9 @@ window.__n2 = {
       if (isBlock(el)) {
         const len = textLen(el);
         setSel(el, pos < 0 || pos > len ? len : pos);
+        // (Come here with the Up or the Down arrow: the caret keeps its
+        // place across the page, as in any text.)
+        if (navKeep && performance.now() - navKeep.at < 600) caretAtX(el, navKeep.x, navKeep.dir === 'down');
       } else if (typeof el.setSelectionRange === 'function') {
         const len = el.value.length;
         const p = pos < 0 || pos > len ? len : pos;
@@ -746,10 +760,45 @@ const caretLine = (el) => {
   };
 };
 
+// The Up and Down arrows that leave a line: how far across the page the
+// caret was, so that it comes into the next line at the same place (and
+// goes on at that place through short lines, while only those keys are used).
+let navKeep = null;
+const caretX = () => {
+  const sel = getSelection();
+  if (!sel.rangeCount) return null;
+  const r = sel.getRangeAt(0).cloneRange();
+  r.collapse(true);
+  const rect = r.getClientRects()[0] || r.getBoundingClientRect();
+  return rect && (rect.left || rect.top || rect.bottom) ? rect.left : null;
+};
+const caretAtX = (el, x, firstLine) => {
+  const box = el.getBoundingClientRect();
+  if (!box.width || !box.height || !document.caretRangeFromPoint) return;
+  const cs = getComputedStyle(el);
+  const z = zoomOf(el);
+  const line = (parseFloat(cs.lineHeight) || 22) * z;
+  const y = firstLine ? box.top + (parseFloat(cs.paddingTop) || 0) * z + line / 2 : box.bottom - (parseFloat(cs.paddingBottom) || 0) * z - line / 2;
+  const at = document.caretRangeFromPoint(Math.max(box.left + 1, Math.min(box.right - 1, x)), Math.max(box.top + 1, Math.min(box.bottom - 1, y)));
+  if (!at || !el.contains(at.startContainer)) return;
+  at.collapse(true);
+  const sel = getSelection();
+  sel.removeAllRanges();
+  sel.addRange(at);
+};
+const keepNav = (dir) => {
+  const went = navKeep && performance.now() - navKeep.at < 2500 ? navKeep.x : null;
+  const x = went ?? caretX();
+  navKeep = x == null ? null : { x, dir, at: performance.now() };
+};
+// (Any other key, a press of the mouse: the place is forgotten.)
+document.addEventListener('mousedown', () => (navKeep = null), true);
+
 document.addEventListener(
   'keydown',
   (e) => {
     if (e.isComposing || e.keyCode === 229) return;
+    if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') navKeep = null;
     const t = e.target;
     const cmd = e.metaKey && !e.ctrlKey;
     const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
@@ -941,6 +990,7 @@ document.addEventListener(
       const atStart = s.start === 0 && s.end === 0;
       if (atStart || (e.key === 'ArrowUp' && s.start === s.end && caretLine(t).first)) {
         e.preventDefault();
+        if (e.key === 'ArrowUp') keepNav('up');
         send({ t: 'nav', dir: 'up', page, id });
       }
       return;
@@ -950,6 +1000,7 @@ document.addEventListener(
       const atEnd = s.start === len && s.end === len;
       if (atEnd || (e.key === 'ArrowDown' && s.start === s.end && caretLine(t).last)) {
         e.preventDefault();
+        if (e.key === 'ArrowDown') keepNav('down');
         send({ t: 'nav', dir: 'down', page, id });
       }
     }
@@ -1000,7 +1051,7 @@ document.addEventListener('focusin', (e) => {
   if (isBlock(t)) {
     // A drag that picked whole lines just ended over this line: it stays
     // picked, and the line does not take the caret.
-    if ((dragPick && dragPick.on) || performance.now() - dragPickEnded < 500) {
+    if ((dragPick && dragPick.on) || (marquee && marquee.on) || performance.now() - dragPickEnded < 500) {
       t.blur();
       return;
     }
@@ -1032,16 +1083,46 @@ const sendAiPicture = (file) => {
   img.src = url;
 };
 const aiPicturesIn = (data) => [...((data && data.files) || [])].filter((f) => f.type.startsWith('image/')).slice(0, 4);
+// A file that is no picture (a PDF, a table as CSV or as a spreadsheet, a
+// file of words) goes to the app as its bytes: the app reads its words and
+// gives them to the AI with the request. A file that is too large is not
+// read at all; the app says so.
+const MOST_AI_FILE = 20 * 1024 * 1024;
+// True while the AI box is asked about the picked blocks or rows: the
+// keyboard is in the box, or nowhere while the box shows what it was given.
+// (Delete and Backspace are not meant for the picks then.)
+function aiHoldsPicks() {
+  const dock = document.querySelector('.ai-dock.open');
+  if (!dock) return false;
+  const on = document.activeElement;
+  if (on && dock.contains(on)) return true;
+  return (!on || on === document.body) && !!dock.querySelector('#ai-given .ai-chip');
+}
+const sendAiFile = (file) => {
+  if (file.size > MOST_AI_FILE) {
+    send({ t: 'ai_file', name: file.name, data: '!large' });
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => send({ t: 'ai_file', name: file.name, data: String(reader.result || '') });
+  reader.onerror = () => send({ t: 'ai_file', name: file.name, data: '' });
+  reader.readAsDataURL(file);
+};
+const aiFilesIn = (data) => [...((data && data.files) || [])].filter((f) => !f.type.startsWith('image/')).slice(0, 8);
 document.addEventListener(
   'paste',
   (e) => {
     if (!aiBoxOf(e.target)) return;
     const pictures = aiPicturesIn(e.clipboardData);
-    if (!pictures.length) return;
+    const files = aiFilesIn(e.clipboardData);
+    if (!pictures.length && !files.length) return;
     // (Not a picture for the page under the box.)
     e.preventDefault();
     e.stopPropagation();
-    pictures.forEach(sendAiPicture);
+    // (A file copied in the Finder comes with a picture of its icon: the
+    // file is what is meant.)
+    if (!files.length) pictures.forEach(sendAiPicture);
+    files.forEach(sendAiFile);
   },
   true,
 );
@@ -1060,10 +1141,12 @@ document.addEventListener(
   (e) => {
     if (!aiBoxOf(e.target) || !e.dataTransfer) return;
     const pictures = aiPicturesIn(e.dataTransfer);
-    if (!pictures.length) return;
+    const files = aiFilesIn(e.dataTransfer);
+    if (!pictures.length && !files.length) return;
     e.preventDefault();
     e.stopPropagation();
     pictures.forEach(sendAiPicture);
+    files.forEach(sendAiFile);
   },
   true,
 );
@@ -1198,6 +1281,8 @@ document.addEventListener('mousedown', (e) => {
   // the whole app, every element would be restyled each frame).
   const sized = [side, document.querySelector('.nav-group')].filter(Boolean);
   const move = (ev) => {
+    // (Let go where the page did not see it.)
+    if (!(ev.buttons & 1)) return up();
     w = clampWidth(startW + ev.clientX - startX);
     if (!frame) {
       frame = requestAnimationFrame(() => {
@@ -1329,6 +1414,8 @@ document.addEventListener('mousedown', (e) => {
     }
   };
   const move = (ev) => {
+    // (Let go where the page did not see it.)
+    if (!(ev.buttons & 1)) return up();
     pointer = row ? ev.clientX : ev.clientY;
     if (!frame) frame = requestAnimationFrame(step);
   };
@@ -1371,7 +1458,7 @@ document.addEventListener('mouseover', (e) => {
   if (onEdge || onCard) {
     clearTimeout(peekHide);
     peekHide = 0;
-    if (!peeking() && onEdge && !peekShow) peekShow = setTimeout(() => setPeek(true), 100);
+    if (!peeking() && onEdge && !peekShow && !e.buttons) peekShow = setTimeout(() => setPeek(true), 100);
   } else {
     clearTimeout(peekShow);
     peekShow = 0;
@@ -1562,7 +1649,7 @@ const placeTableMenu = (menu) => {
   menu.style.left = (left - cb.left) / z + 'px';
   menu.style.top = (top - cb.top) / z + 'px';
   menu.style.right = 'auto';
-  menu.dataset.sub = left + w + SUB_ROOM > innerWidth - 8 ? 'left' : 'right';
+  menu.dataset.sub = left + w + SUB_ROOM * z > innerWidth - 8 ? 'left' : 'right';
 };
 // A second list beside a menu of a table, and a menu of the table itself,
 // end above the foot of the window too.
@@ -1965,7 +2052,10 @@ document.addEventListener('drop', (e) => {
       send({ t: 'seg_drop', tab, pane, to: t.to, mode: t.mode });
     } else if (p) {
       send({ t: 'place_pane', tab, pane, target: p.id, edge: p.edge });
-    } else if (!paneTarget(e)) {
+    } else if (!paneTarget(e) && !(e.target.closest && e.target.closest('.work-card'))) {
+      // (Out into a tab of its own only when it is let go outside the page
+      // area: on the line between two panes, a folded pane or the find bar,
+      // nothing changes. It was thrown out of its tab from there.)
       send({ t: 'seg_drop', tab, pane, mode: 'out' });
     }
   } else if (sideTarget(e)) {
@@ -2395,7 +2485,10 @@ window.__n2.focusCell = (id, r, c) => {
   const box = document.querySelector(`.table-block[data-table="${id}"]`);
   if (!box) return;
   const tr = box.querySelector(`tr[data-r="${r}"]`);
-  intoCell(cellAt(box, r, c) || (tr && typedCells(tr)[0]) || box.querySelector('.cell'));
+  // (When the row is gone, with a filter that it no longer passes: no cell.
+  // The first cell of the table is a heading, and the next keys would give
+  // the column another name.)
+  intoCell(cellAt(box, r, c) || (tr && typedCells(tr)[0]) || (Number(r) === 0 ? box.querySelector('.cell') : null));
 };
 // Where the columns that stay in place are, once the page shows them.
 window.__n2.freezeColumns = (id) =>
@@ -2406,12 +2499,119 @@ window.__n2.freezeColumns = (id) =>
     let left = 0;
     for (let i = 0; i < (Number(box.dataset.frozen) || 0) && i < heads.length; i += 1) {
       box.style.setProperty(`--f${i}`, `${left}px`);
-      left += heads[i].getBoundingClientRect().width;
+      left += heads[i].getBoundingClientRect().width / zoomOf(heads[i]);
     }
+    // (Drawn again while scrolled sideways, with other columns frozen,
+    // hidden or wider: what is under the frozen cells is another part now.)
+    cutTable(box);
   });
 window.addEventListener('resize', () => {
   for (const box of document.querySelectorAll('.table-block[data-frozen]:not([data-frozen="0"])')) window.__n2.freezeColumns(box.dataset.table);
+  for (const box of document.querySelectorAll('.table-block')) if (box.scrollLeft > 0) queueCut(box);
 });
+// A table scrolled sideways. Its frozen cells and the strip of the boxes
+// that pick rows are see-through (the page shows under them, as in Notion,
+// and the page is glass: no colour would match it), so what scrolls is cut
+// where they begin: a column that is all under them does not show, and the
+// one column that is partly under them is cut at their right edge (with no
+// frozen column: at the left of the table, so nothing shows in the strip).
+// The cuts are rules of one style sheet, by table and by place of the
+// column, so cells that the app draws again keep them; they hold only while
+// the box says it is scrolled (data-slid), so a table that is drawn new, at
+// its start, has none. How far the one column is cut is a value on the box
+// (--cut): a scroll changes that value, and the rules only when a column
+// goes under the edge or comes out.
+const tableCuts = new Map(); // table id -> its rules
+let cutSheet = null;
+const cutTable = (box) => {
+  const id = box.dataset.table;
+  if (!id) return;
+  const heads = box.isConnected ? box.querySelectorAll(':scope > table > tbody > tr.head-row > td') : [];
+  let rules = '';
+  if (heads.length && box.scrollLeft > 0) {
+    const z = zoomOf(heads[0]);
+    const cs = getComputedStyle(box);
+    let edge = box.getBoundingClientRect().left + (box.clientLeft + (parseFloat(cs.paddingLeft) || 0)) * zoomOf(box) * (parseFloat(cs.zoom) || 1);
+    for (const td of heads) if (td.classList.contains('frozen')) edge = Math.max(edge, td.getBoundingClientRect().right);
+    const cells = (i) => `.table-block[data-table="${id}"][data-slid] > table > * > tr:not(.group-row) > td:nth-child(${i + 1}):not(.frozen)`;
+    const under = [];
+    heads.forEach((td, i) => {
+      if (td.classList.contains('frozen')) return;
+      const r = td.getBoundingClientRect();
+      if (r.right <= edge + 0.25) under.push(cells(i));
+      else if (r.left < edge - 0.25) {
+        // (Above, below and at the right, what hangs out of a cell still shows.)
+        rules += `${cells(i)}{clip-path:inset(-40px -100vw -40px var(--cut))}\n`;
+        const cut = `${((edge - r.left) / z).toFixed(1)}px`;
+        if (box.style.getPropertyValue('--cut') !== cut) box.style.setProperty('--cut', cut);
+      }
+    });
+    if (under.length) rules += `${under.join(',\n')}{clip-path:inset(50%)}\n`;
+    if (!box.hasAttribute('data-slid')) box.setAttribute('data-slid', '');
+  } else if (box.hasAttribute('data-slid')) box.removeAttribute('data-slid');
+  if ((tableCuts.get(id) || '') === rules) return;
+  if (rules) tableCuts.set(id, rules);
+  else tableCuts.delete(id);
+  // Tables that are gone lose their cuts.
+  for (const other of tableCuts.keys()) if (other !== id && !document.querySelector(`.table-block[data-table="${other}"]`)) tableCuts.delete(other);
+  if (!cutSheet) {
+    cutSheet = document.createElement('style');
+    cutSheet.id = 'table-cuts';
+    document.head.appendChild(cutSheet);
+  }
+  cutSheet.textContent = [...tableCuts.values()].join('');
+};
+const queueCut = (box) => requestAnimationFrame(() => cutTable(box));
+document.addEventListener(
+  'scroll',
+  (e) => {
+    const box = e.target;
+    if (!(box instanceof Element) || !box.classList.contains('table-block')) return;
+    cutTable(box);
+    wheelOwn(box);
+  },
+  true,
+);
+// A swipe sideways on a table is moved here, in step with the cuts. (Left
+// to WebKit, the table moves at once, apart from the page script, and the
+// cuts come a moment later: in a fast swipe the words of the cells showed
+// under the frozen column for an instant, again and again.) A swipe up or
+// down, and one at the end of the table, stay with WebKit.
+const wheelTable = (e) => {
+  const box = e.currentTarget;
+  // (Once the engine has a swipe, its steps cannot be stopped: moving the
+  // table here too would move it twice.)
+  if (e.ctrlKey || e.defaultPrevented || !e.cancelable) return;
+  const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? box.clientWidth : 1;
+  const dx = e.deltaX * unit;
+  if (!dx || Math.abs(dx) <= Math.abs(e.deltaY * unit)) return;
+  const z = zoomOf(box) * (parseFloat(getComputedStyle(box).zoom) || 1);
+  const to = Math.max(0, Math.min(box.scrollWidth - box.clientWidth, box.scrollLeft + dx / z));
+  if (Math.abs(to - box.scrollLeft) < 0.5) return;
+  e.preventDefault();
+  box.scrollLeft = to;
+  cutTable(box);
+};
+const wheelOwned = new WeakSet();
+const wheelOwn = (box) => {
+  if (wheelOwned.has(box)) return;
+  wheelOwned.add(box);
+  box.addEventListener('wheel', wheelTable, { passive: false });
+};
+// (Each table gets this when the pointer first comes over it: a listener
+// on the whole page would make every scroll of the page wait for the script.)
+document.addEventListener(
+  'mouseover',
+  (e) => {
+    const box = e.target.closest && e.target.closest('.table-block');
+    if (!box) return;
+    wheelOwn(box);
+    // (A table put in another place is at its start again, with no word
+    // of that from the engine.)
+    if (box.hasAttribute('data-slid') !== box.scrollLeft > 0) cutTable(box);
+  },
+  true,
+);
 document.addEventListener(
   'keydown',
   (e) => {
@@ -2482,7 +2682,9 @@ const letGo = () => {
   heldTable = null;
 };
 document.addEventListener('focusin', (e) => {
-  const cell = e.target.closest && e.target.closest('textarea.cell');
+  // (A choice or a date cell is a button: with the keyboard in it, the
+  // table is still the one in use, and its rows stay where they are.)
+  const cell = e.target.closest && e.target.closest('textarea.cell, button.cell.pick');
   const box = cell && cell.closest('.table-block');
   if (!box) return letGo();
   box.dataset.r = cell.dataset.r;
@@ -2675,7 +2877,7 @@ document.addEventListener(
     if (pickedHead(e)) return e.preventDefault();
     // (Nor does ⇧ on a handle select the words of the page up to it.)
     if ((e.shiftKey || e.metaKey) && e.target.closest && e.target.closest('.row-handle [data-row-op="row-menu"]')) e.preventDefault();
-    if (pickedTable && !(e.target.closest && e.target.closest('.row-handle, .popover, .backdrop, .picked-bar, td.col-picked .th-menu'))) unpick();
+    if (pickedTable && !(e.target.closest && e.target.closest('.row-handle, .popover, .backdrop, .picked-bar, td.col-picked .th-menu, .ai-dock'))) unpick();
   },
   true,
 );
@@ -2691,6 +2893,8 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if ((e.key !== 'Backspace' && e.key !== 'Delete') || !pickedTable || e.metaKey || e.ctrlKey || e.altKey || e.isComposing) return;
+  // (Not while the AI is asked about the picked rows: its box shows them.)
+  if (aiHoldsPicks()) return;
   // (A key typed in a box is for the box.)
   if (e.target.closest && e.target.closest('input, textarea, select, [contenteditable]')) return;
   if (!pickedTable.isConnected || !pickedTable.querySelector('tr.picked, td.col-picked')) return;
@@ -2807,6 +3011,12 @@ document.addEventListener('mousedown', (e) => {
 });
 document.addEventListener('mousemove', (e) => {
   if (!coverDrag) return;
+  // (Let go where the page did not see it: the drag ends where it was.)
+  if (!(e.buttons & 1)) {
+    send({ t: 'cover_y', page: coverDrag.cover.dataset.cover, y: coverDrag.now });
+    coverDrag = null;
+    return;
+  }
   // Dragging the picture down shows more of its top.
   const moved = ((e.clientY - coverDrag.startY) / coverDrag.cover.clientHeight) * 60;
   coverDrag.now = Math.min(100, Math.max(0, coverDrag.y - moved));
@@ -2981,6 +3191,17 @@ document.addEventListener('mousedown', (e) => {
 document.addEventListener('mousemove', (e) => {
   const d = picDrag;
   if (!d) return;
+  // (Let go where the page did not see it: the picture stays as it was,
+  // and the next click is not the end of this drag.)
+  if (!(e.buttons & 1)) {
+    picDrag = null;
+    if (d.size && d.moved) {
+      d.sizeEl.style.width = d.was;
+      d.box.classList.toggle('sized', d.wasSized);
+    }
+    endPicDrag(d);
+    return;
+  }
   const dx = e.clientX - d.x;
   const dy = e.clientY - d.y;
   if (!d.moved) {
@@ -3114,7 +3335,7 @@ document.addEventListener(
     const line = at.getBoundingClientRect();
     const view = scroller.getBoundingClientRect();
     const room = 28;
-    if (line.bottom > view.bottom - room) scroller.scrollTop += line.bottom - (view.bottom - room);
+    if (line.bottom > view.bottom - room) scroller.scrollTop += (line.bottom - (view.bottom - room)) / zoomOf(scroller);
   },
   true,
 );
@@ -3185,7 +3406,9 @@ window.addEventListener(
     }
     if (cmd && key === 'c') act('picked_copy');
     else if (cmd && key === 'x') act('picked_cut');
-    else if (e.key === 'Backspace' || e.key === 'Delete') act('picked_delete');
+    // (Not while the AI is asked about them: the keyboard may be on the page
+    // for a moment then, and the key is not meant for the blocks.)
+    else if ((e.key === 'Backspace' || e.key === 'Delete') && !aiHoldsPicks()) act('picked_delete');
     else if (e.key === 'Escape') act('pick_clear');
   },
   true,
@@ -3206,7 +3429,8 @@ document.addEventListener(
       send({ t: 'pick', page: row.dataset.page, id: row.dataset.id, extend: e.shiftKey && some });
       return;
     }
-    if (some) send({ t: 'pick_clear' });
+    // (A press on the AI box keeps what is picked: the request is about it.)
+    if (some && !t.closest('.ai-dock')) send({ t: 'pick_clear' });
   },
   true,
 );
@@ -3277,6 +3501,217 @@ window.addEventListener(
     }
     dragPick = null;
     document.body.classList.remove('drag-picking');
+  },
+  true,
+);
+
+// ----- a box drawn over the page picks the blocks it touches ----------------------
+// As in Notion: a press on the empty part of a page (its margins, the space
+// under its last line, the part of a line that is not text or a control) and
+// a drag draws a box, and every block the box touches is picked, a table or
+// a picture too: then ⌘C copies them, ⌘X cuts them, Delete takes them out.
+// The box begins at a place of the page, not of the window: near the top or
+// the foot of the page, the page scrolls and the box grows with it.
+const MARQUEE_OWN = '.blk, input, textarea, select, button, a, .g-btn, .marker, .image-block, .table-wrap, .row-values, .drawing, .video-embed, .popover, .ai-panel, .page-link, .code-wrap, .callout-icon, .check, .toggle-arrow';
+let marquee = null;
+let marqueeEnded = -Infinity;
+// (While the box is drawn, the page script marks the blocks itself, at once
+// (data-mq): the app hears what is picked when the button is let go, so
+// nothing is drawn again in the middle of the drag.)
+const marqueeRows = (m) => {
+  // Where each block is in the page (not in the window: the page scrolls).
+  const sx = m.scroller.scrollLeft * m.z;
+  const sy = m.scroller.scrollTop * m.z;
+  m.rows = [...m.blocks.querySelectorAll(':scope > .block-row[data-id]')].map((row) => {
+    const r = row.getBoundingClientRect();
+    return { row, left: r.left + sx, right: r.right + sx, top: r.top + sy, bottom: r.bottom + sy, depth: Math.round((parseFloat(row.style.paddingLeft) || 0) / 26) };
+  });
+};
+const marqueeDraw = () => {
+  const m = marquee;
+  if (!m || !m.on) return;
+  const sx = m.scroller.scrollLeft * m.z;
+  const sy = m.scroller.scrollTop * m.z;
+  // Where the press was, now that the page may have scrolled.
+  const ax = m.x0 - (sx - m.sx0);
+  const ay = m.y0 - (sy - m.sy0);
+  const left = Math.min(ax, m.x);
+  const top = Math.min(ay, m.y);
+  const right = Math.max(ax, m.x);
+  const bottom = Math.max(ay, m.y);
+  // (Only the part that is in the page shows.)
+  const view = m.view;
+  const st = m.box.style;
+  const x = Math.max(left, view.left);
+  const y = Math.max(top, view.top);
+  st.transform = `translate(${x}px, ${y}px)`;
+  st.width = `${Math.max(0, Math.min(right, view.right) - x)}px`;
+  st.height = `${Math.max(0, Math.min(bottom, view.bottom) - y)}px`;
+  let first = -1;
+  let last = -1;
+  m.rows.forEach((r, i) => {
+    if (r.bottom - sy <= top || r.top - sy >= bottom || r.right - sx <= left || r.left - sx >= right) return;
+    if (first < 0) first = i;
+    last = i;
+  });
+  // (With a block, what is nested in it. As the app picks: to the end of
+  // what is nested in the first block or in the last, the further of the two.)
+  if (last >= 0) {
+    const under = (i) => {
+      let j = i + 1;
+      while (j < m.rows.length && m.rows[j].depth > m.rows[i].depth) j += 1;
+      return j - 1;
+    };
+    last = Math.max(under(first), under(last));
+  }
+  if (first === m.first && last === m.last) return;
+  m.first = first;
+  m.last = last;
+  m.rows.forEach((r, i) => {
+    const on = first >= 0 && i >= first && i <= last;
+    if (on !== r.row.hasAttribute('data-mq')) r.row.toggleAttribute('data-mq', on);
+  });
+};
+// Near the top or the foot of the page, the page scrolls under the pointer.
+// (A box that begins beside an edge does not scroll the page at once: that
+// edge pulls only after the pointer was away from it, or went on toward it.
+// The speed is by the time that went by, not by the frames of the screen.)
+const marqueeGlide = (now) => {
+  const m = marquee;
+  if (!m || !m.on) return;
+  const edge = 36;
+  const dt = m.at ? Math.min(50, now - m.at) : 0;
+  m.at = now;
+  if (m.y > m.view.top + edge || m.y < m.y0 - 12) m.pullTop = true;
+  if (m.y < m.view.bottom - edge || m.y > m.y0 + 12) m.pullFoot = true;
+  const over = m.pullTop && m.y < m.view.top + edge ? m.y - (m.view.top + edge) : m.pullFoot && m.y > m.view.bottom - edge ? m.y - (m.view.bottom - edge) : 0;
+  if (over && dt) {
+    m.carry = (m.carry || 0) + Math.max(-24, Math.min(24, over * 0.4)) * (dt / 16.7);
+    const step = Math.trunc(m.carry);
+    if (step) {
+      m.carry -= step;
+      const before = m.scroller.scrollTop;
+      m.scroller.scrollTop += step;
+      if (m.scroller.scrollTop !== before) marqueeDraw();
+    }
+  } else m.carry = 0;
+  m.frame = requestAnimationFrame(marqueeGlide);
+};
+const marqueeEnd = () => {
+  const m = marquee;
+  marquee = null;
+  if (!m || !m.on) return;
+  cancelAnimationFrame(m.frame);
+  m.box.remove();
+  document.body.classList.remove('drag-picking', 'box-picking');
+  const marked = m.rows.filter((r) => r.row.hasAttribute('data-mq'));
+  // (A press that hardly moved and touched no block is a click: under the
+  // last line it makes a new line, as before.)
+  if (marked.length || Math.hypot(m.x - m.x0, m.y - m.y0) >= 10 || m.scroller.scrollTop * m.z !== m.sy0) {
+    marqueeEnded = performance.now();
+    // (A line under the pointer does not take the caret: see focusin.)
+    dragPickEnded = marqueeEnded;
+  }
+  // Now the app hears what is picked. The marks of the drag stay until its
+  // own marks are drawn, so nothing blinks between the two.
+  const done = () => {
+    for (const r of m.rows) r.row.removeAttribute('data-mq');
+    m.blocks.removeAttribute('data-mq-on');
+  };
+  if (!marked.length || !m.blocks.isConnected) {
+    send({ t: 'pick_clear' });
+    done();
+    return;
+  }
+  send({ t: 'pick', page: m.page, id: m.rows[m.first].row.dataset.id, extend: false });
+  if (m.last !== m.first) send({ t: 'pick', page: m.page, id: m.rows[m.last].row.dataset.id, extend: true });
+  let tries = 0;
+  const wait = () => {
+    // (Both ends: the block under the press can be picked from before.)
+    if ((m.rows[m.first].row.classList.contains('picked') && m.rows[m.last].row.classList.contains('picked')) || (tries += 1) > 40) done();
+    else requestAnimationFrame(wait);
+  };
+  requestAnimationFrame(wait);
+};
+document.addEventListener(
+  'mousedown',
+  (e) => {
+    marqueeEnd();
+    if (e.button !== 0 || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey || !e.target.closest) return;
+    const t = e.target;
+    const scroller = t.closest('.scroller');
+    const blocks = scroller && scroller.querySelector(':scope > .page > .blocks');
+    const row = blocks && blocks.querySelector(':scope > .block-row[data-page]');
+    if (!row) return;
+    // The empty part of the page only: not its heading, not what has a use of
+    // its own for a press.
+    // (The frame of a table itself, with no cell or control under the press,
+    // is its empty edge: the strip at its left, the space under its rows.)
+    const empty = t === scroller || t.matches('.page, .blocks, .page-tail') || (t.closest('.blocks > .block-row') && (!t.closest(MARQUEE_OWN) || t.matches('.table-block')));
+    if (!empty) return;
+    // (A zoomed page scrolls in its own units: places in the window are those
+    // times the zoom.)
+    const z = zoomOf(scroller);
+    marquee = { scroller, blocks, page: row.dataset.page, x0: e.clientX, y0: e.clientY, z, sx0: scroller.scrollLeft * z, sy0: scroller.scrollTop * z, x: e.clientX, y: e.clientY, on: false, box: null, rows: [], view: null, first: -2, last: -2, frame: 0 };
+    // No selection of text begins with this press: the engine would carry
+    // it from line to line under the pointer, the caret with it, and scroll
+    // the page by itself. What the press did before stays: the line that
+    // had the caret lets it go (a line, a cell of a table, the title).
+    if (!e.defaultPrevented) {
+      e.preventDefault();
+      const a = document.activeElement;
+      if (a && a !== document.body && a.blur) a.blur();
+      const sel = getSelection();
+      if (sel && sel.rangeCount) sel.removeAllRanges();
+    }
+  },
+  true,
+);
+document.addEventListener(
+  'mousemove',
+  (e) => {
+    const m = marquee;
+    if (!m) return;
+    if (!(e.buttons & 1) || !m.blocks.isConnected) {
+      marqueeEnd();
+      return;
+    }
+    m.x = e.clientX;
+    m.y = e.clientY;
+    if (!m.on) {
+      if (Math.hypot(m.x - m.x0, m.y - m.y0) < 5) return;
+      m.on = true;
+      m.view = m.scroller.getBoundingClientRect();
+      marqueeRows(m);
+      m.blocks.setAttribute('data-mq-on', '');
+      m.box = document.createElement('div');
+      m.box.className = 'marquee';
+      // (In the app's own frame: the colours of the look are set there.)
+      (m.scroller.closest('.app') || document.body).appendChild(m.box);
+      // (box-picking: nothing under the pointer answers to it in the drag,
+      // so no handle, row box or other pointer look comes and goes.)
+      document.body.classList.add('drag-picking', 'box-picking');
+      const a = document.activeElement;
+      if (a && isBlock(a)) a.blur();
+      hideBar();
+      m.frame = requestAnimationFrame(marqueeGlide);
+    }
+    const sel = getSelection();
+    if (sel && sel.rangeCount) sel.removeAllRanges();
+    e.preventDefault();
+    marqueeDraw();
+  },
+  true,
+);
+window.addEventListener('mouseup', marqueeEnd, true);
+window.addEventListener('blur', marqueeEnd);
+// The click that ends the drag is not a click on the page.
+document.addEventListener(
+  'click',
+  (e) => {
+    if (performance.now() - marqueeEnded > 80) return;
+    e.preventDefault();
+    e.stopPropagation();
   },
   true,
 );
@@ -3659,7 +4094,9 @@ document.addEventListener('click', (e) => {
   const head = document.getElementById('blk-' + item.dataset.outline);
   const scroller = head && head.closest('.scroller');
   if (!scroller) return;
-  const top = head.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop - 72;
+  // (On a zoomed page the places are in points of the window and the scroll
+  // is in the page's own units.)
+  const top = (head.getBoundingClientRect().top - scroller.getBoundingClientRect().top) / zoomOf(scroller) + scroller.scrollTop - 72;
   const calm = matchMedia('(prefers-reduced-motion: reduce)').matches;
   scroller.scrollTo({ top: Math.max(0, top), behavior: calm ? 'auto' : 'smooth' });
 });
@@ -4116,7 +4553,7 @@ document.addEventListener(
     const box = el.getBoundingClientRect();
     // The lowest part of an event is its edge: pulled, it changes the length.
     const grow = box.height >= 20 && e.clientY > box.bottom - 7;
-    evDrag = { el, id: el.dataset.event, x: e.clientX, y: e.clientY, grow, moved: false, at: cols.indexOf(col), count: cols.length, wide: col.getBoundingClientRect().width, high: box.height, was: el.style.height, days: 0, mins: 0 };
+    evDrag = { el, id: el.dataset.event, x: e.clientX, y: e.clientY, grow, moved: false, at: cols.indexOf(col), count: cols.length, z: zoomOf(el), wide: col.getBoundingClientRect().width, high: box.height, was: el.style.height, days: 0, mins: 0 };
   },
   true,
 );
@@ -4148,13 +4585,16 @@ window.addEventListener('mousemove', (e) => {
     d.el.classList.add('dragging');
     document.body.classList.add('ev-dragging');
   }
-  d.mins = Math.round(dy / QUARTER) * 15;
+  // (The pointer, and the sizes read from the page, are in points of the
+  // window; what is set on the event is in the page's own units: on a
+  // zoomed page the two differ by the zoom.)
+  d.mins = Math.round(dy / (QUARTER * d.z)) * 15;
   if (d.grow) {
-    d.mins = Math.max(d.mins, 15 - Math.round(d.high / QUARTER) * 15);
-    d.el.style.height = Math.max(QUARTER, d.high + (d.mins / 15) * QUARTER) + 'px';
+    d.mins = Math.max(d.mins, 15 - Math.round(d.high / d.z / QUARTER) * 15);
+    d.el.style.height = Math.max(QUARTER, d.high / d.z + (d.mins / 15) * QUARTER) + 'px';
   } else {
     d.days = Math.max(-d.at, Math.min(d.count - 1 - d.at, Math.round(dx / d.wide)));
-    d.el.style.transform = 'translate(' + d.days * d.wide + 'px, ' + (d.mins / 15) * QUARTER + 'px)';
+    d.el.style.transform = 'translate(' + (d.days * d.wide) / d.z + 'px, ' + (d.mins / 15) * QUARTER + 'px)';
   }
 });
 window.addEventListener('mouseup', () => {
@@ -4213,6 +4653,12 @@ window.addEventListener(
     const cal = document.querySelector('.pane.focused .calendar') || document.querySelector('.calendar');
     if (!cal) return;
     const under = calPointer.x >= 0 ? document.elementFromPoint(calPointer.x, calPointer.y) : null;
+    // (Only for the calendar itself: the pointer is over its days, or the
+    // keyboard is in it. In a page beside a calendar, or in the notes of
+    // the day, these keys are a copy and a paste there: a picture pasted in
+    // an empty picture box was taken as "Copy an event first".)
+    const inCal = (el) => !!(el && el.closest && el.closest('.calendar') === cal && !el.closest('.day-notes, .page'));
+    if (!inCal(under) && !inCal(t)) return;
     if (key === 'c') {
       const ev = (under && under.closest && under.closest('.cal-event[data-event]:not(.draft), .cal-chip[data-event]')) || cal.querySelector('.cal-event.on[data-event], .cal-chip.on[data-event]');
       if (!ev || getSelection().toString()) return;
@@ -4262,7 +4708,9 @@ document.addEventListener(
   true,
 );
 // The minute of the day under the pointer in a column of hours, to the quarter hour.
-const minuteAt = (col, clientY) => Math.max(0, Math.min(24 * 60, Math.round(((clientY - col.getBoundingClientRect().top) / 48) * 4) * 15));
+// (On a zoomed page an hour is 48 of the page's own units: the pointer and
+// the place of the column are in points of the window.)
+const minuteAt = (col, clientY) => Math.max(0, Math.min(24 * 60, Math.round(((clientY - col.getBoundingClientRect().top) / (48 * zoomOf(col))) * 4) * 15));
 const dayCellAt = (x, y) => {
   const el = document.elementFromPoint(x, y);
   return el && el.closest ? el.closest('.cal-day[data-day], .cal-allday-cell[data-day]') : null;
@@ -4630,8 +5078,12 @@ window.addEventListener(
   // (the sidebar that floats lies over the page).
   const onSidebar = (e) => {
     if (e.target instanceof Element && e.target.closest('.sidebar')) return true;
+    // (Under Settings, a sheet or a menu the sidebar is not in use: its
+    // place alone is no reason to go to another space, which would also
+    // put the sheet away.)
+    if (e.target instanceof Element && e.target.closest('.settings-view, .modal-backdrop, .backdrop, .popover')) return false;
     const side = document.querySelector('.sidebar');
-    if (!side || (side.classList.contains('floating') && document.body.dataset.peek !== '1')) return false;
+    if (!side || getComputedStyle(side).visibility === 'hidden' || (side.classList.contains('floating') && document.body.dataset.peek !== '1')) return false;
     const r = side.getBoundingClientRect();
     return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
   };

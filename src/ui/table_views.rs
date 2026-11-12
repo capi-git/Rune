@@ -15,7 +15,7 @@ use std::collections::HashMap;
 /// columns that show have for it (not the names, not the column `but`, not
 /// pictures; a ticked box says the name of its column).
 fn card_facts(table: &Table, r: usize, group: usize) -> Vec<String> {
-    table.shown_columns().into_iter().filter(|&c| c != 0 && c != group && !matches!(table.kind(c), Kind::Checkbox | Kind::File)).map(|c| table.shown(r, c).trim().to_string()).filter(|text| !text.is_empty()).take(2).collect()
+    table.shown_columns().into_iter().filter(|&c| c != 0 && c != group && !matches!(table.kind(c), Kind::Checkbox | Kind::File)).map(|c| table.seen(r, c, crate::when::today()).trim().to_string()).filter(|text| !text.is_empty()).take(2).collect()
 }
 
 /// What a row says besides its name, in a few short words.
@@ -29,7 +29,7 @@ fn facts(table: &Table, r: usize, but: Option<usize>, most: usize) -> Vec<String
                 Kind::File => String::new(),
                 Kind::Checkbox if checked(table.cell(r, c)) => table.heading(c),
                 Kind::Checkbox => String::new(),
-                _ => table.shown(r, c).trim().to_string(),
+                _ => table.seen(r, c, crate::when::today()).trim().to_string(),
             };
             (!text.is_empty()).then_some(text)
         })

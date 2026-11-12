@@ -61,7 +61,16 @@ impl Value {
     fn text(&self) -> String {
         match self {
             Value::Empty => String::new(),
-            Value::Number(n) => n.to_string(),
+            // (To twelve places at the most: 3 * 1.1 is 3.3, not
+            // 3.3000000000000003, and a number that is nothing has no minus.)
+            Value::Number(n) => {
+                let text = format!("{n:.12}");
+                let text = text.trim_end_matches('0').trim_end_matches('.');
+                match text {
+                    "-0" | "" => "0".to_string(),
+                    text => text.to_string(),
+                }
+            }
             Value::Text(text) => text.clone(),
             Value::Bool(b) => b.to_string(),
         }
@@ -203,6 +212,99 @@ fn split(source: &str) -> Result<Vec<Token>, String> {
         tokens.push(token);
     }
     Ok(tokens)
+}
+
+/// The formula with the column `from` named `to` instead, wherever a column
+/// is named (a bare word or a name in square brackets; not in a text in
+/// quotes, not the name of a function). The rest is left as it was written.
+/// A name that is no bare word goes in square brackets.
+#[cfg(test)]
+pub fn rename(source: &str, from: &str, to: &str) -> String {
+    let to = to.trim();
+    if from.trim().is_empty() || to.is_empty() {
+        return source.to_string();
+    }
+    rename_with(source, &|name| (name.trim().to_lowercase() == from.trim().to_lowercase()).then(|| to.to_string()))
+}
+
+/// The formula with each name of a column put through `name`: `None`, or
+/// the same name again, leaves it as it was written.
+pub fn rename_with(source: &str, name: &dyn Fn(&str) -> Option<String>) -> String {
+    let written = |to: &str| {
+        let bare = to.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+            && to.chars().all(|c| c.is_alphanumeric() || c == '_')
+            && !matches!(to.to_lowercase().as_str(), "and" | "or" | "not" | "true" | "false")
+            && !FUNCTIONS.iter().any(|(f, ..)| *f == to.to_lowercase());
+        if bare {
+            to.to_string()
+        } else {
+            format!("[{to}]")
+        }
+    };
+    // The new way to write a name, or `None` to leave it.
+    let other = |was: &str| name(was).map(|to| to.trim().to_string()).filter(|to| !to.is_empty() && !to.contains(']') && to.to_lowercase() != was.trim().to_lowercase()).map(|to| written(&to));
+    let chars: Vec<char> = source.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '"' {
+            // A text: to its closing quote (`\"` is a quote inside it).
+            out.push(c);
+            i += 1;
+            while i < chars.len() {
+                out.push(chars[i]);
+                if chars[i] == '\\' && chars.get(i + 1) == Some(&'"') {
+                    out.push('"');
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+                if chars[i - 1] == '"' {
+                    break;
+                }
+            }
+        } else if c == '[' {
+            let end = chars[i..].iter().position(|c| *c == ']').map(|at| i + at);
+            let inner: String = chars[i + 1..end.unwrap_or(chars.len())].iter().collect();
+            match (end, end.and_then(|_| other(&inner))) {
+                (Some(end), Some(to)) => {
+                    out.push_str(&to);
+                    i = end + 1;
+                }
+                (Some(end), None) => {
+                    out.extend(&chars[i..=end]);
+                    i = end + 1;
+                }
+                (None, _) => {
+                    out.extend(&chars[i..]);
+                    i = chars.len();
+                }
+            }
+        } else if c.is_alphabetic() || c == '_' {
+            let start = i;
+            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            let word: String = chars[start..i].iter().collect();
+            let called = chars[i..].iter().find(|c| !c.is_whitespace()) == Some(&'(');
+            let kept = matches!(word.to_lowercase().as_str(), "and" | "or" | "not" | "true" | "false");
+            match (!called && !kept).then(|| other(&word)).flatten() {
+                Some(to) => out.push_str(&to),
+                None => out.push_str(&word),
+            }
+        } else if c.is_ascii_digit() || c == '.' {
+            // (A number: its digits are no part of a word.)
+            while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
+                out.push(chars[i]);
+                i += 1;
+            }
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Read up to the closing sign `end`. `None` when it is missing.
@@ -527,6 +629,23 @@ fn call(func: Func, values: &[Node], cell: &dyn Fn(&str) -> Option<Value>) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_column_is_named_again_in_a_formula() {
+        assert_eq!(rename("Price * Qty", "Price", "Cost"), "Cost * Qty");
+        assert_eq!(rename("price*Qty + [ Price ]", "Price", "Unit price"), "[Unit price]*Qty + [Unit price]");
+        assert_eq!(rename("[Unit price] * 2", "unit price", "Each"), "Each * 2");
+        // Not in a text, not the name of a function, not a part of a longer word.
+        assert_eq!(rename("if(sum > 1, \"sum\", Summary)", "sum", "Total"), "if(Total > 1, \"sum\", Summary)");
+        assert_eq!(rename("sum(sum, 2)", "sum", "x"), "sum(x, 2)");
+        // A name that would be read as something else goes in brackets.
+        assert_eq!(rename("A + 1", "A", "not"), "[not] + 1");
+        assert_eq!(rename("A + 1", "A", "2nd"), "[2nd] + 1");
+        // Nothing to name it: left as it is.
+        assert_eq!(rename("A + 1", "A", ""), "A + 1");
+        assert_eq!(rename("A + 1", "A", "x]y"), "A + 1");
+        assert_eq!(Formula::parse(&rename("Price * Qty", "Qty", "How many")).unwrap().names(), ["Price", "How many"]);
+    }
 
     const YES: Value = Value::Bool(true);
     const NO: Value = Value::Bool(false);

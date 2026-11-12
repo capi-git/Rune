@@ -234,6 +234,8 @@ impl Store {
         if self.file_schema()? < SCHEMA {
             self.conn.pragma_update(None, "user_version", SCHEMA)?;
         }
+        // (A file where sync was on: its triggers of before failed saves.)
+        crate::devsync::engine::mend_triggers(&self.conn)?;
         Ok(())
     }
 

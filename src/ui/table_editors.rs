@@ -67,7 +67,7 @@ pub fn DatePicker(page_id: String, id: String, r: usize, c: usize, text: String)
     let today = when::today();
     let now = When::read(&text, today, false);
     let start = now.map_or(today, |w| w.start);
-    let mut field = use_signal(|| text.clone());
+    let mut field = use_signal(|| When::read(&text, today, true).map_or_else(|| text.clone(), |w| w.said(today)));
     let mut focus = use_signal(|| start);
     let mut month = use_signal(|| first_of_month(start));
     // Words typed in the box that the cell holds as typed, to be written
@@ -121,7 +121,7 @@ pub fn DatePicker(page_id: String, id: String, r: usize, c: usize, text: String)
             let (mut typed, mut field) = (typed, field);
             let words = w.map(|w| w.in_order().write(when::today())).unwrap_or_default();
             typed.set(false);
-            field.set(words.clone());
+            field.set(w.map(|w| w.in_order().said(when::today())).unwrap_or_default());
             state.put_table_cell(&p, &b, r, c, &words);
         }
     };
@@ -146,8 +146,14 @@ pub fn DatePicker(page_id: String, id: String, r: usize, c: usize, text: String)
         move |e: FormEvent| {
             let words = e.value();
             field.set(words.clone());
-            typed.set(true);
-            state.set_table_cell(&p, &b, r, c, &words);
+            // (Only words that say a day, or no words at all, go to the
+            // cell. One key pressed by mistake on the cell opens this box
+            // with that letter in it: written to the cell, it took the
+            // day, the time and the reminder away, and Escape kept it.)
+            if words.trim().is_empty() || When::read(&words, when::today(), false).is_some() {
+                typed.set(true);
+                state.set_table_cell(&p, &b, r, c, &words);
+            }
             if let Some(w) = When::read(&words, when::today(), true) {
                 go(w.start);
             }

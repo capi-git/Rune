@@ -779,10 +779,14 @@ pub fn press_backspace_at_start(blocks: &mut Vec<Block>, idx: usize, value: &str
         }
         BlockKind::PageLink | BlockKind::Drawing | BlockKind::Image | BlockKind::Table | BlockKind::Chart => {
             if current.plain_text().is_empty() {
+                // (With no line of text above it, the caret has no place to
+                // go: the empty line stays. Taken out, it left the page with
+                // no caret at all.)
+                let target = (0..prev + 1).rev().find(|&i| blocks[i].kind.is_editable())?;
+                let id = blocks[target].id.clone();
                 blocks.remove(idx);
                 ensure_not_empty(blocks);
-                let target = (0..prev + 1).rev().find(|&i| blocks[i].kind.is_editable())?;
-                Some(Caret::end(&blocks[target].id))
+                Some(Caret::end(&id))
             } else {
                 None
             }
@@ -928,7 +932,13 @@ pub fn keep_unchanged(old: &[Block], new: Vec<Block>) -> Vec<Block> {
             let lost_in_markdown = matches!((was.kind, fresh.kind), (BlockKind::Toggle, BlockKind::Bulleted) | (BlockKind::Callout, BlockKind::Quote));
             if was.kind == fresh.kind || lost_in_markdown {
                 let mut kept = was.clone();
-                kept.indent = fresh.indent;
+                // (Markdown says how deep a list item is, and no more: a
+                // line of text, a heading or code under a toggle or in a
+                // list comes back with no step in. Taken from there, every
+                // line of a meeting's transcript left its closed toggle.)
+                if matches!(fresh.kind, BlockKind::Bulleted | BlockKind::Numbered | BlockKind::Todo) {
+                    kept.indent = fresh.indent;
+                }
                 if kept.kind == BlockKind::Todo {
                     kept.checked = fresh.checked;
                     kept.due = fresh.due;

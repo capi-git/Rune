@@ -80,7 +80,9 @@ fn note(chart: &Chart, t: &Table, today: chrono::NaiveDate) -> String {
         Shape::Pie => String::new(),
         Shape::Bars | Shape::Line if chart.running => chart.points(t, today).last().map(|p| format!("{} now", chart.format(t, p.value))).unwrap_or_default(),
         Shape::Bars | Shape::Line if chart.add == Add::Sum || chart.add == Add::Count => {
-            let points = chart.points(t, today);
+            // (Every point, also the ones too far back to be drawn: "in all"
+            // of only the last 26 days left the rent of the 1st out.)
+            let points = chart.all_points(t, today);
             if points.is_empty() {
                 return String::new();
             }
@@ -264,14 +266,20 @@ fn Pie(chart: Chart, table: Table, slices: Vec<Slice>) -> Element {
     if slices.is_empty() {
         return rsx! { div { class: "chart-empty", "No rows to draw yet." } };
     }
+    // The middle says what all of it adds up to, a loss counted as a loss;
+    // each slice is as large as its amount, a gain or a loss.
     let total: f64 = slices.iter().map(|s| s.value).sum();
+    let size: f64 = slices.iter().map(|s| s.value.abs()).sum();
+    if size <= 0.0 {
+        return rsx! { div { class: "chart-empty", "No rows to draw yet." } };
+    }
     let round = 2.0 * std::f64::consts::PI * 34.0;
     let mut gone = 0.0;
     let arcs: Vec<(usize, &Slice, f64, f64, String)> = slices
         .iter()
         .enumerate()
         .map(|(i, s)| {
-            let share = s.value / total;
+            let share = s.value.abs() / size;
             let arc = (i, s, share * round, gone * 360.0 - 90.0, format!("{:.0}%", share * 100.0));
             gone += share;
             arc
@@ -560,7 +568,8 @@ fn ChartPanel(page_id: String, id: String, chart: Chart, source: Option<ChartSou
                             let save = save.clone();
                             move |e: FormEvent| {
                                 let v = e.value();
-                                ch.goal = crate::table::number(&v).or_else(|| crate::table::seconds(&v).filter(|_| v.contains(':')));
+                                // (A goal with a colon is a length of time: "30:00" is thirty minutes, not the number 30.)
+                                ch.goal = if v.contains(':') { crate::table::seconds(&v) } else { crate::table::number(&v) };
                                 save(ch.clone());
                             }
                         },

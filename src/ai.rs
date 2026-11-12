@@ -292,6 +292,22 @@ pub fn start_with(prefs: Prefs, messages: Vec<ChatMessage>, tools: Option<Tools>
         };
         // (A test can have the stand-in say how many pictures it was given.)
         let reply = reply.replace("{pictures}", &pictures.len().to_string());
+        // (…and what else it was given, see attach.rs: the name, the kind and
+        // the first words of each thing; and the first words of the page.)
+        let whole = messages.iter().rev().find(|m| m.role == "user").map(|m| m.content.as_str()).unwrap_or("");
+        let given: Vec<String> = whole
+            .split("<given name=\"")
+            .skip(1)
+            .filter_map(|part| {
+                let (name, rest) = part.split_once("\" kind=\"")?;
+                let (kind, rest) = rest.split_once("\">\n")?;
+                let body = rest.split("\n</given>").next().unwrap_or("");
+                Some(format!("{name} ({kind}): {}", body.chars().take(60).collect::<String>().replace('\n', " / ")))
+            })
+            .collect();
+        let reply = reply.replace("{given}", &given.join(" | "));
+        let page = whole.split_once("<page>\n").and_then(|(_, rest)| rest.split_once("\n</page>")).map(|(page, _)| page).unwrap_or("");
+        let reply = reply.replace("{page}", &page.chars().take(80).collect::<String>().replace('\n', " / "));
         // A test of a large job: the reply is a plan ("@plan …"). The tools
         // are used only after the yes, and the answer is then "[[then: text]]".
         let is_plan = split_plan(&reply).is_some();
@@ -572,19 +588,45 @@ pub fn clean_reply(text: &str) -> (String, bool) {
     const OPEN: [&str; 5] = ["<function_calls", "<invoke", "<function_results", "<tool_use", "<tool_result"];
     const CLOSE: [&str; 5] = ["</function_calls>", "</invoke>", "</function_results>", "</tool_use>", "</tool_result>"];
     let mut out: Vec<&str> = Vec::new();
+    // The lines of a call that is still open: they go only when it closes.
+    let mut held: Vec<&str> = Vec::new();
     let mut depth = 0usize;
     let mut found = false;
+    let mut in_code = false;
     for line in text.lines() {
         let t = line.trim_start();
-        let opens = OPEN.iter().filter(|o| t.contains(*o)).count();
+        // Code that is shown is the person's own (notes on such calls, in a
+        // page that is written again): it is kept as it is.
+        if depth == 0 && t.starts_with("```") {
+            in_code = !in_code;
+            out.push(line);
+            continue;
+        }
+        if in_code {
+            out.push(line);
+            continue;
+        }
+        let opens = OPEN.iter().filter(|o| t.starts_with(*o)).count();
         let closes = CLOSE.iter().filter(|c| t.contains(*c)).count();
-        let tool_line = opens > 0 || closes > 0 || t.starts_with("<parameter") || t.starts_with("</parameter>");
+        let tool_line = opens > 0 || (depth > 0 && closes > 0) || (depth > 0 && (t.starts_with("<parameter") || t.starts_with("</parameter>")));
         if tool_line || depth > 0 {
-            found = true;
             depth = (depth + opens).saturating_sub(closes);
+            if depth == 0 {
+                // A whole call, from its first line to its last: taken out.
+                found = true;
+                held.clear();
+            } else {
+                held.push(line);
+            }
             continue;
         }
         out.push(line);
+    }
+    // A call that never closed took every line after it away, to the end of
+    // the page: those lines are kept. Only the line that opened it goes.
+    if !held.is_empty() {
+        found = true;
+        out.extend(held.into_iter().skip(1));
     }
     let mut cleaned = out.join("\n");
     if text.ends_with('\n') && !cleaned.is_empty() {
@@ -683,7 +725,7 @@ do not hold the answer. Never tell the person to do a step that you can do. A pa
 You have no other tools: you cannot read files, run commands or browse the web. \
 A large job needs the person's yes first. If the request will make or change more than six pages or events, do not change anything yet: reply with a first line that is exactly `@plan`, then one or two sentences on what you will build, then the steps as a list (one line each, seven lines at most, plain words, no ids). When the request says that the plan is approved, do the work at once with the tools and do not ask again.";
 
-const MAX_CONTEXT_CHARS: usize = 24_000;
+pub const MAX_CONTEXT_CHARS: usize = 24_000;
 
 /// The first line of a reply that is the whole page after a change (see the
 /// instructions for `AiAction::Ask`).
@@ -875,6 +917,22 @@ pub fn active_label(prefs: &Prefs) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_reply_is_cleaned_of_pretend_calls_and_of_nothing_else() {
+        // A pretend call, whole: taken out, and said.
+        let (text, found) = clean_reply("Before\n<function_calls>\n<invoke name=\"x\">\n<parameter name=\"a\">1</parameter>\n</invoke>\n</function_calls>\nAfter\n");
+        assert_eq!((text.as_str(), found), ("Before\nAfter\n", true));
+        // Shown as code, such lines are the person's notes: kept.
+        let code = "Notes on tools\n```xml\n<invoke name=\"x\">\n</invoke>\n```\nMore";
+        assert_eq!(clean_reply(code), (code.to_string(), false));
+        // A call that never closes does not take the rest of the page with it.
+        let (text, found) = clean_reply("One\n<tool_use>\nTwo\nThree");
+        assert_eq!((text.as_str(), found), ("One\nTwo\nThree", true));
+        // The name of a call inside a sentence is words.
+        let said = "Use <invoke name=\"x\"> to call it.\nNext line";
+        assert_eq!(clean_reply(said), (said.to_string(), false));
+    }
     #[test]
     fn a_picture_for_the_ai_comes_from_a_data_address() {
         let p = Picture::from_data_url("data:image/jpeg;base64,AAAA").unwrap();

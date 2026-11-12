@@ -492,10 +492,74 @@ impl Table {
 
     /// Put text in a cell. Line ends become spaces: a cell is one line.
     pub fn set(&mut self, row: usize, column: usize, text: &str) {
+        if row == 0 {
+            self.name_again_in_formulas(column, text);
+        }
         if let Some(cell) = self.rows.get_mut(row).and_then(|r| r.get_mut(column)) {
             *cell = text.replace(['\n', '\r'], " ");
             if self.kind(column).has_options() {
                 self.sync_options();
+            }
+        }
+    }
+
+    /// The heading of `column` is about to be `text`. A formula finds a
+    /// column by its heading, so each formula is written again to mean the
+    /// same columns as before: a letter typed in a heading emptied every
+    /// formula that named it.
+    ///
+    /// A column whose heading is empty, or is one that another column has
+    /// too (typed on the way to another name: "Tax" on the way to "Taxes"),
+    /// is named by its place, "[Column 3]": by such a heading a formula
+    /// would mean the wrong one of the two. It gets its heading back in the
+    /// formulas when the heading is its own again.
+    fn name_again_in_formulas(&mut self, column: usize, text: &str) {
+        if column >= self.columns() || !self.columns.iter().any(|c| !c.formula.is_empty()) {
+            return;
+        }
+        let typed = text.replace(['\n', '\r'], " ").trim().to_string();
+        let mut heads: Vec<String> = self.rows.first().map(|r| r.iter().map(|h| h.trim().to_string()).collect()).unwrap_or_default();
+        if heads.get(column).is_none_or(|h| *h == typed) {
+            return;
+        }
+        heads[column] = typed;
+        let name_of = |c: usize| {
+            let h = &heads[c];
+            let alone = !h.is_empty() && heads.iter().filter(|x| x.to_lowercase() == h.to_lowercase()).count() == 1;
+            if alone {
+                h.clone()
+            } else {
+                format!("Column {}", c + 1)
+            }
+        };
+        // (The column a name means now, before the heading changes.)
+        let fresh: Vec<Option<String>> =
+            self.columns.iter().map(|c| (!c.formula.is_empty()).then(|| crate::formula::rename_with(&c.formula, &|name| self.find_heading(name).map(name_of)))).collect();
+        for (c, formula) in self.columns.iter_mut().zip(fresh) {
+            if let Some(formula) = formula {
+                c.formula = formula;
+            }
+        }
+        self.parsed = Parsed::default();
+    }
+
+    /// Every day in a date column that has no year gets its year (see
+    /// `full_day`): read with the rule for such a day while it is still
+    /// right, before more time goes by.
+    pub fn keep_years(&mut self, today: NaiveDate) {
+        for c in 0..self.columns() {
+            if self.kind(c) != Kind::Date {
+                continue;
+            }
+            for r in 1..self.rows.len() {
+                let text = self.cell(r, c).trim().to_string();
+                let has_year = text.split(|ch: char| !ch.is_ascii_digit()).any(|n| n.len() == 4);
+                if text.is_empty() || has_year {
+                    continue;
+                }
+                if let Some(when) = date::When::read(&text, today, true) {
+                    self.set(r, c, &when.write(today));
+                }
             }
         }
     }
@@ -1020,8 +1084,8 @@ impl Table {
     }
 
     /// The column with this heading (any case), or whose unit is these
-    /// words, or whose heading holds them ("km" finds "Distance (km)"), or
-    /// the column with this number (from 1).
+    /// words, or whose heading holds them as whole words ("km" finds
+    /// "Distance (km)"), or the column with this number (from 1).
     pub fn find_column(&self, name: &str) -> Option<usize> {
         let want = name.trim().to_lowercase();
         if want.is_empty() {
@@ -1032,14 +1096,31 @@ impl Table {
             .iter()
             .position(|h| *h == want)
             .or_else(|| (0..heads.len()).find(|&c| self.column(c).unit.is_some_and(|u| u.to_lowercase() == want)))
-            .or_else(|| heads.iter().position(|h| !h.is_empty() && (h.contains(&want) || want.contains(h.as_str()))))
+            // (Whole words only: "Side" is not the column "ID" because it has
+            // the letters "id" in it. A value for a column that is not there
+            // went to another column, and the tool said that all was well.)
+            .or_else(|| {
+                let words = |t: &str| t.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_string).collect::<Vec<_>>();
+                let wanted = words(&want);
+                heads.iter().position(|h| {
+                    let have = words(h);
+                    !have.is_empty() && !wanted.is_empty() && (wanted.iter().all(|w| have.contains(w)) || have.iter().all(|w| wanted.contains(w)))
+                })
+            })
             .or_else(|| want.parse::<usize>().ok().filter(|n| (1..=heads.len()).contains(n)).map(|n| n - 1))
     }
 
     /// The column with exactly this heading (any case).
     pub fn find_heading(&self, name: &str) -> Option<usize> {
         let want = name.trim().to_lowercase();
-        self.rows.first()?.iter().position(|h| !want.is_empty() && h.trim().to_lowercase() == want)
+        let heads = self.rows.first()?;
+        // (A column is also "Column 3", by its place: as one with no
+        // heading shows, and as a formula names one whose heading another
+        // column has too.)
+        heads
+            .iter()
+            .position(|h| !want.is_empty() && h.trim().to_lowercase() == want)
+            .or_else(|| (0..heads.len()).find(|i| want == format!("column {}", i + 1)))
     }
 
     /// The heading of column `c`, or "Column 3" when it has none.
@@ -1158,6 +1239,15 @@ impl Table {
         day(self.cell(r, c), today)
     }
 
+    /// What a card or a line of a list says for a cell: as `shown`, with a
+    /// day the short way the table shows it (the cell holds its year).
+    pub fn seen(&self, r: usize, c: usize, today: NaiveDate) -> String {
+        match self.kind(c) {
+            Kind::Date if r > 0 => date::When::read(self.cell(r, c), today, true).map(|w| w.shown(today)).unwrap_or_else(|| self.cell(r, c).to_string()),
+            _ => self.shown(r, c),
+        }
+    }
+
     /// What a cell shows: its text, or what is worked out for it.
     pub fn shown(&self, r: usize, c: usize) -> String {
         match self.kind(c) {
@@ -1210,6 +1300,21 @@ impl Table {
         }
     }
 
+    /// An amount that was worked out from the cells of column `c` (an
+    /// average, a median): written as the column writes, but with the places
+    /// it needs, two at the most, where the column has no number of places
+    /// of its own. (With the places the cells were typed with, the average
+    /// of 2 and 3 showed as 2.)
+    pub fn format_worked(&self, c: usize, v: f64) -> String {
+        let col = self.column(c);
+        if col.places.is_some() || matches!(col.kind, Kind::Time | Kind::Pace | Kind::Formula) || money::currency(&col.format).is_some() {
+            return self.format(c, v);
+        }
+        let cents = (v * 100.0).round() as i64;
+        let needs = if cents % 100 == 0 { 0 } else if cents % 10 == 0 { 1 } else { 2 };
+        money::write(&col.format, v, Some(self.places(c).max(needs)))
+    }
+
     /// The amount at which a bar or a ring of column `c` is full: the
     /// column's goal, or 100 for a percent, or the highest amount it has.
     pub fn full_at(&self, c: usize) -> f64 {
@@ -1250,11 +1355,11 @@ impl Table {
                 format!("{n} of {}", rows.len())
             }
             Total::Sum if !values.is_empty() => self.format(c, values.iter().sum()),
-            Total::Average if !values.is_empty() => self.format(c, values.iter().sum::<f64>() / values.len() as f64),
+            Total::Average if !values.is_empty() => self.format_worked(c, values.iter().sum::<f64>() / values.len() as f64),
             Total::Median if !values.is_empty() => {
                 values.sort_by(f64::total_cmp);
                 let mid = values.len() / 2;
-                self.format(c, if values.len() % 2 == 1 { values[mid] } else { (values[mid - 1] + values[mid]) / 2.0 })
+                self.format_worked(c, if values.len() % 2 == 1 { values[mid] } else { (values[mid - 1] + values[mid]) / 2.0 })
             }
             Total::Highest => self.format(c, high?),
             Total::Lowest => self.format(c, low?),
@@ -1367,11 +1472,11 @@ impl Table {
     /// A row at the end for `day` (an empty last row is used again), with
     /// the day in the first date column. Returns its number, or `None` when
     /// the table is full.
-    pub fn add_day_row(&mut self, day: NaiveDate, today: NaiveDate) -> Option<usize> {
+    pub fn add_day_row(&mut self, day: NaiveDate, _today: NaiveDate) -> Option<usize> {
         let empty_last = self.rows.len() > 1 && self.is_blank(self.rows.len() - 1);
         let r = if empty_last { self.rows.len() - 1 } else { self.add_row(self.rows.len())? };
         if let Some(c) = self.first_of(Kind::Date) {
-            self.set(r, c, &format_day(day, today));
+            self.set(r, c, &full_day(day));
         }
         Some(r)
     }
@@ -1412,7 +1517,16 @@ impl Table {
                     let col = self.column(c);
                     let mut words = vec![col.kind.name().to_string()];
                     words.extend((!col.format.is_empty()).then(|| col.format.clone()));
-                    words.extend(col.unit.clone());
+                    // (A unit that the line would read as something else, "min"
+                    // as the lowest or "bar" as a bar, goes in quotes.)
+                    words.extend(col.unit.clone().map(|u| {
+                        let other = Total::parse(&u).is_some() || money::known_format(&u).is_some() || matches!(u.to_lowercase().as_str(), "bar" | "bars" | "ring" | "rings" | "goal" | "signed");
+                        if other {
+                            format!("\"{u}\"")
+                        } else {
+                            u
+                        }
+                    }));
                     words.extend(col.total.map(|t| t.name().to_string()));
                     match col.show {
                         Show::Number => {}
@@ -1664,6 +1778,13 @@ fn read_column(words: &str) -> Column {
                 continue;
             }
         }
+        // A word in quotes is the unit, whatever word it is.
+        if let Some(unit) = word.strip_prefix('"').and_then(|w| w.strip_suffix('"')).filter(|u| !u.is_empty()) {
+            if col.unit.is_none() {
+                col.unit = Some(unit.to_string());
+            }
+            continue;
+        }
         let shows = matches!(col.kind, Kind::Number | Kind::Formula);
         match word.to_lowercase().as_str() {
             "bar" | "bars" if shows => {
@@ -1752,7 +1873,8 @@ fn read_number(text: &str) -> Option<Read<'_>> {
         (_, 0) => in_threes(token, '.').then_some(None)?,
         // One comma with three digits after it is between the thousands
         // ("1,500"), as are several commas; another is the decimal ("6,5").
-        (0, 1) if token.len() - token.find(',').unwrap_or(0) - 1 != 3 => Some(','),
+        // ("0,125" and "1234,567" are no thousands: the comma is the decimal.)
+        (0, 1) if token.len() - token.find(',').unwrap_or(0) - 1 != 3 || !(1..=3).contains(&token.find(',').unwrap_or(0)) || token.starts_with('0') => Some(','),
         _ => None,
     };
     let (whole, part) = match decimal {
@@ -1765,6 +1887,13 @@ fn read_number(text: &str) -> Option<Read<'_>> {
     }
     let value: f64 = format!("{digits}.{part}0").parse().ok()?;
     Some(Read { value: if minus { -value } else { value }, typed: part.len(), needed: part.trim_end_matches('0').len(), rest })
+}
+
+/// Whether a cell is read whole as a number: after the number comes at most
+/// a unit, no more digits ("5 km", not "10-20", "3/4", "1e3" or
+/// "2026-11-03", of which only the first number would count).
+pub fn number_is_whole(text: &str) -> bool {
+    read_number(text).is_some_and(|read| !read.rest.bytes().any(|b| b.is_ascii_digit()))
 }
 
 /// The number at the start of a cell, its unit left out: "6", "6.5 km",
@@ -1893,31 +2022,63 @@ pub fn day(text: &str, today: NaiveDate) -> Option<NaiveDate> {
         return Some(d);
     }
     const MONTHS: [&str; 12] = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
-    let (mut month, mut dom, mut year) = (None, None, None);
-    for word in text.split(|ch: char| ch.is_whitespace() || ch == ',' || ch == '/' || ch == '.').filter(|w| !w.is_empty()) {
+    const WEEKDAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+    let (mut month, mut dom, mut year, mut weekday) = (None, None, None, None);
+    // A second small number, after the day: a year written with two digits.
+    let mut short_year = None;
+    let words: Vec<&str> = text.split(|ch: char| ch.is_whitespace() || ch == ',' || ch == '/' || ch == '.').filter(|w| !w.is_empty()).collect();
+    // (The word before: the day or the month, for a year of two digits.)
+    let mut of_the_day = false;
+    for (i, word) in words.iter().enumerate() {
+        let after_the_day = std::mem::take(&mut of_the_day);
         if let Some(m) = MONTHS.iter().position(|m| word.len() >= 3 && word.starts_with(m)) {
             month = Some(m as u32 + 1);
+            of_the_day = true;
+        } else if let Some(w) = WEEKDAYS.iter().position(|w| word.len() >= 3 && word.starts_with(w)) {
+            weekday = Some(w as u32);
         } else if let Ok(n) = word.trim_end_matches(|ch: char| ch.is_alphabetic()).parse::<i32>() {
             match n {
-                1..=31 if dom.is_none() => dom = Some(n as u32),
+                1..=31 if dom.is_none() => {
+                    dom = Some(n as u32);
+                    of_the_day = true;
+                }
                 1900..=2999 => year = Some(n),
+                // The last word, right after the day or the month, and no
+                // more than two digits: an hour ("3 Nov 10 PM") and the end
+                // of a range ("Nov 3 - 12") are not a year.
+                0..=99 if after_the_day && i + 1 == words.len() && word.len() == 2 && word.bytes().all(|b| b.is_ascii_digit()) => short_year = Some(2000 + n),
                 _ => {}
             }
         }
     }
     let (month, dom) = (month?, dom?);
-    match year {
-        Some(y) => NaiveDate::from_ymd_opt(y, month, dom),
-        // The nearest such day; a day ahead counts as twice as far, since a
-        // log is mostly of days gone by.
-        None => (today.year() - 1..=today.year() + 1).filter_map(|y| NaiveDate::from_ymd_opt(y, month, dom)).min_by_key(|d| {
-            let days = (*d - today).num_days();
-            if days > 0 {
-                days * 2
-            } else {
-                -days
-            }
-        }),
+    let year = year.or(short_year);
+    // The nearest such day; a day ahead counts as twice as far, since a
+    // log is mostly of days gone by.
+    let far = |d: &NaiveDate| {
+        let days = (*d - today).num_days();
+        if days > 0 {
+            days * 2
+        } else {
+            -days
+        }
+    };
+    let nearest = || (today.year() - 1..=today.year() + 1).filter_map(|y| NaiveDate::from_ymd_opt(y, month, dom)).min_by_key(far);
+    match (year, weekday) {
+        (Some(y), _) => NaiveDate::from_ymd_opt(y, month, dom),
+        // With its day of the week ("Mon 5 Jan", as cells were written with
+        // no year): the year in which that day is on that day of the week.
+        // (Read as the nearest day only, "Mon 5 Jan" of this year became a
+        // day of the next year from the autumn on.)
+        // Among last year, this year and next year only: a day of the week
+        // that fits none of them was typed wrong ("Thu 13 Nov" for a
+        // Friday), and is no reason to go years back for a Thursday.
+        (None, Some(w)) => (today.year() - 1..=today.year() + 1)
+            .filter_map(|y| NaiveDate::from_ymd_opt(y, month, dom))
+            .filter(|d| d.weekday().num_days_from_monday() == w)
+            .min_by_key(far)
+            .or_else(nearest),
+        (None, None) => nearest(),
     }
 }
 
@@ -1944,7 +2105,13 @@ pub fn whole_day(text: &str, today: NaiveDate) -> Option<NaiveDate> {
     low.split(|ch: char| ch.is_whitespace() || ch == ',' || ch == '/' || ch == '.').filter(|w| !w.is_empty()).all(known).then(|| day(text, today)).flatten()
 }
 
-/// A day as a date column writes it: "Tue 1 Dec", with the year when it is
+/// A day as a cell holds it: "Tue 1 Dec 2026", always with its year, so that
+/// it is the same day whenever it is read.
+pub fn full_day(d: NaiveDate) -> String {
+    d.format("%a %-d %b %Y").to_string()
+}
+
+/// A day as a date column shows it: "Tue 1 Dec", with the year when it is
 /// not this year's.
 pub fn format_day(d: NaiveDate, today: NaiveDate) -> String {
     if d.year() == today.year() {
@@ -1998,9 +2165,9 @@ mod tests {
         assert_eq!(t.date_reminders(today), vec![(1, 1, at(2026, 11, 30, 9, 0)), (1, 2, at(2026, 11, 30, 13, 45))]);
         // A day with a time, an end and a reminder is written in full, and sorts after the same day with no time.
         t.put(2, 2, "30 nov 9am -> 11am", today);
-        assert_eq!(t.cell(2, 2), "Mon 30 Nov 9 AM → 11 AM");
+        assert_eq!(t.cell(2, 2), "Mon 30 Nov 2026 9 AM → 11 AM");
         t.put(2, 1, "1 dec", today);
-        assert_eq!(t.cell(2, 1), "Tue 1 Dec");
+        assert_eq!(t.cell(2, 1), "Tue 1 Dec 2026");
     }
 
     #[test]
@@ -2127,7 +2294,12 @@ mod tests {
         assert!(md.contains("| 19:30 | 6:30 |"), "{md}");
         let lines: Vec<&str> = md.lines().chain(["after"]).collect();
         let (back, taken) = Table::from_markdown(&lines).unwrap();
-        assert_eq!(back, t);
+        // (A day read from Markdown is kept with its year.)
+        let mut want = t.clone();
+        for r in 1..want.rows.len() {
+            want.rows[r][0] = format!("{} 2026", want.rows[r][0]);
+        }
+        assert_eq!(back, want);
         assert_eq!(taken, lines.len() - 1);
         // Written by hand: short words, a unit, a total that does not fit is left out.
         let lines = ["| Day | Time | Name |", "| --- | --- | --- |", "| today | 30 min | a |", "<!--columns: date count|time avg mins| text sum-->"];
@@ -2164,6 +2336,44 @@ mod tests {
         assert_eq!(back.to_data(), t.to_data());
         // The name is in the words that search reads.
         assert!(t.plain_text().starts_with("Shop | list\n"));
+    }
+
+    #[test]
+    fn a_day_of_this_year_stays_in_its_year() {
+        // 11 November 2026: a day of last January is nearer to next January.
+        let today = d(2026, 11, 11);
+        // Read with no year and no day of the week: the nearest such day.
+        assert_eq!(day("5 Jan", today), Some(d(2027, 1, 5)));
+        // A cell written before, with its day of the week: that year's day.
+        assert_eq!(day("Mon 5 Jan", today), Some(d(2026, 1, 5)));
+        assert_eq!(day("Tue 5 Jan", today), Some(d(2027, 1, 5)));
+        // ...and the same day when it is read a year later.
+        assert_eq!(day("Tue 1 Dec", d(2027, 11, 20)), Some(d(2026, 12, 1)));
+        // (A day of the week that fits no near year was typed wrong: the
+        // nearest such day, as with none.)
+        assert_eq!(day("Sat 5 Jan", today), Some(d(2027, 1, 5)));
+        // (A day of the week that fits last year is that day of last year:
+        // a cell written then says so. Further back the day of the week is
+        // not looked for.)
+        assert_eq!(day("Thu 13 Nov", today), Some(d(2025, 11, 13)));
+        assert_eq!(day("Wed 13 Nov", today), Some(d(2026, 11, 13)));
+        // A number that is an hour, or the end of a range, is not a year.
+        assert_eq!((day("Tue 3 Nov 10 PM", today), day("3 Nov 11 AM", today), day("Nov 3 - 12", today)), (Some(d(2026, 11, 3)), Some(d(2026, 11, 3)), Some(d(2026, 11, 3))));
+        // A year written with two digits is that year.
+        assert_eq!((day("3 Nov 24", today), day("Nov 3, 24", today), day("3 Nov 2024", today)), (Some(d(2024, 11, 3)), Some(d(2024, 11, 3)), Some(d(2024, 11, 3))));
+        // A table from before gets its years when it is next changed.
+        let mut old = log();
+        old.keep_years(today);
+        assert_eq!((old.cell(1, 0), old.cell(3, 0)), ("Tue 10 Nov 2026", "Sun 15 Nov 2026"));
+        // What a cell holds has its year; what it shows has not, this year.
+        let mut t = log();
+        t.put(1, 0, &full_day(d(2026, 1, 5)), today);
+        assert_eq!(t.cell(1, 0), "Mon 5 Jan 2026");
+        let when = date::When::read(t.cell(1, 0), today, true).unwrap();
+        assert_eq!((when.start, when.shown(today)), (d(2026, 1, 5), "Mon 5 Jan".to_string()));
+        // A day picked far ahead in this year is not a day of last year.
+        t.put(1, 0, "Thu 3 Dec 2026", d(2026, 2, 1));
+        assert_eq!(date::When::read(t.cell(1, 0), d(2026, 2, 1), true).unwrap().start, d(2026, 12, 3));
     }
 
     #[test]
@@ -2233,7 +2443,7 @@ mod tests {
         assert_eq!(t.total(2), Some(("", "1 empty".to_string())));
         t.set_total(2, Some(Total::Median));
         t.set(4, 2, "5");
-        assert_eq!(t.total(2), Some(("Med", "3.2".to_string())));
+        assert_eq!(t.total(2), Some(("Med", "3.25".to_string())));
         // A total that does not fit the kind is not kept.
         t.set_total(1, Some(Total::Sum));
         assert_eq!(t.column(1).total, None);
@@ -2248,7 +2458,7 @@ mod tests {
         let mut t = log();
         let r = t.add_day_row(today, today).unwrap();
         assert_eq!(r, 4);
-        assert_eq!(t.rows[4][0], "Tue 1 Dec");
+        assert_eq!(t.rows[4][0], "Tue 1 Dec 2026");
         let unknown = t.put_named(r, &[("km".into(), "6 km".into()), ("time".into(), "34 minutes".into()), ("Pace".into(), "1:00".into()), ("Feel".into(), "Good".into())], today);
         assert_eq!(unknown, vec!["Feel".to_string()]);
         assert_eq!((t.rows[4][2].as_str(), t.rows[4][3].as_str(), t.rows[4][4].as_str()), ("6", "34:00", ""));
@@ -2399,7 +2609,7 @@ mod tests {
         t.set(1, 1, "");
         t.set(2, 1, "12 nov");
         t.settle(2, 1, today);
-        assert_eq!((t.kind(1), t.cell(2, 1)), (Kind::Date, "Thu 12 Nov"));
+        assert_eq!((t.kind(1), t.cell(2, 1)), (Kind::Date, "Thu 12 Nov 2026"));
         t.set(1, 1, "3 dec (race)");
         t.settle(1, 1, today);
         assert_eq!((t.cell(1, 1), t.day(1, 1, today)), ("3 dec (race)", Some(d(2026, 12, 3))));
@@ -2443,7 +2653,7 @@ mod tests {
         let mut t = table(&[&["Item", "When"], &["Rent", "1 nov"], &["Gym", ""]]);
         t.set(2, 1, "2026-11-03");
         t.settle(2, 1, today);
-        assert_eq!((t.kind(1), t.cell(1, 1), t.cell(2, 1)), (Kind::Date, "Sun 1 Nov", "Tue 3 Nov"));
+        assert_eq!((t.kind(1), t.cell(1, 1), t.cell(2, 1)), (Kind::Date, "Sun 1 Nov 2026", "Tue 3 Nov 2026"));
         // "today" alone is a word; in a date column it is a day.
         let mut words = table(&[&["Item", "Note"], &["Rent", ""]]);
         words.set(1, 1, "today");
@@ -2452,7 +2662,105 @@ mod tests {
         t.add_row(2);
         t.set(3, 1, "tomorrow");
         t.settle(3, 1, today);
-        assert_eq!(t.cell(3, 1), "Wed 11 Nov");
+        assert_eq!(t.cell(3, 1), "Wed 11 Nov 2026");
+    }
+
+    #[test]
+    fn a_heading_typed_again_keeps_the_formulas_that_name_it() {
+        let mut t = table(&[&["Item", "Price", "Qty", "Cost"], &["Tea", "4.5", "2", ""]]);
+        t.set_kind(1, Kind::Number);
+        t.set_kind(2, Kind::Number);
+        t.set_kind(3, Kind::Formula);
+        t.set_formula(3, "Price * Qty");
+        assert_eq!(t.shown(1, 3), "9");
+        // Each letter typed in the heading is a change of the heading.
+        for name in ["Pric", "Pri", "", "U", "Unit price"] {
+            t.set(0, 1, name);
+            assert_eq!((t.shown(1, 3), t.formula_error(3)), ("9".to_string(), None), "{name:?}");
+        }
+        assert_eq!(t.column(3).formula, "[Unit price] * Qty");
+        // The heading of the formula's own column, and of a column no formula names: nothing to do.
+        t.set(0, 3, "Total");
+        t.set(0, 0, "Thing");
+        assert_eq!((t.shown(1, 3), t.column(3).formula.as_str()), ("9".to_string(), "[Unit price] * Qty"));
+        // Two columns with one heading: the formula goes on with the column it meant.
+        t.set(0, 0, "Qty");
+        assert_eq!((t.shown(1, 3), t.column(3).formula.as_str()), ("9".to_string(), "[Unit price] * [Column 3]"));
+        t.set(0, 2, "Count");
+        assert_eq!((t.shown(1, 3), t.column(3).formula.as_str()), ("9".to_string(), "[Unit price] * Count"));
+        // A heading typed through the heading of another column ("Tax" on
+        // the way from "Fee" to "Taxes") stays the same column.
+        let mut t = table(&[&["Amount", "Tax", "Fee", "Net"], &["100", "10", "5", ""]]);
+        for c in 0..3 {
+            t.set_kind(c, Kind::Number);
+        }
+        t.set_kind(3, Kind::Formula);
+        t.set_formula(3, "Amount - Tax - Fee");
+        for name in ["", "T", "Ta", "Tax", "Taxe", "Taxes"] {
+            t.set(0, 2, name);
+            assert_eq!(t.shown(1, 3), "85", "{name:?}: {}", t.column(3).formula);
+        }
+        assert_eq!(t.column(3).formula, "Amount - Tax - Taxes");
+        // ...and the first of the two, typed to the heading of the later one and back.
+        for name in ["Taxe", "Taxes", "Taxe", "Tax"] {
+            t.set(0, 1, name);
+            assert_eq!(t.shown(1, 3), "85", "{name:?}: {}", t.column(3).formula);
+        }
+        assert_eq!(t.column(3).formula, "Amount - Tax - Taxes");
+    }
+
+    #[test]
+    fn numbers_are_read_and_written_right() {
+        // Less than zero: the minus of other programs, and brackets.
+        assert_eq!((number("(500)"), number("\u{2212}500"), number("\u{2013}$5.50"), number("($1,200.00)")), (Some(-500.0), Some(-500.0), Some(-5.5), Some(-1200.0)));
+        // A comma: between the thousands, or the decimal.
+        assert_eq!((number("1,500"), number("0,125"), number("1234,567"), number("6,5"), number("12,345,678")), (Some(1500.0), Some(0.125), Some(1234.567), Some(6.5), Some(12345678.0)));
+        // More than one number in a cell is not read whole.
+        assert!(number_is_whole("5 km") && number_is_whole("$3,500.00") && number_is_whole("15%"));
+        assert!(!number_is_whole("10-20") && !number_is_whole("3/4") && !number_is_whole("1e3") && !number_is_whole("2026-11-03"));
+        // Nothing has no minus.
+        assert_eq!((money::write("", -0.04, Some(1)), money::write(money::PERCENT, -0.001, Some(2)), money::write("", -0.06, Some(1))), ("0.0".to_string(), "0.00%".to_string(), "-0.1".to_string()));
+        // An average and a median show what they are.
+        let mut t = table(&[&["n"], &["2"], &["3"], &["3"]]);
+        t.set_kind(0, Kind::Number);
+        t.set_total(0, Some(Total::Average));
+        assert_eq!(t.total(0), Some(("Avg", "2.67".to_string())));
+        let mut t = table(&[&["n"], &["2"], &["3"]]);
+        t.set_kind(0, Kind::Number);
+        t.set_total(0, Some(Total::Median));
+        assert_eq!(t.total(0).map(|(_, v)| v), Some("2.5".to_string()));
+        t.set_total(0, Some(Total::Sum));
+        assert_eq!(t.total(0).map(|(_, v)| v), Some("5".to_string()));
+    }
+
+    #[test]
+    fn a_unit_that_is_a_word_of_the_line_stays_a_unit() {
+        let mut t = table(&[&["Run", "Time", "Load"], &["a", "30", "5"]]);
+        t.set_kind(1, Kind::Number);
+        t.set_unit(1, "min");
+        t.set_total(1, Some(Total::Sum));
+        t.set_kind(2, Kind::Number);
+        t.set_unit(2, "bar");
+        let md = t.to_markdown("");
+        assert!(md.ends_with("<!-- columns: text | number \"min\" sum | number \"bar\" -->"), "{md}");
+        let lines: Vec<&str> = md.lines().collect();
+        let (back, _) = Table::from_markdown(&lines).unwrap();
+        assert_eq!((back.column(1).unit.as_deref(), back.column(1).total, back.column(2).unit.as_deref(), back.column(2).show), (Some("min"), Some(Total::Sum), Some("bar"), Show::Number));
+    }
+
+    #[test]
+    fn a_column_is_found_by_whole_words_only() {
+        let t = table(&[&["ID", "Name", "Distance (km)", "Unit price"], &["1", "a", "5", "2"]]);
+        assert_eq!(t.find_column("km"), Some(2));
+        assert_eq!(t.find_column("distance"), Some(2));
+        assert_eq!(t.find_column("price"), Some(3));
+        assert_eq!(t.find_column("The unit price, each"), Some(3));
+        assert_eq!(t.find_column("id"), Some(0));
+        // Letters inside another word are no match.
+        assert_eq!(t.find_column("Side"), None);
+        assert_eq!(t.find_column("Paid"), None);
+        assert_eq!(t.find_column("Rename"), None);
+        assert_eq!(t.find_column("2"), Some(1));
     }
 
     #[test]
@@ -2588,7 +2896,7 @@ mod tests {
         t.template = Some(Template { cells: vec![String::new(), "today".into(), "12".into(), "yes".into()] });
         let r = t.add_row(1).unwrap();
         let today = crate::when::today();
-        assert_eq!((t.cell(r, 0), t.cell(r, 1), t.cell(r, 2), t.cell(r, 3)), ("", format_day(today, today).as_str(), "$12.00", "x"));
+        assert_eq!((t.cell(r, 0), t.cell(r, 1), t.cell(r, 2), t.cell(r, 3)), ("", full_day(today).as_str(), "$12.00", "x"));
     }
 
     #[test]

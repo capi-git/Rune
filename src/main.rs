@@ -4,6 +4,7 @@
 //! nothing a person had set up stops working.)
 
 mod ai;
+mod attach;
 mod aven;
 mod backup;
 mod chart;

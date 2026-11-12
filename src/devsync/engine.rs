@@ -38,24 +38,49 @@ CREATE TABLE IF NOT EXISTS sync_dirty(kind TEXT NOT NULL, id TEXT NOT NULL, PRIM
 ";
 
 /// The triggers that fill `sync_dirty`. Kept in the file once sync was on.
+///
+/// Each one adds its mark only where there is none yet. `INSERT OR IGNORE`
+/// is not safe for that: a trigger takes the conflict rule of the statement
+/// that fired it, and a save written as `INSERT … ON CONFLICT DO UPDATE`
+/// runs its update with the rule "abort". So the second save of a page, an
+/// event or a space, before a run had taken the mark of the first, failed on
+/// the mark that was there ("UNIQUE constraint failed: sync_dirty.kind,
+/// sync_dirty.id") and the change was not written.
+///
+/// Each trigger is made again (dropped first), so that a file with the
+/// triggers of before gets these.
 fn triggers() -> String {
     let skip = "WHEN NOT EXISTS (SELECT 1 FROM sync_meta WHERE key = 'applying')";
+    let mark = |kind: &str, id: &str| format!("INSERT INTO sync_dirty SELECT '{kind}', {id} WHERE NOT EXISTS (SELECT 1 FROM sync_dirty WHERE kind = '{kind}' AND id = {id});");
     let mut sql = String::new();
-    for (kind, table) in [("page", "pages"), ("event", "events"), ("space", "spaces")] {
+    for (kind, table, id) in [("page", "pages", "id"), ("event", "events", "id"), ("space", "spaces", "id"), ("page", "blocks", "page_id")] {
+        let (new, old) = (mark(kind, &format!("NEW.{id}")), mark(kind, &format!("OLD.{id}")));
         sql += &format!(
-            "CREATE TRIGGER IF NOT EXISTS sync_{table}_insert AFTER INSERT ON {table} {skip} BEGIN INSERT OR IGNORE INTO sync_dirty VALUES ('{kind}', NEW.id); END;
-             CREATE TRIGGER IF NOT EXISTS sync_{table}_update AFTER UPDATE ON {table} {skip} BEGIN INSERT OR IGNORE INTO sync_dirty VALUES ('{kind}', NEW.id); INSERT OR IGNORE INTO sync_dirty VALUES ('{kind}', OLD.id); END;
-             CREATE TRIGGER IF NOT EXISTS sync_{table}_delete AFTER DELETE ON {table} {skip} BEGIN INSERT OR IGNORE INTO sync_dirty VALUES ('{kind}', OLD.id); END;
+            "DROP TRIGGER IF EXISTS sync_{table}_insert;
+             CREATE TRIGGER sync_{table}_insert AFTER INSERT ON {table} {skip} BEGIN {new} END;
+             DROP TRIGGER IF EXISTS sync_{table}_update;
+             CREATE TRIGGER sync_{table}_update AFTER UPDATE ON {table} {skip} BEGIN {new} {old} END;
+             DROP TRIGGER IF EXISTS sync_{table}_delete;
+             CREATE TRIGGER sync_{table}_delete AFTER DELETE ON {table} {skip} BEGIN {old} END;
             "
         );
     }
-    sql += &format!(
-        "CREATE TRIGGER IF NOT EXISTS sync_blocks_insert AFTER INSERT ON blocks {skip} BEGIN INSERT OR IGNORE INTO sync_dirty VALUES ('page', NEW.page_id); END;
-         CREATE TRIGGER IF NOT EXISTS sync_blocks_update AFTER UPDATE ON blocks {skip} BEGIN INSERT OR IGNORE INTO sync_dirty VALUES ('page', NEW.page_id); INSERT OR IGNORE INTO sync_dirty VALUES ('page', OLD.page_id); END;
-         CREATE TRIGGER IF NOT EXISTS sync_blocks_delete AFTER DELETE ON blocks {skip} BEGIN INSERT OR IGNORE INTO sync_dirty VALUES ('page', OLD.page_id); END;
-        "
-    );
     sql
+}
+
+/// A notes file where sync was on with the triggers of before still has
+/// them, also while sync is off (they stay in the file), and they fail
+/// saves. Every program that opens the file for writing puts them right.
+pub fn mend_triggers(conn: &Connection) -> rusqlite::Result<()> {
+    let old: i64 = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'sync!_%' ESCAPE '!' AND sql LIKE '%INSERT OR IGNORE INTO sync_dirty%'",
+        [],
+        |r| r.get(0),
+    )?;
+    if old > 0 {
+        conn.execute_batch(&triggers())?;
+    }
+    Ok(())
 }
 
 /// The names of the triggers, to take them out of a snapshot.
@@ -202,6 +227,12 @@ impl Engine {
     /// Give every record a trigger noted a new version (one clock step each).
     fn stamp(&mut self) -> Result<(), String> {
         let tx = self.conn.unchecked_transaction().map_err(err)?;
+        Self::stamp_in(&tx, &self.device)?;
+        tx.commit().map_err(err)
+    }
+
+    /// The work of `stamp`, inside a transaction that the caller ends.
+    fn stamp_in(tx: &Connection, device: &str) -> Result<(), String> {
         let dirty: Vec<(String, String)> = {
             let mut stmt = tx.prepare("SELECT kind, id FROM sync_dirty").map_err(err)?;
             let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).map_err(err)?;
@@ -231,13 +262,13 @@ impl Engine {
             tx.execute(
                 "INSERT INTO sync_records(kind, id, clock, device, removed) VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(kind, id) DO UPDATE SET clock = ?3, device = ?4, removed = ?5",
-                params![kind, id, clock, self.device, !here as i64],
+                params![kind, id, clock, device, !here as i64],
             )
             .map_err(err)?;
         }
-        set_meta(&tx, "clock", &clock.to_string())?;
+        set_meta(tx, "clock", &clock.to_string())?;
         tx.execute("DELETE FROM sync_dirty", []).map_err(err)?;
-        tx.commit().map_err(err)
+        Ok(())
     }
 
     /// Write every record whose version is not the one last written, in
@@ -594,6 +625,12 @@ impl Engine {
     fn apply_file(&mut self, device: &str, seq: u64, changes: &[Change], report: &mut Report) -> Result<(), String> {
         let tx = self.conn.unchecked_transaction().map_err(err)?;
         set_meta(&tx, "applying", "1")?;
+        // What was changed here since the run began gets its version now,
+        // with the file held for writing: a change from the other device to
+        // the same record is then two changes at once (the loser of two
+        // pages goes to the page's history). With no version, the change
+        // made here was written over and its mark taken away, with no trace.
+        Self::stamp_in(&tx, &self.device)?;
         for change in changes {
             apply(&tx, change, report)?;
         }
@@ -1124,6 +1161,48 @@ mod tests {
     }
 
     #[test]
+    fn a_record_saved_twice_before_a_run_is_saved_both_times() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE pages(id TEXT PRIMARY KEY, title TEXT);
+             CREATE TABLE events(id TEXT PRIMARY KEY, title TEXT);
+             CREATE TABLE spaces(id TEXT PRIMARY KEY, name TEXT);
+             CREATE TABLE blocks(id TEXT PRIMARY KEY, page_id TEXT);",
+        )
+        .unwrap();
+        conn.execute_batch(TABLES).unwrap();
+        // The triggers of before: the second save fails on the mark of the first.
+        conn.execute_batch(
+            "CREATE TRIGGER sync_pages_insert AFTER INSERT ON pages BEGIN INSERT OR IGNORE INTO sync_dirty VALUES ('page', NEW.id); END;
+             CREATE TRIGGER sync_pages_update AFTER UPDATE ON pages BEGIN INSERT OR IGNORE INTO sync_dirty VALUES ('page', NEW.id); INSERT OR IGNORE INTO sync_dirty VALUES ('page', OLD.id); END;",
+        )
+        .unwrap();
+        let save = |title: &str| conn.execute("INSERT INTO pages(id, title) VALUES ('a', ?1) ON CONFLICT(id) DO UPDATE SET title = ?1", [title]);
+        save("one").unwrap();
+        assert!(save("two").is_err(), "the triggers of before fail the second save");
+        // Put right, in a file that has them: each save is written, with one mark.
+        mend_triggers(&conn).unwrap();
+        save("three").unwrap();
+        save("four").unwrap();
+        let title: String = conn.query_row("SELECT title FROM pages WHERE id = 'a'", [], |r| r.get(0)).unwrap();
+        let marks: i64 = conn.query_row("SELECT count(*) FROM sync_dirty WHERE kind = 'page' AND id = 'a'", [], |r| r.get(0)).unwrap();
+        assert_eq!((title.as_str(), marks), ("four", 1));
+        // The lines of a page mark their page, and a removed page keeps its mark.
+        conn.execute("DELETE FROM sync_dirty", []).unwrap();
+        conn.execute("INSERT INTO blocks(id, page_id) VALUES ('b1', 'a')", []).unwrap();
+        conn.execute("INSERT OR REPLACE INTO blocks(id, page_id) VALUES ('b1', 'a')", []).unwrap();
+        conn.execute("UPDATE blocks SET page_id = 'z' WHERE id = 'b1'", []).unwrap();
+        conn.execute("DELETE FROM pages WHERE id = 'a'", []).unwrap();
+        let marks: Vec<String> = conn.prepare("SELECT id FROM sync_dirty WHERE kind = 'page' ORDER BY id").unwrap().query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+        assert_eq!(marks, ["a", "z"]);
+        // A file with no sync in it is left as it is.
+        let plain = Connection::open_in_memory().unwrap();
+        mend_triggers(&plain).unwrap();
+        let made: i64 = plain.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0)).unwrap();
+        assert_eq!(made, 0);
+    }
+
+    #[test]
     fn turning_sync_on_versions_every_record_and_writes_a_snapshot_only() {
         let mut mac = Mac::new("first");
         let own = mac.own();
@@ -1142,6 +1221,24 @@ mod tests {
         assert_eq!(report.written, 0);
         assert!(mac.change_files(&own).is_empty());
         assert!(own.join(SyncPath::Device(mac.engine.device().into()).path()).exists());
+    }
+
+    #[test]
+    fn a_change_made_here_during_a_run_is_not_written_over() {
+        let mut mac = Mac::new("busy");
+        let base = version_of(&mac, "page", "plan");
+        // The run has given every change its version. Then the person
+        // changes the page: its mark is there, its version not yet.
+        mac.sql("UPDATE blocks SET text = 'Call Ana' WHERE page_id = 'plan';");
+        // A change of the phone, made on the version that the Mac had.
+        let mut report = Report::default();
+        mac.engine.apply_file(PHONE, 1, &[phone_page(Some(base.clone()), base.clock + 1, "Plan", "Call Sam today")], &mut report).unwrap();
+        // Two changes at once: one is the page now, the other is in the
+        // page's history. (The change made here was written over, with no
+        // trace and no mark left to send it.)
+        assert_eq!(report.conflicts, 1);
+        assert_eq!(mac.one("SELECT count(*) FROM page_versions WHERE page_id = 'plan'"), "Integer(1)");
+        assert_ne!(version_of(&mac, "page", "plan"), base);
     }
 
     #[test]

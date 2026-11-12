@@ -11,7 +11,7 @@
 //! A reminder of a day with no time comes at 9 AM (on the day, or days
 //! before it), as Notion's does.
 
-use super::{day, format_day, whole_day};
+use super::{day, format_day, full_day, whole_day};
 use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 
 /// Between the start and the end.
@@ -184,8 +184,21 @@ impl When {
         Some(When { start, time, end, end_time, remind })
     }
 
-    /// The words the cell holds: as the module notes say.
-    pub fn write(&self, today: NaiveDate) -> String {
+    /// The words the cell holds: as the module notes say, each day with its
+    /// year (a day with no year was read as the nearest such day, and so
+    /// became a day of another year as time went by).
+    pub fn write(&self, _today: NaiveDate) -> String {
+        let mut out = self.words(&full_day);
+        if let Some(m) = self.remind {
+            out.push_str(&format!(" {REMIND} {}", remind_words(m, self.time.is_some())));
+        }
+        out
+    }
+
+    /// The words for the box of the date picker: as the cell holds them, but
+    /// a day of this year with no year (the box is small, and the year of
+    /// today says nothing).
+    pub fn said(&self, today: NaiveDate) -> String {
         let mut out = self.shown(today);
         if let Some(m) = self.remind {
             out.push_str(&format!(" {REMIND} {}", remind_words(m, self.time.is_some())));
@@ -194,9 +207,13 @@ impl When {
     }
 
     /// What the cell shows: its day, time and end (not its reminder, which a
-    /// small bell says).
+    /// small bell says), a day of this year with no year.
     pub fn shown(&self, today: NaiveDate) -> String {
-        let mut out = format_day(self.start, today);
+        self.words(&|d| format_day(d, today))
+    }
+
+    fn words(&self, say: &dyn Fn(NaiveDate) -> String) -> String {
+        let mut out = say(self.start);
         if let Some(t) = self.time {
             out.push(' ');
             out.push_str(&time_words(t));
@@ -205,7 +222,7 @@ impl When {
             out.push_str(&format!(" {TO} "));
             let same_day = end == self.start && self.end_time.is_some();
             if !same_day {
-                out.push_str(&format_day(end, today));
+                out.push_str(&say(end));
             }
             if let Some(t) = self.end_time {
                 if !same_day {
@@ -296,16 +313,18 @@ mod tests {
             When { remind: Some(1440), ..When::on(d(2026, 11, 6)) },
         ];
         let words = [
-            "Tue 3 Nov",
-            "Tue 3 Nov 2:30 PM",
-            "Tue 3 Nov → Fri 6 Nov",
-            "Tue 3 Nov 2:30 PM → 4 PM",
-            "Wed 30 Dec 9 AM → Sat 2 Jan 2027 5:15 PM ⏰ 15 min before",
-            "Fri 6 Nov ⏰ 1 day before",
+            "Tue 3 Nov 2026",
+            "Tue 3 Nov 2026 2:30 PM",
+            "Tue 3 Nov 2026 → Fri 6 Nov 2026",
+            "Tue 3 Nov 2026 2:30 PM → 4 PM",
+            "Wed 30 Dec 2026 9 AM → Sat 2 Jan 2027 5:15 PM ⏰ 15 min before",
+            "Fri 6 Nov 2026 ⏰ 1 day before",
         ];
         for (w, text) in cases.iter().zip(words) {
             assert_eq!(w.write(today()), text);
             assert_eq!(When::read(text, today(), true), Some(*w), "{text}");
+            // (The form of before, with no year, is read as the same day.)
+            assert_eq!(When::read(&text.replace(" 2026", ""), today(), true), Some(*w), "{text}");
         }
         // What shows in the cell leaves the reminder to its bell.
         assert_eq!(cases[5].shown(today()), "Fri 6 Nov");

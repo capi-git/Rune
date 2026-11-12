@@ -122,7 +122,10 @@ pub fn CalendarView() -> Element {
             tick += 1;
         }
     });
-    let _ = tick.read();
+    // (Given to the parts below: a part that gets the same as before is
+    // not drawn again, and the line of now, the day of today and "In 40
+    // minutes" would stay as they were.)
+    let minute = *tick.read();
     // "New event" was pressed: the box to type the event in words is open.
     let mut adding = use_signal(|| false);
     let mut words = use_signal(String::new);
@@ -157,13 +160,22 @@ pub fn CalendarView() -> Element {
     // The day view: the event whose notes show. The one that was clicked,
     // when it is on this day; else the one that is on now, the next one,
     // or the first of the day.
+    // (While the notes of an event are written in, it stays the one shown:
+    // when its time ends, or another event starts, the day view goes on to
+    // that one only after two minutes with no change to these notes. Else
+    // the notes were taken away in the middle of a sentence.)
+    let kept = use_hook(|| std::rc::Rc::new(std::cell::RefCell::new(None::<(NaiveDate, String)>)));
     let shown = (view == CalView::Day)
         .then(|| {
             let day = day_events(&events, cal.anchor);
             let clicked = cal.selected.as_ref().and_then(|id| day.iter().find(|e| &e.id == id).cloned());
-            clicked.or_else(|| event_in_front(&day, crate::model::now_ms()))
+            let now = crate::model::now_ms();
+            let written = |e: &Event| e.page_id.as_ref().and_then(|p| state.pages.peek().get(p).map(|p| p.updated_at)).is_some_and(|at| now - at < 120_000);
+            let still = kept.borrow().clone().filter(|(d, _)| *d == cal.anchor).and_then(|(_, id)| day.iter().find(|e| e.id == id).cloned()).filter(written);
+            clicked.or(still).or_else(|| event_in_front(&day, now))
         })
         .flatten();
+    *kept.borrow_mut() = shown.as_ref().map(|e| (cal.anchor, e.id.clone()));
     let shown_id = shown.as_ref().map(|e| e.id.clone());
     // The panel (time, repeat, reminder): beside the grid for a clicked event;
     // in the day view only when it is asked for, the notes are what shows.
@@ -237,18 +249,18 @@ pub fn CalendarView() -> Element {
                     }
                 }
                 match view {
-                    CalView::Month => rsx! { MonthGrid { anchor: cal.anchor, events: events, selected: cal.selected, todos: due } },
-                    CalView::Week => rsx! { WeekGrid { days: when::week_days(cal.anchor), events: events, selected: cal.selected, panel_open, todos: due } },
+                    CalView::Month => rsx! { MonthGrid { anchor: cal.anchor, events: events, selected: cal.selected, todos: due, minute } },
+                    CalView::Week => rsx! { WeekGrid { days: when::week_days(cal.anchor), events: events, selected: cal.selected, panel_open, todos: due, minute } },
                     CalView::Day => rsx! {
                         div { class: "cal-day-split",
                             div { class: "cal-day-col",
                                 DayTodos { day: cal.anchor }
                                 // The day has its to-dos in the card over the hours.
-                                WeekGrid { days: vec![cal.anchor], events: events, selected: shown_id, panel_open, todos: Vec::new() }
+                                WeekGrid { days: vec![cal.anchor], events: events, selected: shown_id, panel_open, todos: Vec::new(), minute }
                             }
                             // Keyed, so the notes of another event start afresh.
                             for ev in shown.clone() {
-                                DayNotes { key: "{ev.id}", event: ev }
+                                DayNotes { key: "{ev.id}", event: ev, minute }
                             }
                             if shown.is_none() {
                                 div { class: "day-notes none",
@@ -314,7 +326,8 @@ fn DayTodos(day: NaiveDate) -> Element {
 /// The day view: the notes of one event, written in place. The event's page
 /// is its notes; an event without one gets it at the first click.
 #[component]
-fn DayNotes(event: Event) -> Element {
+fn DayNotes(event: Event, minute: u64) -> Element {
+    let _ = minute;
     let state = use_context::<AppState>();
     let id = event.id.clone();
     let now = crate::model::now_ms();
@@ -435,7 +448,8 @@ fn EventChip(event: Event, selected: bool) -> Element {
 }
 
 #[component]
-fn MonthGrid(anchor: NaiveDate, events: Vec<Event>, selected: Option<String>, todos: Vec<OpenTodo>) -> Element {
+fn MonthGrid(anchor: NaiveDate, events: Vec<Event>, selected: Option<String>, todos: Vec<OpenTodo>, minute: u64) -> Element {
+    let _ = minute;
     let state = use_context::<AppState>();
     let month = anchor.month();
     let today = when::today();
@@ -549,7 +563,8 @@ fn TodoChip(todo: OpenTodo, late: bool) -> Element {
 /// (the day view). `panel_open` says that an event's panel is open, so a
 /// click on the grid closes it and adds nothing.
 #[component]
-fn WeekGrid(days: Vec<NaiveDate>, events: Vec<Event>, selected: Option<String>, panel_open: bool, todos: Vec<OpenTodo>) -> Element {
+fn WeekGrid(days: Vec<NaiveDate>, events: Vec<Event>, selected: Option<String>, panel_open: bool, todos: Vec<OpenTodo>, minute: u64) -> Element {
+    let _ = minute;
     let state = use_context::<AppState>();
     let today = when::today();
     let now = crate::model::now_ms();
@@ -1323,6 +1338,8 @@ fn EventEditor(event: Event) -> Element {
                                         ev.start = when::at(start_date, NaiveTime::from_hms_opt(9, 0, 0).unwrap_or(NaiveTime::MIN));
                                         ev.end = ev.start + HOUR;
                                     } else {
+                                        // (An event that ends at midnight ends on the day before: not two days.)
+                                        let last_day = when::date_of((ev.end - 1).max(ev.start));
                                         ev.all_day = true;
                                         ev.start = when::midnight(start_date);
                                         ev.end = when::midnight(when::next_day(last_day.max(start_date)));

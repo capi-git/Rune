@@ -285,7 +285,9 @@ impl Chart {
                 }
             }
         }
-        out.retain(|s| s.value > 0.0);
+        // (A group with a loss is a slice too, as large as the loss: left
+        // out, a pie of gains and losses showed the gains as all there is.)
+        out.retain(|s| s.value != 0.0);
         out
     }
 
@@ -294,7 +296,7 @@ impl Chart {
         self.add != Add::Count && self.columns(t).1.is_some_and(|c| t.column(c).signed)
     }
 
-    fn all_points(&self, t: &Table, today: NaiveDate) -> Vec<Point> {
+    pub fn all_points(&self, t: &Table, today: NaiveDate) -> Vec<Point> {
         let (x, y) = self.columns(t);
         let dated = x.filter(|&c| t.kind(c) == Kind::Date);
         match (self.by, dated) {
@@ -353,7 +355,13 @@ impl Chart {
                         By::Week => k.format("%-d %b").to_string(),
                         By::Month => k.format("%b").to_string(),
                     };
-                    out.push(Point { label, value: self.add.apply(values).unwrap_or(0.0), current: k == now });
+                    match self.add.apply(values) {
+                        Some(value) => out.push(Point { label, value, current: k == now }),
+                        // (An average of no rows is not 0: the line fell to
+                        // the foot of the chart for that week.)
+                        None if matches!(self.add, Add::Sum | Add::Count) => out.push(Point { label, value: 0.0, current: k == now }),
+                        None => {}
+                    }
                     k = next(k);
                 }
                 out

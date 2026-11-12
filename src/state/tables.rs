@@ -525,13 +525,22 @@ impl AppState {
             _ => {}
         }
         let mut focus = None;
+        let today = crate::when::today();
         self.edit_table(page, id, |t| {
             if t.view.locked && matches!(op, "add-column" | "remove-column") {
                 return;
             }
+            // (A new row gets what the filters ask of a cell, as the "New
+            // row" line gives it: else the row is gone as soon as it is made.)
+            let fresh = |t: &mut crate::table::Table, at: usize, c: usize| {
+                t.add_row(at).map(|r| {
+                    t.fill_for_filters(r, today);
+                    (r, c)
+                })
+            };
             focus = match op {
-                "add-row" => t.add_row(row).map(|r| (r, column)),
-                "add-below" => t.add_row(row).map(|r| (r, 0)),
+                "add-row" => fresh(t, row, column),
+                "add-below" => fresh(t, row, 0),
                 "add-column" => {
                     t.add_column(column);
                     Some((row, column + 1))

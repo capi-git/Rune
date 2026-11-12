@@ -523,9 +523,9 @@ fn Grid(page_id: String, id: String, table: Table, order: Vec<usize>, picked: Ve
     // the row of the headings says it.
     let all_picked = all_of(&picked, &order);
     let head_check = if all_picked { "all" } else if picked.is_empty() { "none" } else { "some" };
-    if frozen > 0 {
-        document::eval(&format!("window.__n2 && window.__n2.freezeColumns && window.__n2.freezeColumns({})", serde_json::to_string(&id).unwrap_or_default()));
-    }
+    // (Each time the table is drawn, also with no frozen column: what is
+    // cut at its left edge while it is scrolled sideways is made again.)
+    document::eval(&format!("window.__n2 && window.__n2.freezeColumns && window.__n2.freezeColumns({})", serde_json::to_string(&id).unwrap_or_default()));
     let b_kinds = id.clone();
     let block_class = format!("table-block{}{}{}{}", if typed { " typed" } else { "" }, if any_menu { " menu-open" } else { "" }, if locked { " locked" } else { "" }, if table.view.sort.is_empty() { "" } else { " sorted" });
     rsx! {
@@ -922,7 +922,9 @@ pub fn CellBody(
     // (grey, with why in its tip: totals and sorts leave it out).
     let filled = !text.trim().is_empty();
     let odd = match kind {
-        Kind::Number => (filled && crate::table::number(&text).is_none()).then_some("Not a number: the total leaves it out"),
+        Kind::Number if filled && crate::table::number(&text).is_none() => Some("Not a number: the total leaves it out"),
+        Kind::Number if filled && !crate::table::number_is_whole(&text) => Some("More than one number: only the first one counts"),
+        Kind::Number => None,
         Kind::Time => (filled && crate::table::seconds(&text).is_none()).then_some("Not a length of time: write 34:00, 1:02:30 or 1h 5m"),
         Kind::Email => (filled && !text.contains('@')).then_some("Not an email address"),
         Kind::Phone => (filled && phone_url(&text).is_none()).then_some("Not a phone number"),

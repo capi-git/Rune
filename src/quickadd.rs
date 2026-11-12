@@ -75,6 +75,9 @@ fn clock(word: &str) -> Option<Clock> {
     }
     let (hour, minute) = (h.parse::<u32>().ok()?, m.parse::<u32>().ok()?);
     let ok = minute < 60 && if pm.is_some() { (1..=12).contains(&hour) } else { hour < 24 };
+    // (An hour written with a zero before it, "06:45", is the hour of a
+    // 24-hour clock: the morning, not the afternoon.)
+    let pm = if pm.is_none() && h.len() == 2 && h.starts_with('0') && hour != 0 { Some(false) } else { pm };
     ok.then_some(Clock { hour, minute, pm })
 }
 
@@ -326,6 +329,10 @@ pub fn parse(text: &str, now: i64) -> Option<Parsed> {
         let day = day?;
         return Some(Parsed { title, start: when::midnight(day), end: when::midnight(when::next_day(day)), all_day: true });
     };
+    // ("tonight at 8": the evening, not the morning.)
+    if evening && from.pm.is_none() && (1..=11).contains(&from.hour) {
+        from.pm = Some(true);
+    }
     // "1-2pm": the start is in the afternoon too, unless that puts it after the end ("11-1pm").
     if let (None, Some(end)) = (from.pm, to) {
         if let Some(pm) = end.pm {
@@ -365,6 +372,16 @@ mod tests {
 
     fn day(m: u32, d: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(2026, m, d).unwrap()
+    }
+
+    #[test]
+    fn an_hour_with_a_zero_before_it_is_the_morning() {
+        let t = |h, m| NaiveTime::from_hms_opt(h, m, 0);
+        assert_eq!(typed_time("06:45"), t(6, 45));
+        assert_eq!(typed_time("07"), t(7, 0));
+        assert_eq!(typed_time("6:45"), t(18, 45));
+        assert_eq!(typed_time("00:30"), t(0, 30));
+        assert_eq!(typed_time("09:00"), t(9, 0));
     }
 
     #[test]

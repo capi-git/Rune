@@ -135,13 +135,18 @@ pub fn QuickFind() -> Element {
                         },
                         onkeydown: move |e: KeyboardEvent| {
                             match e.key() {
+                                // (The chosen line stays in view: the list is
+                                // longer than its box, and Return opened a
+                                // page that could not be seen.)
                                 Key::ArrowDown => {
                                     e.prevent_default();
                                     if count > 0 { selected.set((sel + 1) % count); }
+                                    document::eval("requestAnimationFrame(() => requestAnimationFrame(() => { const el = document.querySelector('.qf-item.selected'); if (el) el.scrollIntoView({ block: 'nearest' }); }))");
                                 }
                                 Key::ArrowUp => {
                                     e.prevent_default();
                                     if count > 0 { selected.set((sel + count - 1) % count); }
+                                    document::eval("requestAnimationFrame(() => requestAnimationFrame(() => { const el = document.querySelector('.qf-item.selected'); if (el) el.scrollIntoView({ block: 'nearest' }); }))");
                                 }
                                 Key::Enter => {
                                     e.prevent_default();
@@ -1417,6 +1422,9 @@ pub fn AskNotesModal() -> Element {
         if q.is_empty() || status.peek().as_str() == "work" {
             return;
         }
+        if state.ask_given.peek().iter().any(|g| g.pending) {
+            return state.toast("Rune is still reading what you gave. Ask again in a moment.");
+        }
         let tools = ai::takes_tools()
             .then(|| ai::Tools { journal: std::env::temp_dir().join(format!("rune-ask-{}-{}.jsonl", std::process::id(), crate::model::now_ms())) });
         let notes = state.notes_for(&q);
@@ -1438,6 +1446,8 @@ pub fn AskNotesModal() -> Element {
             None => q.clone(),
         };
         plan_ok.set(None);
+        // (With the files that were given with the question, as words.)
+        let request = format!("{request}{}", crate::attach::for_request(&state.ask_given.peek()));
         let messages = vec![ai::ChatMessage::system(system), ai::ChatMessage::user(crate::voice::ask_message(&request, &notes, 24_000))];
         let journal = tools.as_ref().map(|t| t.journal.clone());
         asked.set(q);
@@ -1487,8 +1497,11 @@ pub fn AskNotesModal() -> Element {
     use_drop(move || {
         let mut pictures = state.ask_pictures;
         pictures.write().clear();
+        let mut given = state.ask_given;
+        given.write().clear();
     });
     let pictures = state.ask_pictures.read().clone();
+    let given = state.ask_given.read().clone();
     let looked_in = match looked.read().as_slice() {
         [] => String::new(),
         [one] => format!("Looked in {one}"),
@@ -1513,6 +1526,13 @@ pub fn AskNotesModal() -> Element {
     rsx! {
         div { class: "modal-backdrop soft ask-back", onclick: move |_| state.set_modal(None),
             div { class: "modal ask-notes", role: "dialog", "aria-label": "Ask your notes", onclick: move |e| e.stop_propagation(),
+                if !given.is_empty() {
+                    div { class: "ai-given in-ask", id: "ask-given", role: "list", "aria-label": "What goes with the question",
+                        for g in given.iter() {
+                            super::page::AiChip { key: "{g.id}", id: g.id.clone(), icon: g.kind.icon(), name: g.name.clone(), note: g.note.clone(), pending: g.pending }
+                        }
+                    }
+                }
                 div { class: "ask-row",
                     for picture in pictures.iter() {
                         super::page::AiShot { key: "{picture.id}", id: picture.id.clone(), src: picture.data_url() }

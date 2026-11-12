@@ -39,7 +39,16 @@ pub fn back_up(db: &Path) -> Result<PathBuf, String> {
     let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
         .map_err(|e| e.to_string())?;
     let _ = conn.busy_timeout(std::time::Duration::from_secs(5));
-    conn.execute("VACUUM INTO ?1", [file.to_string_lossy()]).map_err(|e| e.to_string())?;
+    // Written under another name and given its name when it is whole: a
+    // copy that stopped half-way (a full disk) must not count as the newest
+    // backup, for which an older, good one is then thrown away.
+    let part = dir.join(format!(".{PREFIX}{stamp}.part"));
+    let _ = std::fs::remove_file(&part);
+    if let Err(e) = conn.execute("VACUUM INTO ?1", [part.to_string_lossy()]) {
+        let _ = std::fs::remove_file(&part);
+        return Err(e.to_string());
+    }
+    std::fs::rename(&part, &file).map_err(|e| e.to_string())?;
     prune(&dir, KEPT);
     Ok(file)
 }
