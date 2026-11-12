@@ -548,6 +548,21 @@ await run('Pull a page out of a combined tab', async () => {
   await wait(250);
   snap('pulled-apart');
   await oneTab();
+  // The other buttons of the mouse: the right one opens and closes nothing;
+  // the middle one opens a page of the sidebar in a new tab, and closes a tab.
+  const other = (el, button) => el.dispatchEvent(new MouseEvent('auxclick', { bubbles: true, cancelable: true, button }));
+  const tabsNow = $$('.tab').length;
+  other(treeItem('Typing test'), 2);
+  await wait(300);
+  check('A right-click on a page of the sidebar opens no tab', $$('.tab').length === tabsNow, `${$$('.tab').length} tabs, ${tabsNow} before`);
+  other(treeItem('Typing test'), 1);
+  check('A middle click on it opens the page in a new tab', await until(() => $$('.tab').length === tabsNow + 1, 2000), `${$$('.tab').length} tabs`);
+  other($$('.tab')[$$('.tab').length - 1], 2);
+  await wait(300);
+  check('A right-click on a tab does not close it', $$('.tab').length === tabsNow + 1, `${$$('.tab').length} tabs`);
+  other($$('.tab')[$$('.tab').length - 1], 1);
+  check('A middle click on a tab closes it', await until(() => $$('.tab').length === tabsNow, 2000), `${$$('.tab').length} tabs`);
+  await oneTab();
 });
 
 await run('Sidebar unpin and peek', async () => {
@@ -2537,6 +2552,25 @@ await run('A table with many columns', async () => {
   const frozenHit = document.elementFromPoint(nowFrozen.left + nowFrozen.width - 4, nowFrozen.top + nowFrozen.height / 2);
   check('A frozen column stays while the others scroll under it', Math.abs(nowFrozen.left - startFrozen) < 1 && startMoving - nowMoving > 200 && frozenCell().contains(frozenHit), `${startFrozen} ${nowFrozen.left} ${startMoving} ${nowMoving} ${frozenHit?.className}`);
   snap('table-frozen-scrolled');
+  {
+    // The bar under the wide table is the app's own, and a drag of it moves the table.
+    const wide = box(1);
+    const bar = wide.parentElement.querySelector(':scope > .table-bar');
+    const thumb = bar?.firstElementChild;
+    check('A wide table has the app’s own bar under it, and not the engine’s', bar?.hasAttribute('data-on') && wide.offsetHeight - wide.clientHeight === 0 && thumb.getBoundingClientRect().width > 20, `${wide.offsetHeight - wide.clientHeight} high, on: ${bar?.hasAttribute('data-on')}`);
+    wide.scrollLeft = 0;
+    await wait(120);
+    const t = thumb.getBoundingClientRect();
+    const at = (x, buttons) => ({ bubbles: true, cancelable: true, button: 0, buttons, clientX: x, clientY: t.top + t.height / 2 });
+    thumb.dispatchEvent(new MouseEvent('mousedown', at(t.left + 10, 1)));
+    document.dispatchEvent(new MouseEvent('mousemove', at(t.left + 70, 1)));
+    const moved = wide.scrollLeft;
+    const cutNow = wide.hasAttribute('data-slid');
+    document.dispatchEvent(new MouseEvent('mouseup', at(t.left + 70, 0)));
+    check('A drag of the bar moves the table, and the cut is made in the same step', moved > 60 && cutNow && !$('.marquee') && Math.abs(thumb.getBoundingClientRect().left - t.left - 60) < 3, `${moved} scrolled, cut: ${cutNow}`);
+    wide.scrollLeft = 0;
+    await wait(120);
+  }
   box(1).scrollLeft = 0;
   // The last columns are there when the table is scrolled.
   box(0).scrollLeft = box(0).scrollWidth;
@@ -4031,6 +4065,16 @@ await run('Screenshots in a picture cell', async () => {
   check('The mark goes when the picture is in', !$('[data-pic-cell].pic-drop', pane));
   await wait(200);
   snap('cell-screenshots');
+  // A press on a picture in the cell shows it large; the arrows go to the next.
+  const small = $$('[data-pic-cell] .cell-pic img', pane);
+  small[0].click();
+  const shade = await until(() => $('.lightbox.open'), 2000);
+  const big = () => $('.lightbox img');
+  check('A press on a picture in a cell shows it large', shade && big() && big().src === small[0].src && big().getBoundingClientRect().width > 30, big() ? `${Math.round(big().getBoundingClientRect().width)} wide` : 'no large view');
+  key(document.body, 'ArrowRight');
+  check('The right arrow shows the next picture of the table', await until(() => big()?.src === small[1].src, 1500));
+  key(document.body, 'Escape');
+  check('Escape puts it away, and the pictures are still in the cell', (await until(() => !$('.lightbox'), 1500)) && pics() === 2, pics());
 });
 
 await run('The AI does things in Rune with its tools', async () => {

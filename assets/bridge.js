@@ -2521,7 +2521,10 @@ window.__n2.freezeColumns = (id) =>
   });
 window.addEventListener('resize', () => {
   for (const box of document.querySelectorAll('.table-block[data-frozen]:not([data-frozen="0"])')) window.__n2.freezeColumns(box.dataset.table);
-  for (const box of document.querySelectorAll('.table-block')) if (box.scrollLeft > 0) queueCut(box);
+  for (const box of document.querySelectorAll('.table-block')) {
+    if (box.scrollLeft > 0) queueCut(box);
+    else syncBar(box);
+  }
 });
 // A table scrolled sideways. Its frozen cells and the strip of the boxes
 // that pick rows are see-through (the page shows under them, as in Notion,
@@ -2537,7 +2540,90 @@ window.addEventListener('resize', () => {
 // goes under the edge or comes out.
 const tableCuts = new Map(); // table id -> its rules
 let cutSheet = null;
+// The bar under a wide table (`.table-bar`, drawn by the app beside the box
+// that scrolls): as long as the part of the table that shows, at the place
+// the table is scrolled to. With no room to scroll there is no bar.
+const barOf = (box) => (box.parentElement ? box.parentElement.querySelector(':scope > .table-bar') : null);
+const barSizes = new ResizeObserver((entries) => {
+  for (const entry of entries) syncBar(entry.target);
+});
+const barWatched = new WeakSet();
+const syncBar = (box) => {
+  const bar = barOf(box);
+  if (!bar) return;
+  if (!box.hasAttribute('data-own-bar')) box.setAttribute('data-own-bar', '');
+  if (!barWatched.has(box)) {
+    barWatched.add(box);
+    barSizes.observe(box);
+  }
+  const shown = box.clientWidth;
+  const all = box.scrollWidth;
+  const on = all > shown + 1;
+  if (bar.hasAttribute('data-on') !== on) bar.toggleAttribute('data-on', on);
+  if (!on) return;
+  const thumb = bar.firstElementChild;
+  const track = bar.clientWidth || shown;
+  const wide = Math.max(28, Math.round((track * shown) / all));
+  const at = ((track - wide) * box.scrollLeft) / (all - shown);
+  const width = `${wide}px`;
+  const place = `translateX(${at.toFixed(1)}px)`;
+  if (thumb.style.width !== width) thumb.style.width = width;
+  if (thumb.style.transform !== place) thumb.style.transform = place;
+};
+// A press on the bar moves the table from here, with its cuts, in one step
+// (as a swipe does: see `wheelTable`).
+let barDrag = null;
+const moveBar = (x) => {
+  const d = barDrag;
+  const track = d.bar.getBoundingClientRect();
+  const room = track.width - d.thumb.getBoundingClientRect().width;
+  if (room <= 0) return;
+  const share = Math.max(0, Math.min(1, (x - d.grab - track.left) / room));
+  const to = share * (d.box.scrollWidth - d.box.clientWidth);
+  if (Math.abs(to - d.box.scrollLeft) < 0.5) return;
+  d.box.scrollLeft = to;
+  cutTable(d.box);
+};
+const endBarDrag = () => {
+  if (!barDrag) return;
+  barDrag.bar.removeAttribute('data-held');
+  barDrag = null;
+};
+document.addEventListener(
+  'mousedown',
+  (e) => {
+    if (e.button !== 0) return;
+    const bar = e.target.closest && e.target.closest('.table-bar');
+    const box = bar && bar.parentElement.querySelector(':scope > .table-block');
+    if (!box) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const thumb = bar.firstElementChild;
+    const t = thumb.getBoundingClientRect();
+    // On the thumb: it is held where it was pressed. Beside it: its middle
+    // comes to the pointer.
+    const grab = e.clientX >= t.left && e.clientX <= t.right ? e.clientX - t.left : t.width / 2;
+    barDrag = { box, bar, thumb, grab };
+    bar.setAttribute('data-held', '');
+    moveBar(e.clientX);
+  },
+  true,
+);
+document.addEventListener(
+  'mousemove',
+  (e) => {
+    if (!barDrag) return;
+    // (Let go outside the window: no button is down any more.)
+    if (!(e.buttons & 1) || !barDrag.box.isConnected) return endBarDrag();
+    e.preventDefault();
+    moveBar(e.clientX);
+  },
+  true,
+);
+document.addEventListener('mouseup', endBarDrag, true);
+window.addEventListener('blur', endBarDrag);
 const cutTable = (box) => {
+  syncBar(box);
   const id = box.dataset.table;
   if (!id) return;
   const heads = box.isConnected ? box.querySelectorAll(':scope > table > tbody > tr.head-row > td') : [];
@@ -3054,6 +3140,9 @@ const stillMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches
 // The large view: the picture as big as the window lets it be, over the app.
 let large = null;
 const picturesWith = (img) => {
+  // A picture in a cell of a table: the pictures of that table, in order.
+  const table = img && img.isConnected && img.closest('.cell-pic') && img.closest('.table-block');
+  if (table) return [...table.querySelectorAll('.cell-pic > img')];
   const blocks = img && img.isConnected && img.closest('.blocks');
   return blocks ? [...blocks.querySelectorAll('.image-block > img')] : [];
 };
@@ -3125,6 +3214,15 @@ function showLarge(img) {
   });
   setTimeout(() => shade.classList.add('open'), 0);
 }
+// A press on a picture in a cell of a table shows it large too (the small
+// square in the cell is all that could be seen of a screenshot).
+document.addEventListener('click', (e) => {
+  if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  const img = e.target.closest && e.target.closest('.cell-pic > img');
+  if (!img) return;
+  e.preventDefault();
+  showLarge(img);
+});
 function stepLarge(by) {
   const all = picturesWith(large.from);
   const at = all.indexOf(large.from);

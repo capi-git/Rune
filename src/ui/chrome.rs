@@ -112,7 +112,13 @@ pub fn TopRow() -> Element {
                                 e.prevent_default();
                             }
                         },
-                        onauxclick: move |_| state.close_tab(t.index),
+                        // (The middle button only: a right-click is for the menu
+                        // of the tab, and closed the tab under it.)
+                        onauxclick: move |e| {
+                            if e.trigger_button() == Some(dioxus::html::input_data::MouseButton::Auxiliary) {
+                                state.close_tab(t.index);
+                            }
+                        },
                         oncontextmenu: move |e| {
                             e.prevent_default();
                             state.set_popover(Some(Popover::TabMenu { index: t.index }));

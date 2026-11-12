@@ -262,6 +262,35 @@ button.table-chip:hover,
 .table-frame {
   position: relative;
 }
+/* The bar that moves a wide table sideways is the app's own (see `syncBar`
+   in bridge.js): the engine's bar is put away where the app has one. */
+.table-block[data-own-bar] {
+  scrollbar-width: none;
+}
+.table-block[data-own-bar]::-webkit-scrollbar {
+  display: none;
+}
+.table-bar {
+  display: none;
+  position: relative;
+  height: 10px;
+}
+.table-bar[data-on] {
+  display: block;
+}
+.table-thumb {
+  position: absolute;
+  top: 2px;
+  left: 0;
+  height: 6px;
+  min-width: 28px;
+  border-radius: 10px;
+  background: var(--active);
+}
+.table-bar:hover .table-thumb,
+.table-bar[data-held] .table-thumb {
+  filter: brightness(1.25) contrast(1.1);
+}
 .table-side {
   position: absolute;
   top: 4px;
@@ -836,6 +865,8 @@ button.table-chip:hover,
   height: 24px;
   border-radius: 4px;
   object-fit: cover;
+  /* (A press shows it large.) */
+  cursor: zoom-in;
 }
 .pic-x {
   position: absolute;

@@ -335,7 +335,14 @@ fn PageTreeItem(id: String, depth: usize, favorites: bool) -> Element {
                         state.open_page(&nav_id);
                     }
                 },
-                onauxclick: move |_| state.open_in_new_tab(Route::Page(tab_id.clone())),
+                // The middle button opens the page in a new tab. (Every button
+                // that is not the left one comes here: a right-click opened
+                // one more tab each time.)
+                onauxclick: move |e| {
+                    if e.trigger_button() == Some(dioxus::html::input_data::MouseButton::Auxiliary) {
+                        state.open_in_new_tab(Route::Page(tab_id.clone()));
+                    }
+                },
                 button {
                     class: if expanded { "chevron open" } else { "chevron" },
                     title: if expanded { "Collapse" } else { "Expand" },

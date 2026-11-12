@@ -703,6 +703,13 @@ fn Grid(page_id: String, id: String, table: Table, order: Vec<usize>, picked: Ve
                     }
                 }
             }
+            // The bar that moves a wide table sideways. The page script sizes
+            // it and moves the table with it (`syncBar` in bridge.js): the
+            // engine's own bar moved the table apart from the script, and
+            // the words of the cells showed under the frozen column.
+            div { class: "table-bar", "aria-hidden": "true",
+                div { class: "table-thumb" }
+            }
             // The menus that hang from a cell, a row or a heading (each a
             // new element when it hangs from another one: the page script
             // places what comes into the page).
