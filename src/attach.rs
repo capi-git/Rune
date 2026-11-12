@@ -282,15 +282,17 @@ fn xlsx_csv(bytes: &[u8]) -> Result<(String, usize, usize), String> {
     // The first tab, as the workbook orders its sheets (a sheet that was
     // moved to the front keeps its old file number); else the lowest number.
     let first_tab = part("xl/workbook.xml").and_then(|book| {
-        let tab = elements(&book, "sheet").into_iter().next()?;
-        let id = attribute(tab.split('>').next()?, "r:id")?;
         let links = part("xl/_rels/workbook.xml.rels")?;
-        let target = elements(&links, "Relationship").into_iter().find(|r| attribute(r, "Id").as_deref() == Some(id.as_str())).and_then(|r| attribute(r, "Target"))?;
-        let path = match target.strip_prefix('/') {
-            Some(whole) => whole.to_string(),
-            None => format!("xl/{target}"),
-        };
-        names.lines().any(|n| n == path).then_some(path)
+        elements(&book, "sheet").into_iter().find_map(|tab| {
+            let id = attribute(tab.split('>').next()?, "r:id")?;
+            let target = elements(&links, "Relationship").into_iter().find(|r| attribute(r, "Id").as_deref() == Some(id.as_str())).and_then(|r| attribute(r, "Target"))?;
+            let path = match target.strip_prefix('/') {
+                Some(whole) => whole.to_string(),
+                None => format!("xl/{target}"),
+            };
+            // (A chart sheet is a tab too, with no rows: the first sheet of cells.)
+            (path.starts_with("xl/worksheets/") && names.lines().any(|n| n == path)).then_some(path)
+        })
     });
     let sheet = part(first_tab.as_deref().unwrap_or(lowest)).ok_or("its first sheet could not be read.")?;
     let shared: Vec<String> = part("xl/sharedStrings.xml").map(|x| elements(&x, "si").into_iter().map(|si| elements(si, "t").into_iter().map(inner).collect::<String>()).collect()).unwrap_or_default();

@@ -507,7 +507,8 @@ impl Server {
         // (A part of the name is enough when only one space has it: "personal"
         // for "Personal projects".)
         let found = exact.or_else(|| {
-            let mut with: Vec<&Space> = spaces.iter().filter(|s| s.display_name().to_lowercase().contains(&low)).collect();
+            let starts = |name: &str| name.starts_with(&low) || name.split(|ch: char| !ch.is_alphanumeric()).any(|word| !word.is_empty() && word.starts_with(&low));
+            let mut with: Vec<&Space> = spaces.iter().filter(|s| starts(&s.display_name().to_lowercase())).collect();
             if with.len() == 1 { with.pop() } else { None }
         });
         match found {
@@ -965,8 +966,10 @@ impl Server {
                         return Err(format!("The new parent page is not in the space \"{}\": a sub-page is in the space of its parent. Pass `space` or `parent_id`, not both. Nothing was changed.", space.display_name()));
                     }
                 }
+                // (To another space only: a sub-page named with its own space
+                // was pulled out of its parent.)
                 None => {
-                    if page.parent_id.is_some() || page.space_id != space.id {
+                    if page.space_id != space.id {
                         page.position = next_position(&pages, None);
                         page.parent_id = None;
                         page.row_of = None;
@@ -2230,10 +2233,21 @@ mod tests {
         // With no space named: the space that is open, and the answer says which.
         let (text, _) = call(&mut s, "create_page", json!({ "title": "Inbox" }));
         assert_eq!(json_of(&text)["space"], "Work");
+        // A part from the middle of a name is not that space ("son" in "Personal").
+        let (text, err) = call(&mut s, "create_page", json!({ "title": "Lost", "space": "son" }));
+        assert!(err, "{text}");
+        // A page named with the space it is in stays under its parent.
+        let (text, err) = call(&mut s, "create_page", json!({ "title": "Inside", "parent_id": folder }));
+        assert!(!err, "{text}");
+        let inside = json_of(&text)["id"].as_str().unwrap().to_string();
+        let (text, err) = call(&mut s, "update_page", json!({ "page_id": inside, "title": "Inside 2", "space": "Personal projects" }));
+        assert!(!err, "{text}");
+        assert_eq!(s.store.load().unwrap().0[&inside].parent_id.as_deref(), Some(folder.as_str()));
+        call(&mut s, "trash_page", json!({ "page_id": inside }));
         // A name that no space has changes nothing, and names the spaces.
         let (text, err) = call(&mut s, "create_page", json!({ "title": "Lost", "space": "Holidays" }));
         assert!(err && text.contains("\"Work\"") && text.contains("\"Personal projects\"") && text.contains("Nothing was changed"), "{text}");
-        assert_eq!(s.store.load().unwrap().0.len(), 2);
+        assert_eq!(s.store.load().unwrap().0.values().filter(|p| !p.trashed).count(), 2);
         // A sub-page is in the space of its parent; another space with it is refused.
         let (text, err) = call(&mut s, "create_page", json!({ "title": "Plan", "parent_id": folder, "space": "Work" }));
         assert!(err && text.contains("Nothing was made"), "{text}");

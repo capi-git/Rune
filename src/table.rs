@@ -1453,6 +1453,13 @@ impl Table {
                 self.put(r, rule.column, &rule.text, today);
             }
         }
+        // In the calendar a row shows on its day: a new row with no day was
+        // made, and was seen nowhere. It gets today.
+        if self.view.layout == Layout::Calendar {
+            if let Some(c) = self.first_of(Kind::Date).filter(|&c| self.cell(r, c).is_empty()) {
+                self.set(r, c, &full_day(today));
+            }
+        }
     }
 
     /// Fill a row from (column, text) pairs. Names no column has are
@@ -2731,6 +2738,24 @@ mod tests {
         assert_eq!(t.total(0).map(|(_, v)| v), Some("2.5".to_string()));
         t.set_total(0, Some(Total::Sum));
         assert_eq!(t.total(0).map(|(_, v)| v), Some("5".to_string()));
+    }
+
+    #[test]
+    fn a_new_row_in_the_calendar_gets_today() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 11).unwrap();
+        let mut t = table(&[&["Task", "Day"], &["Pay rent", "Tue 3 Nov 2026"]]);
+        t.set_kind(1, Kind::Date);
+        // As a table, a new row stays empty.
+        let r = t.add_row(t.rows.len()).unwrap();
+        t.fill_for_filters(r, today);
+        assert_eq!(t.cell(r, 1), "");
+        // In the calendar it shows on its day: today.
+        t.view.layout = Layout::Calendar;
+        t.fill_for_filters(r, today);
+        assert_eq!(t.day(r, 1, today), Some(today));
+        // A row that has its day keeps it.
+        t.fill_for_filters(1, today);
+        assert_eq!(t.day(1, 1, today), NaiveDate::from_ymd_opt(2026, 11, 3));
     }
 
     #[test]

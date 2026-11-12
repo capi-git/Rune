@@ -74,7 +74,8 @@ pub fn ColumnMenu(page_id: String, id: String, c: usize, table: Table) -> Elemen
     let locked = table.view.locked;
     let numbers = matches!(kind, Kind::Number | Kind::Formula);
     let sorted = table.view.sort.iter().find(|s| s.column == c).map(|s| s.down);
-    let place = table.shown_columns().iter().position(|&shown| shown == c).unwrap_or(0);
+    // (By the column's own place in the table: see `Grid`.)
+    let place = c;
     let frozen_here = table.view.frozen == place + 1;
     let grouped = table.view.group == Some(c);
     let total = column.total.map(|t| t.label()).unwrap_or("None");

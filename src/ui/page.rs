@@ -1709,7 +1709,7 @@ pub fn AiShot(id: String, src: String) -> Element {
 pub fn AiChip(id: String, icon: String, name: String, note: String, pending: bool) -> Element {
     let state = use_context::<AppState>();
     rsx! {
-        span { class: if pending { "ai-chip pending" } else { "ai-chip" }, role: "listitem", "data-given": "{id}", title: if note.is_empty() { "{name}" } else { "{name} · {note}" },
+        span { class: if pending { "ai-chip pending" } else { "ai-chip" }, role: "listitem", "data-given": "{id}", "data-icon": "{icon}", title: if note.is_empty() { "{name}" } else { "{name} · {note}" },
             Icon { name: "{icon}", size: 13 }
             span { class: "ai-chip-name", "{name}" }
             if !note.is_empty() {

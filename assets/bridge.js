@@ -381,6 +381,13 @@ const toggleAtCaret = (el, kind) => {
   }
   const mark = document.createTextNode(ZWSP);
   if (inside) {
+    // The other formats the caret is in, inside the one that stops (italic
+    // inside bold): they go on. (The caret left them all, and ⌘B at the end
+    // of bold italic text gave plain text.)
+    const others = [];
+    for (let k = range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement; k && k !== inside; k = k.parentElement) {
+      if (['STRONG', 'B', 'EM', 'I', 'S', 'CODE', 'U', 'MARK'].includes(k.tagName)) others.push(k);
+    }
     // Step out: split the formatted element at the caret.
     const tail = document.createRange();
     tail.setStart(range.startContainer, range.startOffset);
@@ -388,8 +395,14 @@ const toggleAtCaret = (el, kind) => {
     const rest = tail.extractContents();
     const clone = inside.cloneNode(false);
     clone.appendChild(rest);
-    inside.after(mark);
-    if (clone.textContent) mark.after(clone);
+    let holder = mark;
+    for (const k of others) {
+      const wrap = k.cloneNode(false);
+      wrap.appendChild(holder);
+      holder = wrap;
+    }
+    inside.after(holder);
+    if (clone.textContent) holder.after(clone);
   } else {
     const wrap = document.createElement(tags[kind].toLowerCase());
     wrap.appendChild(mark);
@@ -1096,7 +1109,8 @@ function aiHoldsPicks() {
   if (!dock) return false;
   const on = document.activeElement;
   if (on && dock.contains(on)) return true;
-  return (!on || on === document.body) && !!dock.querySelector('#ai-given .ai-chip');
+  // (Only what was picked on the page: a file in the box holds nothing.)
+  return (!on || on === document.body) && !!dock.querySelector('#ai-given .ai-chip[data-given="part"], #ai-given .ai-chip[data-icon="text"]');
 }
 const sendAiFile = (file) => {
   if (file.size > MOST_AI_FILE) {

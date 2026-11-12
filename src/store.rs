@@ -733,6 +733,11 @@ thread_local! {
 /// The same fault is told again only after this long.
 const TELL_AGAIN: std::time::Duration = std::time::Duration::from_secs(120);
 
+/// Whether a notes file is open (the app can run without one: see `trouble`).
+pub fn is_open() -> bool {
+    STORE.with(|s| s.borrow().is_some())
+}
+
 /// The notes file did not open, and the app runs without one.
 pub fn runs_without_a_file() {
     TROUBLE.with(|t| t.borrow_mut().not_kept = true);

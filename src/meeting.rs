@@ -250,6 +250,10 @@ pub enum Change {
     /// is never a reason to make notes of a new meeting; the app says with
     /// `Watch::not_back` when it is not the meeting that ended.
     Back(&'static str),
+    /// During a call, another call program took the microphone (a meeting
+    /// in Teams joined while a voice channel of Discord is still on). The
+    /// call is one for the watcher; the app decides if the notes are.
+    Joined(&'static str),
     Ended,
 }
 
@@ -267,6 +271,9 @@ pub struct Watch {
     since_end: Option<u32>,
     /// Looks in a row, after the end, with sound in one of its programs.
     back: u32,
+    /// A program that took the microphone during the call, and for how many
+    /// looks in a row (see `Change::Joined`).
+    joining: Option<(&'static str, u32)>,
 }
 
 impl Watch {
@@ -284,11 +291,23 @@ impl Watch {
             // A program that would start a meeting is part of this one. A
             // browser the call was in before is left behind then (it plays
             // sound for many other reasons).
+            let mut joined = None;
             if let Some(name) = starter {
                 if !self.apps.contains(&name) {
                     self.apps.retain(|a| !call_app_named(a).is_some_and(|app| app.browser));
                     self.apps.push(name);
+                    self.joining = Some((name, 1));
+                } else if let Some((who, looks)) = self.joining.filter(|(who, _)| *who == name) {
+                    // As for a start: the microphone for some looks in a row.
+                    if looks + 1 >= START_AFTER {
+                        self.joining = None;
+                        joined = Some(who);
+                    } else {
+                        self.joining = Some((who, looks + 1));
+                    }
                 }
+            } else {
+                self.joining = None;
             }
             // Any program of the meeting keeps it going, with its microphone or its sound.
             let alive = heard.iter().any(|h| self.apps.contains(&h.app.name) && (h.input || h.output));
@@ -299,9 +318,10 @@ impl Watch {
                 self.app = None;
                 self.since_end = Some(0);
                 self.back = 0;
+                self.joining = None;
                 return Some(Change::Ended);
             }
-            return None;
+            return joined.map(Change::Joined);
         }
         self.streak = match starter {
             Some(name) if self.app == Some(name) => self.streak + 1,
@@ -583,6 +603,9 @@ mod tests {
         // …then the call opens in Zoom, and the browser is silent from then on.
         assert_eq!(w.step(&[]), None);
         assert_eq!(w.step(&at(zoom, true, true)), None, "no second start");
+        // (The app is told that Zoom is in the call now, once.)
+        assert_eq!(w.step(&at(zoom, true, true)), Some(Change::Joined("Zoom")));
+        assert_eq!(w.step(&at(zoom, true, true)), None);
         // Muted in Zoom, for a long time: Zoom is a program of this meeting now.
         for _ in 0..40 {
             assert_eq!(w.step(&at(zoom, false, true)), None);

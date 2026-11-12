@@ -470,7 +470,10 @@ fn Grid(page_id: String, id: String, table: Table, order: Vec<usize>, picked: Ve
     let cols = table.shown_columns();
     let typed = table.is_typed();
     let locked = table.view.locked;
-    let frozen = table.view.frozen;
+    // The first columns of the table are frozen (`view.frozen` of them): of
+    // the columns that show, those. (Counted among the columns that show, a
+    // frozen column that was hidden froze the next one in its place.)
+    let frozen = cols.iter().filter(|&&c| c < table.view.frozen).count();
     let menu_col = match &open {
         Some(Popover::TableColumn { column, .. }) => Some(*column),
         _ => None,

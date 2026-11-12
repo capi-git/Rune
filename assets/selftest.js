@@ -260,6 +260,25 @@ await run('Typing, formatting, Enter, shortcuts', async () => {
   key(blk, 'b', { metaKey: true });
   await wait(100);
   check('⌘B makes the selection bold', blk.innerHTML.includes('<strong>world</strong>'), blk.innerHTML);
+  {
+    // Bold stops at the caret; the italic that is inside it goes on.
+    const was = blk.innerHTML;
+    blk.innerHTML = '<strong><em>both</em></strong>';
+    const inner = blk.querySelector('em').firstChild;
+    const at = document.createRange();
+    at.setStart(inner, 4);
+    at.collapse(true);
+    getSelection().removeAllRanges();
+    getSelection().addRange(at);
+    key(blk, 'b', { metaKey: true });
+    await wait(60);
+    const tags = [];
+    for (let n = getSelection().anchorNode; n && n !== blk; n = n.parentElement) if (n.nodeType === 1) tags.push(n.tagName);
+    check('⌘B at the end of bold italic text stops the bold and keeps the italic', tags.includes('EM') && !tags.includes('STRONG'), `${tags.join('>')} | ${blk.innerHTML}`);
+    blk.innerHTML = was;
+    T().setSel(blk, 6, 11);
+    await wait(60);
+  }
   T().setSel(blk, 5);
   typeIn(blk, ' **big**');
   await wait(120);
@@ -1787,6 +1806,11 @@ await run('Meeting notes', async () => {
   T().command('meeting_ended');
   check('A call with no yes and nothing written leaves no page when it ends', await until(() => listed() === 1, 3000), listed());
   T().command('forget_meeting');
+  // The pages that went left no dead line in "Meeting notes".
+  treeItem('Meeting notes').click();
+  const folder = await until(() => $$('.pane').find((p) => p.offsetParent && p.querySelector('.title-input')?.value === 'Meeting notes'), 3000);
+  await wait(200);
+  check('A call page that went leaves no dead line in "Meeting notes"', folder && $$('.page-link', folder).length === 1 && $$('.page-link.missing', folder).length === 0, folder ? `${$$('.page-link', folder).length} lines, ${$$('.page-link.missing', folder).length} dead` : 'no folder page');
 });
 
 await run('Speak a page', async () => {
@@ -5113,6 +5137,8 @@ await run('Meeting notes in a page you choose', async () => {
 
 await run('A meeting with no event is known by its time', async () => {
   await oneTab();
+  // (No event of the calendar counts here, whatever earlier groups left at this hour.)
+  T().command('meetings_alone');
   T().command('forget_meeting_slots');
   await wait(60);
   for (let i = 0; i < 8 && $$('.pane').length > 1; i++) {
@@ -5171,6 +5197,7 @@ await run('A meeting with no event is known by its time', async () => {
 
   // The third: by itself.
   const third = await meet();
+  T().command('meetings_alone_off');
   check('After two choices, the notes of the next meeting at that time start in that page', third && named(third).startsWith('Atlas sync – ') && crumbsOf(third).includes('Reading List') && !crumbsOf(third).includes('Meeting notes') && !$('#meeting-place', third), third && crumbsOf(third).join(' / '));
   T().command('forget_meeting_slots');
 });
@@ -5187,7 +5214,7 @@ await run('A meeting remembers its page', async () => {
   $$('.tile').find((t) => t.title.startsWith('Calendar')).click();
   await until(() => $('.calendar'));
   const hour = new Date().getHours();
-  const label = `${hour % 12 || 12}${hour < 12 ? 'am' : 'pm'}`;
+  const label = `${hour % 12 || 12}:${String(new Date().getMinutes()).padStart(2, '0')}${hour < 12 ? 'am' : 'pm'}`;
   $('.cal-toolbar .primary-btn').click();
   const box = await until(() => document.activeElement?.id === 'cal-quick' && document.activeElement, 3000);
   box.value = `Apollo standup today ${label}`;
@@ -5244,6 +5271,8 @@ await run('A meeting remembers its page', async () => {
 
 await run('Notes kept in another space', async () => {
   await oneTab();
+  // (No event of the calendar counts here, whatever earlier groups left at this hour.)
+  T().command('meetings_alone');
   for (let i = 0; i < 8 && $$('.pane').length > 1; i++) {
     const n = $$('.pane').length;
     T().command('close_split');
@@ -5345,6 +5374,7 @@ await run('Notes kept in another space', async () => {
 });
 
 await run('Meeting recap by voice', async () => {
+  T().command('meetings_alone_off');
   const dated = / – [A-Z][a-z]{2} \d{1,2}, \d{4}$/;
   const row = $$('.sidebar .tree-item').find((r) => {
     const t = r.querySelector('.tree-title')?.textContent || '';
@@ -6837,10 +6867,18 @@ await run('Join a meeting from its event', async () => {
   const col = $('.cal-col.today');
   const r = col.getBoundingClientRect();
   const at = { bubbles: true, clientX: r.left + 10, clientY: r.top + 16 * 48 + 3 };
-  col.dispatchEvent(new MouseEvent('mousedown', at));
-  col.dispatchEvent(new MouseEvent('mouseup', at));
-  col.dispatchEvent(new MouseEvent('click', at));
-  const slot = await until(() => $('#ev-draft'));
+  const pressDay = () => {
+    col.dispatchEvent(new MouseEvent('mousedown', at));
+    col.dispatchEvent(new MouseEvent('mouseup', at));
+    col.dispatchEvent(new MouseEvent('click', at));
+  };
+  pressDay();
+  let slot = await until(() => $('#ev-draft'), 1500);
+  if (!slot) {
+    await wait(300);
+    pressDay();
+    slot = await until(() => $('#ev-draft'));
+  }
   slot.value = 'Sync call';
   slot.dispatchEvent(new Event('input', { bubbles: true }));
   key(slot, 'Enter');

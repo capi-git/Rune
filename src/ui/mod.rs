@@ -255,6 +255,11 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
         loop {
             crate::ai::sleep_ms(crate::meeting::POLL_MS).await;
             if !crate::meeting::enabled() {
+                // Turned off during a call: the call is over for the notes
+                // (its question and its empty page go), once.
+                if watch.in_meeting() {
+                    state.meeting_ended(crate::model::now_ms());
+                }
                 watch = crate::meeting::Watch::default();
                 continue;
             }
@@ -266,8 +271,9 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
             match change {
                 Some(crate::meeting::Change::Started(app)) => state.meeting_started(app),
                 // Sound alone, after an end: only the meeting that ended can go on.
-                Some(crate::meeting::Change::Back(_)) => {
-                    if !state.meeting_back() {
+                Some(crate::meeting::Change::Joined(app)) => state.meeting_joined(app),
+                Some(crate::meeting::Change::Back(app)) => {
+                    if !state.meeting_back(app) {
                         watch.not_back();
                         crate::meeting::log("Not the meeting that ended");
                     }
