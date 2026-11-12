@@ -1008,12 +1008,15 @@ fn BlockRow(
     let (p3, b3) = (page_id.clone(), id.clone());
     let (p4, b4) = (page_id.clone(), id.clone());
     let (p5, b5) = (page_id.clone(), id.clone());
+    let tint = block.tint.clone();
 
     rsx! {
         div {
             class: "{class}",
             "data-id": "{id}",
             "data-page": "{page_id}",
+            // (The colour of the line: see the tints in style.css.)
+            "data-tint": "{tint}",
             style: "{row_style}",
             div { class: "block-inner",
                 div { class: "gutter",
@@ -1566,6 +1569,42 @@ fn BlockMenu(page_id: String, block: Block) -> Element {
                         span { "{kind.label()}" }
                         if kind == block.kind {
                             span { class: "menu-shortcut", Icon { name: "check", size: 14 } }
+                        }
+                    }
+                }
+            }
+            if editable {
+                // The colour of the line: of its words (the first row), or
+                // a band behind it (the second). The first of each row is
+                // "none".
+                div { class: "menu-section", "Color" }
+                div { class: "tint-row", role: "group", "aria-label": "Colour of the words",
+                    for name in std::iter::once("").chain(Block::TINTS) {
+                        button {
+                            key: "{name}",
+                            class: if block.tint_parts().0 == name { "tint-dot words on" } else { "tint-dot words" },
+                            "data-tint": "{name}",
+                            title: if name.is_empty() { "Default text".to_string() } else { format!("{}{} text", name[..1].to_uppercase(), &name[1..]) },
+                            onclick: {
+                                let (pid, bid) = (page_id.clone(), id.clone());
+                                move |_| state.set_block_tint(&pid, &bid, name, false)
+                            },
+                            "A"
+                        }
+                    }
+                }
+                div { class: "tint-row", role: "group", "aria-label": "Colour behind the line",
+                    for name in std::iter::once("").chain(Block::TINTS) {
+                        button {
+                            key: "{name}-bg",
+                            class: if block.tint_parts().1.strip_suffix("-bg").unwrap_or("") == name { "tint-dot band on" } else { "tint-dot band" },
+                            "data-tint": if name.is_empty() { String::new() } else { format!("{name}-bg") },
+                            title: if name.is_empty() { "Default background".to_string() } else { format!("{}{} background", name[..1].to_uppercase(), &name[1..]) },
+                            onclick: {
+                                let (pid, bid) = (page_id.clone(), id.clone());
+                                let tint = if name.is_empty() { String::new() } else { format!("{name}-bg") };
+                                move |_| state.set_block_tint(&pid, &bid, &tint, true)
+                            },
                         }
                     }
                 }

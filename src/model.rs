@@ -222,6 +222,13 @@ pub struct Block {
     /// notification then (a reminder). None: no reminder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remind: Option<chrono::NaiveTime>,
+    /// The colour of a line, chosen in its menu: one of `Block::TINTS` for
+    /// its words ("red"), one with "-bg" for the band behind the line
+    /// ("blue-bg"), or both, the words first ("red blue-bg"). Empty: none.
+    /// (Markdown cannot say it: a line that an AI tool gives back unchanged
+    /// keeps it, see `keep_unchanged`.)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tint: String,
 }
 
 /// Where a picture sits. A free picture is at one side of the page, at the
@@ -306,7 +313,28 @@ impl Block {
             place: Place::default(),
             due: None,
             remind: None,
+            tint: String::new(),
         }
+    }
+
+    /// The colours a line can have (see `tint`).
+    pub const TINTS: [&'static str; 9] = ["gray", "brown", "orange", "yellow", "green", "blue", "purple", "pink", "red"];
+
+    /// `tint` as it is kept: a colour of `TINTS` for the words, one with
+    /// "-bg" for the band, or both (the words first); any other word is no
+    /// colour.
+    pub fn tint_or_none(tint: &str) -> String {
+        let known = |word: &&str| Self::TINTS.contains(&word.strip_suffix("-bg").unwrap_or(word));
+        let words = tint.split_whitespace().filter(known).find(|w| !w.ends_with("-bg"));
+        let band = tint.split_whitespace().filter(known).find(|w| w.ends_with("-bg"));
+        [words, band].into_iter().flatten().collect::<Vec<_>>().join(" ")
+    }
+
+    /// The colour of the words of the line, and the colour of its band
+    /// (as "red-bg"); each empty for none.
+    pub fn tint_parts(&self) -> (&str, &str) {
+        let part = |band: bool| self.tint.split_whitespace().find(|w| w.ends_with("-bg") == band).unwrap_or("");
+        (part(false), part(true))
     }
 
     /// The reminder's time as the notes file keeps it: "09:00", or nothing.

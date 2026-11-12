@@ -718,6 +718,15 @@ fn apply(tx: &Connection, change: &Change, report: &mut Report) -> Result<(), St
     }
     match change.kind.as_str() {
         "page" => {
+            // The colours the lines have here: a device that does not know
+            // colours (an older phone app) sends a line without one, and
+            // the line must keep the colour it has.
+            let old_tints: std::collections::HashMap<String, String> = {
+                let bc = columns(tx, "blocks")?;
+                let mut stmt = tx.prepare(&format!("SELECT id, {} FROM blocks WHERE page_id = ?1", or(&bc, "tint", "''"))).map_err(err)?;
+                let rows = stmt.query_map([&change.id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?.unwrap_or_default()))).map_err(err)?;
+                rows.filter_map(Result::ok).filter(|(_, tint)| !tint.is_empty()).collect()
+            };
             tx.execute("DELETE FROM blocks WHERE page_id = ?1", [&change.id]).map_err(err)?;
             match &change.page {
                 Some(p) if !change.removed => {
@@ -748,8 +757,8 @@ fn apply(tx: &Connection, change: &Change, report: &mut Report) -> Result<(), St
                         // "OR REPLACE": a block that moved here from another
                         // page may still be in that page.
                         tx.execute(
-                            "INSERT OR REPLACE INTO blocks(id, page_id, position, kind, text, checked, indent, collapsed, icon, language, target, data, place, due, remind)
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                            "INSERT OR REPLACE INTO blocks(id, page_id, position, kind, text, checked, indent, collapsed, icon, language, target, data, place, due, remind, tint)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                             params![
                                 b.id,
                                 change.id,
@@ -765,7 +774,8 @@ fn apply(tx: &Connection, change: &Change, report: &mut Report) -> Result<(), St
                                 b.data,
                                 b.place,
                                 b.due,
-                                b.remind
+                                b.remind,
+                                Block::tint_or_none(b.tint.as_deref().or_else(|| old_tints.get(&b.id).map(String::as_str)).unwrap_or(""))
                             ],
                         )
                         .map_err(err)?;
@@ -876,6 +886,7 @@ fn to_block(b: &SyncBlock) -> Block {
         place: Place::from_column(&b.place),
         due: Block::due_from_column(&b.due),
         remind: Block::remind_from_column(&b.remind),
+        tint: Block::tint_or_none(b.tint.as_deref().unwrap_or("")),
     }
 }
 
@@ -925,11 +936,12 @@ pub fn read_page(conn: &Connection, id: &str) -> Result<Option<SyncPage>, String
     let Some(mut page) = page else { return Ok(None) };
     let bc = columns(conn, "blocks")?;
     let sql = format!(
-        "SELECT id, kind, text, checked, indent, collapsed, icon, language, target, {}, {}, {}, {} FROM blocks WHERE page_id = ?1 ORDER BY position",
+        "SELECT id, kind, text, checked, indent, collapsed, icon, language, target, {}, {}, {}, {}, {} FROM blocks WHERE page_id = ?1 ORDER BY position",
         or(&bc, "data", "''"),
         or(&bc, "place", "''"),
         or(&bc, "due", "''"),
-        or(&bc, "remind", "''")
+        or(&bc, "remind", "''"),
+        or(&bc, "tint", "''")
     );
     let mut stmt = conn.prepare(&sql).map_err(err)?;
     let rows = stmt
@@ -948,6 +960,9 @@ pub fn read_page(conn: &Connection, id: &str) -> Result<Option<SyncPage>, String
                 place: r.get::<_, Option<String>>(10)?.unwrap_or_default(),
                 due: r.get::<_, Option<String>>(11)?.unwrap_or_default(),
                 remind: r.get::<_, Option<String>>(12)?.unwrap_or_default(),
+                // (Always said, also when there is none: "none" from this
+                // Mac takes a colour away on the other devices.)
+                tint: Some(r.get::<_, Option<String>>(13)?.unwrap_or_default()),
             })
         })
         .map_err(err)?;
@@ -1267,6 +1282,33 @@ mod tests {
         // Made and removed between two runs: it never travels.
         mac.sql("INSERT INTO events(id, title, start_ms, end_ms) VALUES ('e2', 'Gone', 0, 1); DELETE FROM events WHERE id = 'e2';");
         assert_eq!(mac.run(&[own.clone()]).written, 0);
+    }
+
+    #[test]
+    fn a_line_keeps_its_colour_when_a_device_that_knows_none_changes_the_page() {
+        let mut mac = Mac::new("colour");
+        let own = mac.own();
+        let base = version_of(&mac, "page", "plan");
+        phone_writes(&own, 1, vec![phone_page(Some(base), 50, "Plan", "Buy milk")]);
+        mac.run(&[own.clone()]);
+        // The line gets a colour on the Mac: its change file says so.
+        mac.sql("UPDATE blocks SET tint = 'red-bg' WHERE id = 'b1';");
+        mac.run(&[own.clone()]);
+        let sent = mac.change_files(&own).pop().unwrap();
+        assert_eq!(sent.changes[0].page.as_ref().unwrap().blocks[0].tint.as_deref(), Some("red-bg"));
+        // The phone (an app from before colours) changes the words: its line has no colour to say.
+        let now = version_of(&mac, "page", "plan");
+        phone_writes(&own, 2, vec![phone_page(Some(now), 200, "Plan", "Buy oat milk")]);
+        mac.run(&[own.clone()]);
+        assert_eq!(mac.one("SELECT text FROM blocks WHERE id = 'b1'"), "Text(\"Buy oat milk\")");
+        assert_eq!(mac.one("SELECT tint FROM blocks WHERE id = 'b1'"), "Text(\"red-bg\")", "the colour stays");
+        // A device that knows colours says "none": the colour goes.
+        let now = version_of(&mac, "page", "plan");
+        let mut none = phone_page(Some(now), 300, "Plan", "Buy oat milk");
+        none.page.as_mut().unwrap().blocks[0].tint = Some(String::new());
+        phone_writes(&own, 3, vec![none]);
+        mac.run(&[own.clone()]);
+        assert_eq!(mac.one("SELECT tint FROM blocks WHERE id = 'b1'"), "Text(\"\")");
     }
 
     #[test]

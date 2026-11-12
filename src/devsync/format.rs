@@ -228,6 +228,10 @@ pub struct SyncBlock {
     pub due: String,
     #[serde(default)]
     pub remind: String,
+    /// The colour of the line (see `Block::tint`). A device that does not
+    /// know colours sends none: the colour the line has here then stays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tint: Option<String>,
 }
 
 fn text_kind() -> String {

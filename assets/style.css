@@ -1726,6 +1726,11 @@ body[data-resizing="rows"] * {
   height: 100%;
   border: 0;
   background: transparent;
+  /* On a zoomed page the frame is drawn larger or smaller, but its inside
+     was laid out for the size before the zoom and drawn as it was: the
+     drawing filled only a part of its box (or was cut). With the zoom taken
+     back for the frame itself, its inside is as large as the frame shows. */
+  zoom: calc(1 / var(--zoom, 1));
 }
 /* Until it's clicked the page scrolls past it; a hint shows on hover. */
 .drawing-cover {
@@ -8366,4 +8371,223 @@ body.ev-dragging .cal-event {
   align-items: flex-start;
   gap: 8px;
   min-width: 0;
+}
+
+/* ---------- the colour of a line (its menu, "Color") ---------- */
+/* Of its words, or a band behind the line. The colours are quiet ones, a set
+   for the light look and a set for the dark one. */
+.app {
+  --ink-gray: #787774;
+  --band-gray: #f1f1ef;
+  --ink-brown: #9f6b53;
+  --band-brown: #f4eeee;
+  --ink-orange: #d9730d;
+  --band-orange: #fbecdd;
+  --ink-yellow: #cb912f;
+  --band-yellow: #fbf3db;
+  --ink-green: #448361;
+  --band-green: #edf3ec;
+  --ink-blue: #337ea9;
+  --band-blue: #e7f3f8;
+  --ink-purple: #9065b0;
+  --band-purple: #f6f3f9;
+  --ink-pink: #c14c8a;
+  --band-pink: #faf1f5;
+  --ink-red: #d44c47;
+  --band-red: #fdebec;
+}
+.app.theme-dark {
+  --ink-gray: #9b9b9b;
+  --band-gray: #2f2f2f;
+  --ink-brown: #ba856f;
+  --band-brown: #4a3228;
+  --ink-orange: #c77d48;
+  --band-orange: #5c3b23;
+  --ink-yellow: #ca9849;
+  --band-yellow: #564328;
+  --ink-green: #529e72;
+  --band-green: #243d30;
+  --ink-blue: #5e87c9;
+  --band-blue: #143a4e;
+  --ink-purple: #9d68d3;
+  --band-purple: #3c2d49;
+  --ink-pink: #d15796;
+  --band-pink: #4e2c3c;
+  --ink-red: #df5452;
+  --band-red: #522e2a;
+}
+@media (prefers-color-scheme: dark) {
+  .app.theme-system {
+    --ink-gray: #9b9b9b;
+    --band-gray: #2f2f2f;
+    --ink-brown: #ba856f;
+    --band-brown: #4a3228;
+    --ink-orange: #c77d48;
+    --band-orange: #5c3b23;
+    --ink-yellow: #ca9849;
+    --band-yellow: #564328;
+    --ink-green: #529e72;
+    --band-green: #243d30;
+    --ink-blue: #5e87c9;
+    --band-blue: #143a4e;
+    --ink-purple: #9d68d3;
+    --band-purple: #3c2d49;
+    --ink-pink: #d15796;
+    --band-pink: #4e2c3c;
+    --ink-red: #df5452;
+    --band-red: #522e2a;
+  }
+}
+.block-row[data-tint~="gray"] > .block-inner,
+.block-row[data-tint~="gray"] > .block-inner .blk {
+  color: var(--ink-gray);
+}
+.block-row[data-tint~="gray-bg"] > .block-inner {
+  --band: var(--band-gray);
+}
+.tint-dot.words[data-tint="gray"] {
+  color: var(--ink-gray);
+}
+.tint-dot.band[data-tint="gray-bg"] {
+  background: var(--band-gray);
+}
+.block-row[data-tint~="brown"] > .block-inner,
+.block-row[data-tint~="brown"] > .block-inner .blk {
+  color: var(--ink-brown);
+}
+.block-row[data-tint~="brown-bg"] > .block-inner {
+  --band: var(--band-brown);
+}
+.tint-dot.words[data-tint="brown"] {
+  color: var(--ink-brown);
+}
+.tint-dot.band[data-tint="brown-bg"] {
+  background: var(--band-brown);
+}
+.block-row[data-tint~="orange"] > .block-inner,
+.block-row[data-tint~="orange"] > .block-inner .blk {
+  color: var(--ink-orange);
+}
+.block-row[data-tint~="orange-bg"] > .block-inner {
+  --band: var(--band-orange);
+}
+.tint-dot.words[data-tint="orange"] {
+  color: var(--ink-orange);
+}
+.tint-dot.band[data-tint="orange-bg"] {
+  background: var(--band-orange);
+}
+.block-row[data-tint~="yellow"] > .block-inner,
+.block-row[data-tint~="yellow"] > .block-inner .blk {
+  color: var(--ink-yellow);
+}
+.block-row[data-tint~="yellow-bg"] > .block-inner {
+  --band: var(--band-yellow);
+}
+.tint-dot.words[data-tint="yellow"] {
+  color: var(--ink-yellow);
+}
+.tint-dot.band[data-tint="yellow-bg"] {
+  background: var(--band-yellow);
+}
+.block-row[data-tint~="green"] > .block-inner,
+.block-row[data-tint~="green"] > .block-inner .blk {
+  color: var(--ink-green);
+}
+.block-row[data-tint~="green-bg"] > .block-inner {
+  --band: var(--band-green);
+}
+.tint-dot.words[data-tint="green"] {
+  color: var(--ink-green);
+}
+.tint-dot.band[data-tint="green-bg"] {
+  background: var(--band-green);
+}
+.block-row[data-tint~="blue"] > .block-inner,
+.block-row[data-tint~="blue"] > .block-inner .blk {
+  color: var(--ink-blue);
+}
+.block-row[data-tint~="blue-bg"] > .block-inner {
+  --band: var(--band-blue);
+}
+.tint-dot.words[data-tint="blue"] {
+  color: var(--ink-blue);
+}
+.tint-dot.band[data-tint="blue-bg"] {
+  background: var(--band-blue);
+}
+.block-row[data-tint~="purple"] > .block-inner,
+.block-row[data-tint~="purple"] > .block-inner .blk {
+  color: var(--ink-purple);
+}
+.block-row[data-tint~="purple-bg"] > .block-inner {
+  --band: var(--band-purple);
+}
+.tint-dot.words[data-tint="purple"] {
+  color: var(--ink-purple);
+}
+.tint-dot.band[data-tint="purple-bg"] {
+  background: var(--band-purple);
+}
+.block-row[data-tint~="pink"] > .block-inner,
+.block-row[data-tint~="pink"] > .block-inner .blk {
+  color: var(--ink-pink);
+}
+.block-row[data-tint~="pink-bg"] > .block-inner {
+  --band: var(--band-pink);
+}
+.tint-dot.words[data-tint="pink"] {
+  color: var(--ink-pink);
+}
+.tint-dot.band[data-tint="pink-bg"] {
+  background: var(--band-pink);
+}
+.block-row[data-tint~="red"] > .block-inner,
+.block-row[data-tint~="red"] > .block-inner .blk {
+  color: var(--ink-red);
+}
+.block-row[data-tint~="red-bg"] > .block-inner {
+  --band: var(--band-red);
+}
+.tint-dot.words[data-tint="red"] {
+  color: var(--ink-red);
+}
+.tint-dot.band[data-tint="red-bg"] {
+  background: var(--band-red);
+}
+/* The band is a little wider than the words, at both sides, and takes no
+   room of its own (the line stays where it is). */
+.block-row[data-tint$="-bg"] > .block-inner {
+  background: var(--band);
+  border-radius: 4px;
+  box-shadow: -6px 0 0 var(--band), 6px 0 0 var(--band);
+}
+/* The two rows of colours in the menu of a line. */
+.tint-row {
+  display: flex;
+  gap: 3px;
+  padding: 2px 8px 4px;
+}
+.tint-dot {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
+  cursor: default;
+}
+.tint-dot:hover {
+  border-color: var(--text-3);
+}
+.tint-dot.on {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
 }

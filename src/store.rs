@@ -227,6 +227,11 @@ impl Store {
         if !has_remind_column {
             self.conn.execute_batch("ALTER TABLE blocks ADD COLUMN remind TEXT NOT NULL DEFAULT ''")?;
         }
+        // The colour of a line (an older program leaves it as it is).
+        let has_tint_column: bool = self.conn.prepare("SELECT 1 FROM pragma_table_info('blocks') WHERE name='tint'")?.exists([])?;
+        if !has_tint_column {
+            self.conn.execute_batch("ALTER TABLE blocks ADD COLUMN tint TEXT NOT NULL DEFAULT ''")?;
+        }
         self.upgrade_text_format()?;
         self.ensure_space()?;
         // Mark the file with its form. The mark is never made smaller: a file
@@ -435,7 +440,7 @@ impl Store {
 
         let mut blocks: HashMap<Id, Vec<Block>> = HashMap::new();
         let mut stmt = self.conn.prepare(
-            "SELECT page_id, id, kind, text, checked, indent, collapsed, icon, language, target, data, place, due, remind
+            "SELECT page_id, id, kind, text, checked, indent, collapsed, icon, language, target, data, place, due, remind, tint
              FROM blocks ORDER BY page_id, position",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -455,6 +460,7 @@ impl Store {
                     place: crate::model::Place::from_column(&r.get::<_, Option<String>>(11)?.unwrap_or_default()),
                     due: Block::due_from_column(&r.get::<_, Option<String>>(12)?.unwrap_or_default()),
                     remind: Block::remind_from_column(&r.get::<_, Option<String>>(13)?.unwrap_or_default()),
+                    tint: Block::tint_or_none(&r.get::<_, Option<String>>(14)?.unwrap_or_default()),
                 },
             ))
         })?;
@@ -496,7 +502,7 @@ impl Store {
     /// The blocks of one page as they are on disk now.
     pub fn load_page_blocks(&self, page_id: &str) -> rusqlite::Result<Vec<Block>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, kind, text, checked, indent, collapsed, icon, language, target, data, place, due, remind
+            "SELECT id, kind, text, checked, indent, collapsed, icon, language, target, data, place, due, remind, tint
              FROM blocks WHERE page_id=?1 ORDER BY position",
         )?;
         let rows = stmt.query_map(params![page_id], |r| {
@@ -514,6 +520,7 @@ impl Store {
                 place: crate::model::Place::from_column(&r.get::<_, Option<String>>(10)?.unwrap_or_default()),
                 due: Block::due_from_column(&r.get::<_, Option<String>>(11)?.unwrap_or_default()),
                 remind: Block::remind_from_column(&r.get::<_, Option<String>>(12)?.unwrap_or_default()),
+                tint: Block::tint_or_none(&r.get::<_, Option<String>>(13)?.unwrap_or_default()),
             })
         })?;
         rows.collect()
@@ -539,8 +546,8 @@ impl Store {
         }
         {
             let mut stmt = tx.prepare_cached(
-                "INSERT INTO blocks(id, page_id, position, kind, text, checked, indent, collapsed, icon, language, target, data, place, due, remind)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                "INSERT INTO blocks(id, page_id, position, kind, text, checked, indent, collapsed, icon, language, target, data, place, due, remind, tint)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             )?;
             for (i, b) in blocks.iter().enumerate() {
                 stmt.execute(params![
@@ -558,7 +565,8 @@ impl Store {
                     b.data,
                     b.place.to_column(),
                     b.due_column(),
-                    b.remind_column()
+                    b.remind_column(),
+                    b.tint
                 ])?;
             }
         }
@@ -578,8 +586,8 @@ impl Store {
         tx.prepare_cached("DELETE FROM blocks WHERE page_id=?1")?.execute(params![page_id])?;
         {
             let mut stmt = tx.prepare_cached(
-                "INSERT INTO blocks(id, page_id, position, kind, text, checked, indent, collapsed, icon, language, target, data, place, due, remind)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                "INSERT INTO blocks(id, page_id, position, kind, text, checked, indent, collapsed, icon, language, target, data, place, due, remind, tint)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             )?;
             for (i, b) in blocks.iter().enumerate() {
                 stmt.execute(params![
@@ -597,7 +605,8 @@ impl Store {
                     b.data,
                     b.place.to_column(),
                     b.due_column(),
-                    b.remind_column()
+                    b.remind_column(),
+                    b.tint
                 ])?;
             }
         }
@@ -852,6 +861,29 @@ mod tests {
         store.save_blocks("p", &[todo.clone(), plain.clone()]).unwrap();
         assert_eq!(store.load_page_blocks("p").unwrap(), vec![todo.clone(), plain.clone()]);
         assert_eq!(store.load().unwrap().1.get("p"), Some(&vec![todo, plain]));
+    }
+
+    #[test]
+    fn a_line_keeps_its_colour_in_the_notes_file() {
+        let store = Store::open_in_memory().unwrap();
+        let mut words = Block::text("Loud");
+        words.tint = "red".into();
+        let mut band = Block::new(BlockKind::Heading2, "Quiet");
+        band.tint = "blue-bg".into();
+        let plain = Block::text("Plain");
+        store.save_blocks("p", &[words.clone(), band.clone(), plain.clone()]).unwrap();
+        assert_eq!(store.load_page_blocks("p").unwrap(), vec![words.clone(), band.clone(), plain.clone()]);
+        assert_eq!(store.load().unwrap().1.get("p"), Some(&vec![words, band, plain]));
+        // A word that is no colour is none.
+        assert_eq!((Block::tint_or_none("red"), Block::tint_or_none("red-bg"), Block::tint_or_none("loud"), Block::tint_or_none("-bg"), Block::tint_or_none("")), ("red".to_string(), "red-bg".to_string(), String::new(), String::new(), String::new()));
+        // Both together: the words first, one of each, and what is no colour left out.
+        assert_eq!((Block::tint_or_none("blue-bg red"), Block::tint_or_none("red green loud gray-bg pink-bg"), Block::tint_or_none(" red  ")), ("red blue-bg".to_string(), "red gray-bg".to_string(), "red".to_string()));
+        let mut both = Block::text("Both");
+        both.tint = "red blue-bg".into();
+        assert_eq!(both.tint_parts(), ("red", "blue-bg"));
+        store.save_blocks("q", &[both.clone()]).unwrap();
+        assert_eq!(store.load_page_blocks("q").unwrap(), vec![both]);
+        assert_eq!((Block::text("x").tint_parts(), { let mut b = Block::text("x"); b.tint = "green-bg".into(); b.tint_parts() == ("", "green-bg") }), (("", ""), true));
     }
 
     #[test]

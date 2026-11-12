@@ -7453,6 +7453,20 @@ impl AppState {
         });
     }
 
+    /// Give the words of a line a colour ("red"), or its band one
+    /// ("red-bg"); `band` says which of the two is set, and "" takes that
+    /// one away. The other stays: a line can have both. (The menu stays
+    /// open, so that both can be chosen in one go.)
+    pub fn set_block_tint(self, page: &str, id: &str, tint: &str, band: bool) {
+        self.edit_blocks(page, |bs| {
+            if let Some(i) = index_of(bs, id) {
+                let (words, behind) = bs[i].tint_parts();
+                let both = if band { format!("{words} {tint}") } else { format!("{tint} {behind}") };
+                bs[i].tint = Block::tint_or_none(&both);
+            }
+        });
+    }
+
     pub fn turn_into(self, page: &str, id: &str, kind: BlockKind) {
         self.edit_blocks(page, |bs| {
             if let Some(i) = index_of(bs, id) {

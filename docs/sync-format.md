@@ -158,6 +158,10 @@ Wall-clock time is never used to decide anything.
   a to-do's reminder on its due day (`09:00`; `""` for none). For a table,
   `place` only says whether it stands beside the table above it
   (`{"beside":true,…}`).
+- `tint` (since Rune 0.1.17) is the colour of a line: `red` for its words, `red-bg` for a band, or both with the words first (`red blue-bg`):
+  behind it (gray, brown, orange, yellow, green, blue, purple, pink, red), or `""` for none.
+  A device that does not know colours leaves the key out; the line then keeps the colour it
+  has on the device that reads the change.
 - `row_of` marks the page of a row of a table: `"<block id>/<row id>"` (or
   `"<block id>/template"` for the page a new row starts from); `null` or left
   out for an ordinary page. Such a page is not listed among the pages: it
