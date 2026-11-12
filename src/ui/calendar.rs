@@ -647,8 +647,12 @@ fn WeekGrid(days: Vec<NaiveDate>, events: Vec<Event>, selected: Option<String>, 
                                     return;
                                 }
                                 let slots = 24 * 60 / SLOT_MINUTES;
+                                // The time that was pressed, as the page script
+                                // measured it in the column. (Without it: from
+                                // the place inside what was pressed.)
                                 let y = e.element_coordinates().y;
-                                let mins = ((y / HOUR_PX * 60.0) / f64::from(SLOT_MINUTES)).floor().clamp(0.0, f64::from(slots - 1)) as u32 * SLOT_MINUTES;
+                                let mins = AppState::cal_press_minute()
+                                    .unwrap_or_else(|| ((y / HOUR_PX * 60.0) / f64::from(SLOT_MINUTES)).floor().clamp(0.0, f64::from(slots - 1)) as u32 * SLOT_MINUTES);
                                 let start = when::at(d, NaiveTime::from_hms_opt(mins / 60, mins % 60, 0).unwrap_or(NaiveTime::MIN));
                                 draft.set(Some((start, start + i64::from(SLOT_MINUTES) * MINUTE)));
                             },
@@ -1592,19 +1596,26 @@ fn EventEditor(event: Event) -> Element {
                 div { class: "ed-sep" }
                 div { class: "ed-notes-row",
                     span { class: "ed-ico", Icon { name: "note", size: 16 } }
-                    textarea {
-                        id: "ev-notes",
-                        class: "ed-notes",
-                        placeholder: "Add notes",
-                        "aria-label": "Notes",
-                        initial_value: "{event.notes}",
-                        oninput: {
-                            let id = id.clone();
-                            move |e: FormEvent| {
-                                let v = e.value();
-                                state.update_event(&id, |ev| ev.notes = v);
-                            }
-                        },
+                    div { class: "linked-box ed-notes-box",
+                        textarea {
+                            id: "ev-notes",
+                            class: "ed-notes",
+                            placeholder: "Add notes",
+                            "aria-label": "Notes",
+                            // ("@" lists the pages here.)
+                            "data-at": "link",
+                            initial_value: "{event.notes}",
+                            oninput: {
+                                let id = id.clone();
+                                move |e: FormEvent| {
+                                    let v = e.value();
+                                    state.update_event(&id, |ev| ev.notes = v);
+                                }
+                            },
+                        }
+                        if crate::inline::has_page_link(&event.notes) {
+                            super::tables::LinkedText { text: event.notes.clone() }
+                        }
                     }
                     button { class: "icon-btn small mic-btn ed-notes-mic", "data-dictate": "ev-notes", title: "Speak the notes", "aria-label": "Speak the notes", Icon { name: "mic", size: 14 } }
                 }

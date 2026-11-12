@@ -1541,6 +1541,8 @@ pub fn AskNotesModal() -> Element {
                         id: "ask-notes-input",
                         class: "ask-input",
                         r#type: "text",
+                        // ("@" lists the pages: the one chosen goes with the question.)
+                        "data-at": "give",
                         placeholder: if with_tools { "Ask your notes, or say what to do…" } else { "Ask your notes anything…" },
                         "aria-label": "Ask your notes",
                         onmounted: move |e: MountedEvent| async move {

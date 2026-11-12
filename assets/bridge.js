@@ -2271,6 +2271,25 @@ const openCtx = (el, x, y, hasSelection) => {
     ? { el, range: sel.rangeCount ? sel.getRangeAt(0).cloneRange() : null }
     : { el, start: el.selectionStart, end: el.selectionEnd };
   m.querySelectorAll('[data-ctx="cut"], [data-ctx="copy"]').forEach((i) => (i.style.display = hasSelection ? '' : 'none'));
+  m.querySelectorAll('[data-ctx="paste"]').forEach((i) => (i.style.display = ''));
+  m.querySelectorAll('[data-ctx="copy-picture"]').forEach((i) => (i.style.display = 'none'));
+  m.classList.add('show');
+  const mz = zoomOf(m);
+  m.style.left = Math.max(8, Math.min(x, innerWidth - m.offsetWidth * mz - 8)) / mz + 'px';
+  m.style.top = Math.max(8, Math.min(y, innerHeight - m.offsetHeight * mz - 8)) / mz + 'px';
+};
+// A right-click on a picture (in a page, in a cell of a table, or shown
+// large): the short menu with "Copy picture" alone. The picture is one the
+// app keeps: its name is the end of its address.
+const keptPicture = (img) => {
+  const name = ((img && (img.currentSrc || img.src)) || '').split('/').pop().split('?')[0];
+  return /^[A-Za-z0-9]{1,40}\.[a-z0-9]{2,5}$/.test(name) ? name : null;
+};
+const openPictureCtx = (name, x, y) => {
+  const m = ctxMenu();
+  if (!m) return;
+  ctxFor = { picture: name };
+  m.querySelectorAll('[data-ctx]').forEach((i) => (i.style.display = i.dataset.ctx === 'copy-picture' ? '' : 'none'));
   m.classList.add('show');
   const mz = zoomOf(m);
   m.style.left = Math.max(8, Math.min(x, innerWidth - m.offsetWidth * mz - 8)) / mz + 'px';
@@ -2295,6 +2314,12 @@ document.addEventListener(
     if (!t || !t.closest || t.closest('.tab[data-tab]')) return;
     e.preventDefault();
     closeCtx();
+    const picture = t.closest('.lightbox img, .cell-pic > img, .image-block > img');
+    const kept = picture && keptPicture(picture);
+    if (kept) {
+      openPictureCtx(kept, e.clientX, e.clientY);
+      return;
+    }
     const row = t.closest('.tree-item[data-page]');
     if (row) {
       const more = row.querySelector('.tree-actions .row-btn');
@@ -2333,6 +2358,10 @@ document.addEventListener('click', (e) => {
   const f = ctxFor;
   const kind = item.dataset.ctx;
   closeCtx();
+  if (f.picture) {
+    if (kind === 'copy-picture') send({ t: 'copy_picture', name: f.picture });
+    return;
+  }
   restoreCtx(f);
   if (kind === 'paste') {
     send({ t: 'shortcut', name: 'paste_clipboard' });
@@ -3128,6 +3157,169 @@ document.addEventListener('mouseup', () => {
   coverDrag = null;
 });
 
+// ----- "@" in a text box: the pages with that name ------------------------------------
+// In a cell of a table, the notes of an event and the Ask box (each says so
+// with `data-at`), "@" and some letters list the pages with that name, as in
+// a line of a page. The page that is chosen is written as a link to it
+// (`data-at="link"`: the app shows such a link by the name of its page), or
+// goes with the question (`data-at="give"`). The app finds the pages (see
+// `find_pages_for_at` in state.rs); the list is drawn here, under the box.
+let atList = null; // { field, box, rows, on, start, n }
+let atAsked = 0;
+const atField = (el) => (el && el.matches && el.matches('textarea[data-at], input[data-at]') && el.dataset.at ? el : null);
+// The "@" before the caret and what was typed after it, when that can be the
+// start of a page's name (not an email address, not a long sentence).
+const atTyped = (field) => {
+  const end = field.selectionStart;
+  if (end == null || end !== field.selectionEnd) return null;
+  const before = field.value.slice(0, end);
+  const start = before.lastIndexOf('@');
+  if (start < 0 || (start > 0 && !/[\s(]/.test(before[start - 1]))) return null;
+  const q = before.slice(start + 1);
+  if (q.length > 40 || /^\s/.test(q) || q.includes('\n') || q.trim().split(/\s+/).length > 4) return null;
+  return { start, q };
+};
+const closeAt = () => {
+  if (!atList) return;
+  atList.box.remove();
+  atList = null;
+};
+const placeAt = () => {
+  const a = atList;
+  if (!a) return;
+  const r = a.field.getBoundingClientRect();
+  const h = a.box.offsetHeight;
+  const w = a.box.offsetWidth;
+  // Under the box; above it when there is no room under it.
+  const top = r.bottom + 4 + h <= innerHeight - 6 ? r.bottom + 4 : Math.max(6, r.top - 4 - h);
+  a.box.style.top = `${Math.round(top)}px`;
+  a.box.style.left = `${Math.round(Math.max(6, Math.min(r.left, innerWidth - w - 6)))}px`;
+};
+const drawAt = () => {
+  const a = atList;
+  if (!a) return;
+  a.box.textContent = '';
+  a.box.hidden = a.rows.length === 0;
+  a.rows.forEach((row, i) => {
+    const line = document.createElement('div');
+    line.className = i === a.on ? 'at-row on' : 'at-row';
+    line.setAttribute('role', 'option');
+    line.dataset.at = String(i);
+    if (row.sign) {
+      const sign = document.createElement('span');
+      sign.className = 'at-sign';
+      sign.textContent = row.sign;
+      line.appendChild(sign);
+    }
+    const name = document.createElement('span');
+    name.className = 'at-name';
+    name.textContent = row.title;
+    line.appendChild(name);
+    if (row.inside) {
+      const inside = document.createElement('span');
+      inside.className = 'at-inside';
+      inside.textContent = row.inside;
+      line.appendChild(inside);
+    }
+    a.box.appendChild(line);
+  });
+  placeAt();
+};
+const chooseAt = (i) => {
+  const a = atList;
+  const row = a && a.rows[i];
+  if (!row) return;
+  const field = a.field;
+  const end = field.selectionStart;
+  let put = '';
+  if (field.dataset.at === 'give') send({ t: 'ask_give_page', id: row.id });
+  else put = `[${row.title.replace(/[\[\]\n]/g, ' ').trim() || 'Page'}](rune://page/${row.id}) `;
+  const value = field.value.slice(0, a.start) + put + field.value.slice(end);
+  closeAt();
+  // (Through the engine's own setter, so that the app takes the new words as typed.)
+  const own = Object.getOwnPropertyDescriptor(field.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype, 'value');
+  own.set.call(field, value);
+  const caret = a.start + put.length;
+  field.setSelectionRange(caret, caret);
+  field.dispatchEvent(new Event('input', { bubbles: true }));
+};
+document.addEventListener(
+  'input',
+  (e) => {
+    const field = atField(e.target);
+    if (!field) return;
+    const typed = atTyped(field);
+    if (!typed) return closeAt();
+    if (!atList || atList.field !== field) {
+      closeAt();
+      const box = document.createElement('div');
+      box.className = 'at-list';
+      box.setAttribute('role', 'listbox');
+      box.setAttribute('aria-label', 'Pages');
+      box.hidden = true;
+      box.addEventListener('mousedown', (press) => {
+        // (The keyboard stays in the box that is typed in.)
+        press.preventDefault();
+        press.stopPropagation();
+        const line = press.target.closest && press.target.closest('.at-row');
+        if (line) chooseAt(Number(line.dataset.at));
+      });
+      document.body.appendChild(box);
+      atList = { field, box, rows: [], on: 0, start: 0, n: 0 };
+    }
+    atList.start = typed.start;
+    atAsked += 1;
+    atList.n = atAsked;
+    const page = field.closest('[data-page]');
+    send({ t: 'pages_find', q: typed.q, n: atAsked, here: (page && page.dataset.page) || '' });
+  },
+  true,
+);
+window.__n2.pagesFound = (n, rows) => {
+  if (!atList || atList.n !== n) return;
+  atList.rows = Array.isArray(rows) ? rows : [];
+  atList.on = 0;
+  drawAt();
+};
+// The keys of the list come before those of the box it belongs to (Return
+// and Tab in a cell go to the next cell: here they choose the page).
+window.addEventListener(
+  'keydown',
+  (e) => {
+    const a = atList;
+    if (!a || e.isComposing || e.keyCode === 229) return;
+    if (e.key === 'Escape') {
+      closeAt();
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      return;
+    }
+    if (!a.rows.length) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      a.on = (a.on + (e.key === 'ArrowDown' ? 1 : a.rows.length - 1)) % a.rows.length;
+      drawAt();
+    } else if (e.key === 'Enter' || e.key === 'Tab') chooseAt(a.on);
+    else return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  },
+  true,
+);
+document.addEventListener('focusout', (e) => {
+  if (atList && e.target === atList.field) closeAt();
+});
+document.addEventListener('mousedown', (e) => {
+  if (atList && e.target !== atList.field && !atList.box.contains(e.target)) closeAt();
+});
+window.addEventListener('resize', closeAt);
+document.addEventListener(
+  'scroll',
+  () => {
+    if (atList) placeAt();
+  },
+  true,
+);
+
 // ----- pictures: a click shows one large, a drag puts it anywhere, the corner sizes it --
 // A picture that is let go off its line becomes free: it goes to the side of
 // the page it was let go at, level with the line there, and the lines after
@@ -3208,6 +3400,15 @@ function showLarge(img) {
   const opened = performance.now();
   shade.addEventListener('mousedown', (e) => {
     e.preventDefault();
+    // (The right button is for its menu, "Copy picture"; a press that puts
+    // that menu away does not put the picture away with it.)
+    if (e.button !== 0 || e.ctrlKey) return;
+    const menu = ctxMenu();
+    if (menu && menu.classList.contains('show')) {
+      closeCtx();
+      e.stopPropagation();
+      return;
+    }
     e.stopPropagation();
     if (e.detail > 1 || performance.now() - opened < 350) return;
     hideLarge();
@@ -4816,6 +5017,13 @@ document.addEventListener(
     const col = e.target.closest('.cal-col[data-day]');
     if (!col || e.target.closest('.cal-event')) return;
     evDraw = { col, y: e.clientY, moved: false, ghost: null, from: 0, to: 0 };
+    // Where the press is in the day, for a click that makes an event there:
+    // measured from the column itself, in its own units. (The app took the
+    // place inside the element under the pointer, which is not always the
+    // column, and on a zoomed page not in the column's units: the event
+    // came at another time than the one that was pressed.)
+    const quarter = Math.floor(((e.clientY - col.getBoundingClientRect().top) / (48 * zoomOf(col))) * 4) * 15;
+    send({ t: 'cal_press', minute: Math.max(0, Math.min(24 * 60 - 15, quarter)) });
   },
   true,
 );

@@ -2425,3 +2425,122 @@ span.value-name {
   color: var(--text-3);
   align-self: center;
 }
+
+/* ---------- "@" in a text box: the list of pages, and a link shown by its page's name ---------- */
+.at-list {
+  position: fixed;
+  z-index: 400;
+  display: flex;
+  flex-direction: column;
+  min-width: 220px;
+  max-width: 340px;
+  padding: 5px;
+  background: var(--popover);
+  border: 1px solid var(--float-edge);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  color: var(--text);
+  font-size: 13.5px;
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.at-list[hidden] {
+  display: none;
+}
+.at-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 7px;
+}
+.at-row.on,
+.at-row:hover {
+  background: var(--hover);
+}
+.at-sign {
+  flex-shrink: 0;
+}
+.at-name {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.at-inside {
+  flex-shrink: 0;
+  max-width: 40%;
+  margin-left: auto;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 12px;
+  color: var(--text-3);
+}
+/* A box of plain text that holds links to pages (a cell of a table, the notes
+   of an event): while it is not typed in, its words show with each link as
+   the name of its page; while it is typed in, as they are written. */
+.linked-box {
+  position: relative;
+}
+.linked-text {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  /* (A press on the words goes to the box under them.) */
+  pointer-events: none;
+}
+.linked-box:focus-within > .linked-text {
+  display: none;
+}
+.linked-box:not(:focus-within) > textarea,
+.linked-box:not(:focus-within) > input {
+  color: transparent;
+}
+.linked-page {
+  display: inline;
+  margin: 0;
+  padding: 0 1px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: var(--text-3);
+  text-underline-offset: 3px;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.linked-page:hover {
+  background: var(--hover);
+}
+.linked-page.gone {
+  color: var(--text-3);
+  text-decoration: line-through;
+  cursor: default;
+}
+/* (As the cell under it: see `.table-block .cell`.) */
+.table-block .linked-text,
+.row-values .linked-text {
+  padding: 6px 9px;
+  font-size: 14px;
+  line-height: 1.45;
+}
+/* (As the notes under it: see `.ed-notes`.) */
+.ed-notes-box {
+  display: flex;
+  flex: 1;
+  align-self: stretch;
+  min-width: 0;
+}
+.ed-notes-box > .linked-text {
+  font-size: 14px;
+  line-height: 1.55;
+}

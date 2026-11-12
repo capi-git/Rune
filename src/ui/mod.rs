@@ -979,6 +979,10 @@ fn TextMenu() -> Element {
                 span { "Paste" }
                 span { class: "menu-shortcut", "⌘V" }
             }
+            // (For a right-click on a picture: see `openPictureCtx` in bridge.js.)
+            div { class: "menu-item compact", role: "menuitem", "data-ctx": "copy-picture", style: "display: none",
+                span { "Copy picture" }
+            }
         }
     }
 }

@@ -544,6 +544,58 @@ pub const BLOCK_URL: &str = "rune://block/";
 pub const OLD_BLOCK_URL: &str = "notion2://block/";
 
 /// The link to a page.
+/// A part of a plain text (a cell of a table, the notes of an event) that
+/// can hold links to pages, written as Markdown: `[Name](rune://page/<id>)`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Part {
+    Words(String),
+    /// A link to a page: the name it was written with, and the page.
+    Page { name: String, id: String },
+}
+
+/// `text` as its words and its links to pages, in order. Any other
+/// Markdown in it is words (a cell shows what was typed).
+pub fn page_parts(text: &str) -> Vec<Part> {
+    let mut out: Vec<Part> = Vec::new();
+    let mut words = String::new();
+    let mut rest = text;
+    while let Some(open) = rest.find('[') {
+        let after = &rest[open + 1..];
+        let link = after.find("](").and_then(|close| {
+            let name = &after[..close];
+            let address = &after[close + 2..];
+            let end = address.find(')')?;
+            let id = address[..end].strip_prefix(PAGE_URL)?;
+            let whole = !name.contains(['[', ']', '\n']) && !id.is_empty() && id.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-');
+            whole.then(|| (name.to_string(), id.to_string(), open + 1 + close + 2 + end + 1))
+        });
+        match link {
+            Some((name, id, len)) => {
+                words.push_str(&rest[..open]);
+                if !words.is_empty() {
+                    out.push(Part::Words(std::mem::take(&mut words)));
+                }
+                out.push(Part::Page { name, id });
+                rest = &rest[len..];
+            }
+            None => {
+                words.push_str(&rest[..open + 1]);
+                rest = after;
+            }
+        }
+    }
+    words.push_str(rest);
+    if !words.is_empty() {
+        out.push(Part::Words(words));
+    }
+    out
+}
+
+/// Whether a plain text holds a link to a page (see `page_parts`).
+pub fn has_page_link(text: &str) -> bool {
+    text.contains("](rune://page/") && page_parts(text).iter().any(|p| matches!(p, Part::Page { .. }))
+}
+
 pub fn page_url(id: &str) -> String {
     format!("{PAGE_URL}{id}")
 }
@@ -758,6 +810,21 @@ pub fn to_html(kind: BlockKind, text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_plain_text_gives_its_links_to_pages() {
+        use super::{has_page_link, page_parts, Part};
+        let words = |s: &str| Part::Words(s.to_string());
+        let page = |name: &str, id: &str| Part::Page { name: name.to_string(), id: id.to_string() };
+        assert_eq!(page_parts("See [Plan](rune://page/ab12) and [Notes](rune://page/cd34-x)."), vec![words("See "), page("Plan", "ab12"), words(" and "), page("Notes", "cd34-x"), words(".")]);
+        assert_eq!(page_parts("[Plan](rune://page/ab12)"), vec![page("Plan", "ab12")]);
+        // Other links, and brackets that are no link, are words.
+        let plain = "a [b] c [site](https://x.example) [x](rune://page/) [y](rune://page/a b)";
+        assert_eq!(page_parts(plain), vec![words(plain)]);
+        assert!(has_page_link("x [P](rune://page/1)") && !has_page_link(plain) && !has_page_link("](rune://page/"));
+        assert_eq!(page_parts(""), Vec::<Part>::new());
+        assert_eq!(page_parts("[[Plan](rune://page/ab12)"), vec![words("["), page("Plan", "ab12")]);
+    }
+
     #[test]
     fn page_links_are_read_in_both_forms_and_written_in_the_new_one() {
         assert_eq!(super::page_url("abc"), "rune://page/abc");

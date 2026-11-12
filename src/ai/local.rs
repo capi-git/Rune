@@ -716,6 +716,19 @@ impl Drop for TempDir {
     }
 }
 
+/// The tool may give no line at all for this long; then the run is taken as
+/// hung and is stopped. (It waited for ever: the card said "Writing" with
+/// its clock running and nothing more came.)
+#[cfg(not(test))]
+const SILENT_MOST: Duration = Duration::from_secs(300);
+#[cfg(test)]
+const SILENT_MOST: Duration = Duration::from_secs(2);
+/// After the tool said that it is done, it has this long to end by itself.
+/// (A tool that gave its whole answer and then did not close kept the card
+/// at "Writing" too.)
+const END_GRACE: Duration = Duration::from_secs(3);
+
+#[cfg_attr(test, derive(Debug, PartialEq))]
 enum Attempt {
     Done,
     Stopped,
@@ -865,9 +878,14 @@ async fn attempt(
     let mut finished = false;
     let mut failure: Option<String> = None;
     let mut tick = tokio::time::interval(Duration::from_millis(200));
+    // When the tool gave its last line, and when it said that it is done.
+    let mut heard = Instant::now();
+    let mut done_at: Option<Instant> = None;
+    let mut hung = false;
     loop {
         tokio::select! {
             line = lines.next_line() => {
+                heard = Instant::now();
                 match line {
                     Ok(Some(line)) => match parser.line(&line) {
                         Line::Delta(text) => {
@@ -894,6 +912,7 @@ async fn attempt(
                         Line::Finished => {
                             finished = true;
                             failure = None;
+                            done_at.get_or_insert_with(Instant::now);
                         }
                         Line::Ignore => {}
                     },
@@ -904,18 +923,44 @@ async fn attempt(
                 if tx.is_closed() {
                     return Attempt::Stopped;
                 }
+                // It said that it is done, and does not end: the answer is whole.
+                if done_at.is_some_and(|at| at.elapsed() >= END_GRACE) {
+                    break;
+                }
+                if heard.elapsed() >= SILENT_MOST {
+                    hung = true;
+                    break;
+                }
             }
         }
     }
 
-    let status = child.wait().await.ok();
-    let stderr = match stderr_task {
-        Some(t) => t.await.unwrap_or_default(),
-        None => String::new(),
-    };
+    // (The tool goes when `child` does: see `kill_on_drop`.)
     if finished && failure.is_none() {
+        let _ = child.start_kill();
         return Attempt::Done;
     }
+    if hung {
+        let _ = child.start_kill();
+        let minutes = (SILENT_MOST.as_secs() / 60).max(1);
+        return Attempt::Failed(format!(
+            "{} gave no sign for {minutes} minute{}, so the run was stopped. Nothing was changed. Try again.",
+            provider.name(),
+            if minutes == 1 { "" } else { "s" }
+        ));
+    }
+    // Its end, and what it said of a fault: not waited for without end either.
+    let status = match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+        Ok(status) => status.ok(),
+        Err(_) => {
+            let _ = child.start_kill();
+            None
+        }
+    };
+    let stderr = match stderr_task {
+        Some(t) => tokio::time::timeout(Duration::from_secs(3), t).await.ok().and_then(Result::ok).unwrap_or_default(),
+        None => String::new(),
+    };
     if !emitted {
         if let Some(flag) = unknown_option(&stderr) {
             return Attempt::UnknownFlag(flag);
@@ -989,6 +1034,51 @@ mod tests {
                 Line::Finished
             ]
         );
+    }
+
+    /// A stand-in for an AI tool: a shell script that takes the request and
+    /// prints the lines it is given, then does what `then` says.
+    fn stand_in(name: &str, lines: &[&str], then: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("n2-stand-in-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tool.sh");
+        let mut script = String::from("#!/bin/sh\ncat > /dev/null\n");
+        for line in lines {
+            script.push_str(&format!("printf '%s\\n' '{line}'\n"));
+        }
+        script.push_str(then);
+        script.push('\n');
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_tool_that_does_not_end_does_not_hold_the_run_for_ever() {
+        let run = |path: PathBuf| {
+            let (tx, rx) = futures_channel::mpsc::unbounded();
+            let started = Instant::now();
+            let how = super::super::runtime().block_on(async { attempt(Provider::ClaudeCode, &path, "", "", "", "Hello", true, None, &[], &tx).await });
+            drop(tx);
+            let events: Vec<AiEvent> = super::super::runtime().block_on(futures_util::StreamExt::collect(rx));
+            (how, events, started.elapsed())
+        };
+        // It gives its whole answer, says that it is done, and then stays: the answer counts.
+        let text = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hello"}]}}"#;
+        let done = r#"{"type":"result","subtype":"success","is_error":false,"result":"Hello"}"#;
+        let (how, events, took) = run(stand_in("stays", &[text, done], "sleep 60"));
+        assert_eq!(how, Attempt::Done);
+        assert!(events.contains(&AiEvent::Delta("Hello".into())), "{events:?}");
+        assert!(took < Duration::from_secs(10), "{took:?}");
+        // It starts to answer and then gives no sign: the run is stopped, and says why.
+        let (how, _, took) = run(stand_in("silent", &[text], "sleep 60"));
+        assert!(matches!(&how, Attempt::Failed(why) if why.contains("gave no sign")), "{how:?}");
+        assert!(took < Duration::from_secs(10), "{took:?}");
+        // One that ends as it must is as before.
+        let (how, _, took) = run(stand_in("ends", &[text, done], "exit 0"));
+        assert_eq!(how, Attempt::Done);
+        assert!(took < Duration::from_secs(5), "{took:?}");
     }
 
     #[test]

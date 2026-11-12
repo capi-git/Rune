@@ -1741,6 +1741,25 @@ fn mention_at_end(prompt: &str) -> Option<(usize, String)> {
     (before_ok && !after.starts_with(' ') && !after.contains("  ") && after.chars().count() <= 40).then(|| (at, after.to_string()))
 }
 
+/// What the AI does now. When it gave no sign for a while, the card says
+/// that it waits (the answer may be on its way, or the AI may be stuck: the
+/// person sees that nothing comes, and can stop it).
+#[component]
+fn Working(label: String, heard: i64) -> Element {
+    let mut now = use_signal(crate::model::now_ms);
+    use_future(move || async move {
+        loop {
+            crate::ai::sleep_ms(2000).await;
+            now.set(crate::model::now_ms());
+        }
+    });
+    let waits = heard > 0 && *now.read() - heard > 25_000;
+    let says = if waits { "Waiting for the AI".to_string() } else { label };
+    rsx! {
+        span { class: "ai-writing", id: "ai-step", "data-waits": if waits { "1" } else { "0" }, "{says}" span { class: "dots" } }
+    }
+}
+
 /// How long a run of the AI goes on, as a small clock that counts.
 #[component]
 fn Elapsed(since: i64) -> Element {
@@ -2057,7 +2076,7 @@ fn AiPanel() -> Element {
             match session.status.clone() {
                 AiStatus::Streaming => rsx! {
                     div { class: "ai-status",
-                        span { class: "ai-writing", id: "ai-step", "{working}" span { class: "dots" } }
+                        Working { label: working.clone(), heard: session.heard }
                         Elapsed { since: session.started }
                         button { class: "ghost-btn", onclick: move |_| state.ai_stop(), "Stop" }
                     }

@@ -967,6 +967,9 @@ pub fn CellBody(
                 spellcheck: kind == Kind::Text,
                 "data-r": "{r}",
                 "data-c": "{c}",
+                // ("@" lists the pages here: see the "@" part of bridge.js.
+                // Not in the first column: its words are the name of the row.)
+                "data-at": if kind == Kind::Text && c > 0 { "link" } else { "" },
                 "aria-label": "{label}",
                 title: odd.unwrap_or_default(),
                 placeholder: "{hint}",
@@ -1197,7 +1200,63 @@ pub fn CellBody(
                 }
             }
         }
+        // Words with a link to a page: the link shows by the name of its
+        // page while the cell is not typed in (the cell itself holds the
+        // link as it is written).
+        // (Always in the same box, so that the cell that is typed in stays
+        // the same element when its first link comes: the keyboard stays in it.)
+        Kind::Text if c > 0 => rsx! {
+            div { class: "linked-box",
+                {field("cell")}
+                if crate::inline::has_page_link(&text) {
+                    LinkedText { text: text.clone() }
+                }
+            }
+        },
         _ => field("cell"),
+    }
+}
+
+/// A plain text that holds links to pages, as it reads: its words, and each
+/// link as the name its page has now. It lies over the box the text is typed
+/// in, and shows while that box is not typed in; a press on a name opens the
+/// page, and a press on the words goes through to the box.
+#[component]
+pub fn LinkedText(text: String) -> Element {
+    let state = use_context::<AppState>();
+    let parts = crate::inline::page_parts(&text);
+    rsx! {
+        div { class: "linked-text",
+            for (i, part) in parts.into_iter().enumerate() {
+                match part {
+                    crate::inline::Part::Words(words) => rsx! {
+                        span { key: "{i}", "{words}" }
+                    },
+                    crate::inline::Part::Page { name, id } => {
+                        let page = state.pages.read().get(&id).filter(|p| !p.trashed).map(|p| p.display_title().to_string());
+                        let gone = page.is_none();
+                        let says = page.unwrap_or(name);
+                        rsx! {
+                            button {
+                                key: "{i}",
+                                class: if gone { "linked-page gone" } else { "linked-page" },
+                                tabindex: "-1",
+                                title: if gone { "This page is in the Trash, or gone" } else { "Open this page" },
+                                // (The press does not take the keyboard into the box under it.)
+                                onmousedown: move |e| e.prevent_default(),
+                                onclick: move |e| {
+                                    e.stop_propagation();
+                                    if !gone {
+                                        state.open_page(&id);
+                                    }
+                                },
+                                "{says}"
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

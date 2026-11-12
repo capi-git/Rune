@@ -385,6 +385,33 @@ fn PageTreeItem(id: String, depth: usize, favorites: bool) -> Element {
                             span { class: "menu-icon", Icon { name: "duplicate", size: 16 } }
                             span { "Duplicate" }
                         }
+                        // Copy this page without opening it: its link (a
+                        // pasted link becomes the page's own line) or its
+                        // words as Markdown.
+                        div {
+                            class: "menu-item compact",
+                            onclick: {
+                                let id = id.clone();
+                                move |_| {
+                                    state.set_popover(None);
+                                    state.copy_to_clipboard(crate::inline::page_url(&id), "Copied link to page");
+                                }
+                            },
+                            span { class: "menu-icon", Icon { name: "link", size: 16 } }
+                            span { "Copy link" }
+                        }
+                        div {
+                            class: "menu-item compact",
+                            onclick: {
+                                let id = id.clone();
+                                move |_| {
+                                    state.set_popover(None);
+                                    state.copy_to_clipboard(state.page_markdown(&id), "Copied page as Markdown");
+                                }
+                            },
+                            span { class: "menu-icon", Icon { name: "note", size: 16 } }
+                            span { "Copy as Markdown" }
+                        }
                         div {
                             class: "menu-item compact",
                             onclick: {

@@ -94,7 +94,7 @@ impl Attached {
 /// Run a helper program of the Mac and give what it wrote. It is stopped
 /// after `seconds`: a file it cannot get through must not leave the person
 /// waiting for ever.
-fn run(command: &mut Command, seconds: u64) -> Result<std::process::Output, String> {
+pub(crate) fn run(command: &mut Command, seconds: u64) -> Result<std::process::Output, String> {
     use std::io::Read;
     let mut child = command.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn().map_err(|e| e.to_string())?;
     let mut pipe = child.stdout.take().ok_or("no output")?;

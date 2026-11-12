@@ -101,6 +101,31 @@ pub fn path(name: &str) -> Option<PathBuf> {
     valid_name(name).then(|| dir().join(name)).filter(|p| p.is_file())
 }
 
+/// Put a kept picture on the Mac's clipboard, as a picture (to paste into a
+/// chat, a mail or an editor of pictures). The Mac's own AppKit reads the
+/// file, so every kind of picture a page can show can be copied.
+pub fn copy_to_clipboard(name: &str) -> Result<(), String> {
+    let file = path(name).ok_or("That picture is not there any more.")?;
+    copy_file_to(&file, None)
+}
+
+/// `board`: a clipboard with a name of its own (for a test: the person's
+/// clipboard is not touched); none for the clipboard of the Mac.
+fn copy_file_to(file: &Path, board: Option<&str>) -> Result<(), String> {
+    const SCRIPT: &str = r#"ObjC.import("AppKit"); function run(argv) { const picture = $.NSImage.alloc.initWithContentsOfFile(argv[0]); if (picture.isNil()) return "ERR"; const board = argv.length > 1 ? $.NSPasteboard.pasteboardWithName(argv[1]) : $.NSPasteboard.generalPasteboard; board.clearContents; const put = board.writeObjects($.NSArray.arrayWithObject(picture)); const kinds = board.types ? board.types.count : 0; if (argv.length > 1) board.releaseGlobally; return put && kinds > 0 ? "OK" : "ERR"; }"#;
+    let mut command = std::process::Command::new("/usr/bin/osascript");
+    command.args(["-l", "JavaScript", "-e", SCRIPT]).arg(file);
+    if let Some(board) = board {
+        command.arg(board);
+    }
+    let out = crate::attach::run(&mut command, 15)?;
+    if out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "OK" {
+        Ok(())
+    } else {
+        Err("The picture could not be copied.".into())
+    }
+}
+
 /// The address a page loads a kept picture from.
 pub fn url(name: &str) -> String {
     format!("{SCHEME}://f/{name}")
@@ -128,6 +153,25 @@ mod tests {
     use super::*;
 
     const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
+
+    #[test]
+    fn a_picture_goes_on_a_clipboard_as_a_picture() {
+        use base64::Engine;
+        // A whole picture, one dot wide. It goes to a clipboard with a name
+        // of its own: the person's clipboard stays as it is.
+        let dot = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==").unwrap();
+        let dir = std::env::temp_dir().join(format!("n2-copy-picture-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("dot.png");
+        std::fs::write(&file, &dot).unwrap();
+        let board = format!("rune-test-{}", std::process::id());
+        assert_eq!(copy_file_to(&file, Some(&board)), Ok(()));
+        // What is no picture is not copied, and says so.
+        let words = dir.join("words.png");
+        std::fs::write(&words, b"not a picture").unwrap();
+        assert!(copy_file_to(&words, Some(&board)).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn pictures_are_told_by_what_they_hold_not_by_their_name() {

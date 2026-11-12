@@ -576,6 +576,9 @@ pub struct AiSession {
     /// 2,400 characters"), and when this run started (for its clock).
     pub working: Option<String>,
     pub started: i64,
+    /// When the AI last gave a sign (a word, a step): a card that waits
+    /// says so, and does not say "Writing" for minutes with nothing new.
+    pub heard: i64,
     /// Pictures that go with the request (screenshots pasted or dropped in).
     pub pictures: Vec<ai::Picture>,
     /// The page as it was given to the AI: a reply that is the whole page
@@ -758,6 +761,20 @@ pub enum Bridge {
     /// A stretch of empty time was dragged over in the calendar: a new event
     /// from one minute of that day to another.
     EventDraw { day: String, from: i64, to: i64 },
+    /// A press on empty time in a column of the calendar: the quarter of an
+    /// hour under the pointer (see `cal_press_minute`).
+    CalPress { minute: i64 },
+    /// "@" and some letters in a text box (a cell, the notes of an event,
+    /// the Ask box): the pages with that name are asked for. `n` comes back
+    /// with the answer, so that a late answer to earlier letters is not shown.
+    PagesFind {
+        q: String,
+        n: u32,
+        #[serde(default)]
+        here: String,
+    },
+    /// A page chosen from that list in the Ask box: it goes with the question.
+    AskGivePage { id: String },
     /// ⌘C on an event of the calendar.
     EventCopy { id: String },
     /// ⌘V in the calendar: the copied event on `day`, from `minute` of that
@@ -779,6 +796,9 @@ pub enum Bridge {
     SplitSizes { split: String, sizes: Vec<f64> },
     /// The microphone on the format bar: change the selected text as told.
     SpeakEdit { page: String, id: String, start: usize, end: usize },
+    /// "Copy picture" from the short menu of a picture: the kept picture of
+    /// this name goes on the clipboard.
+    CopyPicture { name: String },
     /// Copy (or Cut) from the short text menu: put this on the clipboard.
     CopyText { text: String },
     /// A pane folded to a rail (or opened again) by dragging its divider.
@@ -1914,6 +1934,9 @@ thread_local! {
     /// The event copied with ⌘C in the calendar (see `paste_event`).
     static COPIED_EVENT: std::cell::RefCell<Option<Event>> = const { std::cell::RefCell::new(None) };
     static MEETING: std::cell::RefCell<Option<MeetingNotes>> = const { std::cell::RefCell::new(None) };
+    /// The last press on empty time in the calendar: when, and the minute of
+    /// the day under it, as the page script measured it.
+    static CAL_PRESS: std::cell::Cell<Option<(i64, i64)>> = const { std::cell::Cell::new(None) };
     /// (For the self-test: a meeting that starts takes no event of the
     /// calendar, whatever is on it at the hour of the run.)
     static MEETING_ALONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -3042,6 +3065,12 @@ impl AppState {
         }
         self.select_event(Some(id));
         self.toast(format!("Pasted “{}” · {} {}", copied.display_title(), day.format("%a %-d %b"), if copied.all_day { "all day".to_string() } else { when::time_label(start) }));
+    }
+
+    /// The minute of the day that was just pressed in the calendar, as the
+    /// page script measured it (taken once; none when the press is old).
+    pub fn cal_press_minute() -> Option<u32> {
+        CAL_PRESS.with(|p| p.take()).filter(|(at, _)| now_ms() - at < 5_000).map(|(_, minute)| minute.clamp(0, 24 * 60 - 15) as u32)
     }
 
     /// Empty time was dragged over: a slot of that length to type the
@@ -6900,6 +6929,9 @@ impl AppState {
             Bridge::AiFile { name, data } => self.ai_add_file(&name, &data),
             Bridge::EventMove { id, days, minutes, grow } => self.move_event(&id, days, minutes, grow),
             Bridge::EventDraw { day, from, to } => self.draw_event(&day, from, to),
+            Bridge::CalPress { minute } => CAL_PRESS.with(|p| p.set(Some((now_ms(), minute)))),
+            Bridge::PagesFind { q, n, here } => self.find_pages_for_at(&q, n, &here),
+            Bridge::AskGivePage { id } => self.give_page_to_ai(&id),
             Bridge::EventCopy { id } => self.copy_event(&id),
             Bridge::EventPaste { day, minute } => self.paste_event(&day, minute),
             Bridge::TodoPlan { page, block, day, minutes } => self.plan_todo(&page, &block, &day, minutes),
@@ -6938,6 +6970,7 @@ impl AppState {
                     self.toast(format!("Couldn't copy: {e}"));
                 }
             }
+            Bridge::CopyPicture { name } => self.copy_picture(&name),
             Bridge::PageStripDrop { page, to, mode } => self.drop_page_on_strip(&page, to.as_deref(), &mode),
             Bridge::PageMove { page, target, mode } => self.move_page(&page, target.as_deref(), &mode),
             Bridge::PickAll { page } => {
@@ -8192,6 +8225,7 @@ impl AppState {
             plan: None,
             working: None,
             started: 0,
+            heard: 0,
             pictures: Vec::new(),
             sent: String::new(),
             given: Vec::new(),
@@ -8378,6 +8412,60 @@ impl AppState {
         let _ = self.ai_give(crate::attach::Attached::new(&title, crate::attach::Kind::Page, text, ""));
     }
 
+    /// Put a kept picture on the clipboard (a test run keeps the person's
+    /// clipboard as it is, and says which picture it was).
+    fn copy_picture(self, name: &str) {
+        if !crate::files::valid_name(name) {
+            return;
+        }
+        if std::env::var_os("NOTION2_SELFTEST").is_some() {
+            document::eval(&format!("document.body.dataset.copied = {};", serde_json::to_string(&format!("picture:{name}")).unwrap_or_default()));
+            return self.toast("Copied the picture");
+        }
+        let name = name.to_string();
+        spawn_forever(async move {
+            let copied = ai::runtime().spawn_blocking(move || crate::files::copy_to_clipboard(&name)).await.unwrap_or_else(|_| Err("The picture could not be copied.".to_string()));
+            match copied {
+                Ok(()) => self.toast("Copied the picture"),
+                Err(why) => self.toast(why),
+            }
+        });
+    }
+
+    /// The pages that "@" and some letters in a text box can mean, handed to
+    /// the page script (`pagesFound` in bridge.js), which shows the list.
+    fn find_pages_for_at(self, query: &str, n: u32, here: &str) {
+        let found: Vec<serde_json::Value> = {
+            let pages = self.pages.peek();
+            pages_to_link(&pages, &self.ui.peek().space, here, query)
+                .into_iter()
+                .map(|p| {
+                    // (An icon that is a sign of its own shows; the app's own
+                    // icons are drawn by the app, and the list has none.)
+                    let sign = p.icon.clone().filter(|i| !i.contains(':') && i.chars().count() <= 4).unwrap_or_default();
+                    let inside = p.parent_id.as_ref().and_then(|id| pages.get(id)).map(|parent| parent.display_title().to_string()).unwrap_or_default();
+                    serde_json::json!({ "id": p.id, "title": p.display_title(), "sign": sign, "inside": inside })
+                })
+                .collect()
+        };
+        document::eval(&format!("window.__n2 && window.__n2.pagesFound && window.__n2.pagesFound({n}, {})", serde_json::Value::Array(found)));
+    }
+
+    /// A page chosen with "@" in the Ask box: it goes with the question, as
+    /// a page chosen in the AI box of a page does. Each page once.
+    fn give_page_to_ai(self, page_id: &str) {
+        if !self.pages.peek().get(page_id).is_some_and(|p| !p.trashed) {
+            return;
+        }
+        let title = self.page_title(page_id);
+        let has = |list: &[crate::attach::Attached]| list.iter().any(|g| g.kind == crate::attach::Kind::Page && g.name == title);
+        if has(&self.ask_given.peek()) || self.ai.peek().as_ref().is_some_and(|s| has(&s.given)) {
+            return;
+        }
+        let text = self.page_for_ai(page_id);
+        let _ = self.ai_give(crate::attach::Attached::new(&title, crate::attach::Kind::Page, text, ""));
+    }
+
     /// The person asked for the page of a web address: it is fetched now
     /// (nothing is fetched unasked), and its words go with the request.
     pub fn ai_give_web(mut self, url: &str) {
@@ -8514,6 +8602,7 @@ impl AppState {
                 {
                     let mut guard = self.ai.write();
                     let Some(s) = guard.as_mut().filter(|s| s.run == run) else { break };
+                    s.heard = now_ms();
                     match event {
                         AiEvent::Delta(text) => {
                             s.working = None;
@@ -8576,6 +8665,7 @@ impl AppState {
             s.journal = journal;
             s.working = None;
             s.started = now_ms();
+            s.heard = s.started;
             s.status = AiStatus::Streaming;
             s.task = Some(task);
         }

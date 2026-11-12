@@ -490,6 +490,32 @@ await run('Pages side by side', async () => {
   await until(() => !$('.panes.split'));
 });
 
+await run('Sidebar menu: Copy link and Copy as Markdown', async () => {
+  await newPage('Copy me');
+  const openMenu = async () => {
+    treeItem('Copy me').querySelector('.tree-actions .row-btn').click();
+    return until(() => $('.sidebar-menu'));
+  };
+  let menu = await openMenu();
+  const link = menuItem(menu, 'Copy link');
+  check('Sidebar menu has "Copy link"', link && onTop(link));
+  delete document.body.dataset.copied;
+  link.click();
+  const url = await until(() => document.body.dataset.copied);
+  check('"Copy link" copies the page\'s link', /^rune:\/\/page\/[0-9a-f]+$/.test(url || ''), url);
+  check('"Copy link" closes the menu', await until(() => !$('.sidebar-menu')));
+  check('"Copy link" says so', (await until(() => $('.toast')))?.textContent.includes('Copied link'), $('.toast')?.textContent);
+  menu = await openMenu();
+  const md = menuItem(menu, 'Copy as Markdown');
+  check('Sidebar menu has "Copy as Markdown"', md && onTop(md));
+  delete document.body.dataset.copied;
+  md.click();
+  const text = await until(() => document.body.dataset.copied);
+  check('"Copy as Markdown" copies the page', (text || '').includes('Copy me'), text);
+  check('"Copy as Markdown" closes the menu', await until(() => !$('.sidebar-menu')));
+  await oneTab();
+});
+
 await run('Pull a page out of a combined tab', async () => {
   await oneTab();
   treeItem('Getting Started').click();
@@ -550,7 +576,9 @@ await run('Pull a page out of a combined tab', async () => {
   await oneTab();
   // The other buttons of the mouse: the right one opens and closes nothing;
   // the middle one opens a page of the sidebar in a new tab, and closes a tab.
-  const other = (el, button) => el.dispatchEvent(new MouseEvent('auxclick', { bubbles: true, cancelable: true, button }));
+  // (As the engine sends it: a pointer event. The app reads this press as one,
+  // and a plain mouse event never reaches its handler.)
+  const other = (el, button) => el.dispatchEvent(new PointerEvent('auxclick', { bubbles: true, cancelable: true, button, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
   const tabsNow = $$('.tab').length;
   other(treeItem('Typing test'), 2);
   await wait(300);
