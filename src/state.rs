@@ -1847,6 +1847,23 @@ fn same_meeting(of: Option<&(Id, i64, i64)>, quiet_since: i64, now: i64, on_now:
     now - quiet_since < SAME_MEETING_MS
 }
 
+/// Whether a call noticed at `now` in the program `app` is the call the
+/// person said no to (`declined`: its program, and when it was last seen).
+/// The same rule as for one page for one meeting: a call that went quiet and
+/// is back within the time of `same_meeting` is the same call, unless an
+/// event of the calendar starts about now. (The no was forgotten at each
+/// pause of a long call and at each start of the app: the question, and a
+/// new page, came again and again.)
+fn still_declined(declined: Option<&(Option<String>, i64)>, app: &str, now: i64, on_now: Option<&(Id, i64, i64)>) -> bool {
+    declined.is_some_and(|(of, seen)| of.as_deref().map_or(true, |of| of == app) && same_meeting(None, *seen, now, on_now))
+}
+
+/// Write down (or take away) the no to a call, for this run and the next.
+fn set_declined(declined: Option<(Option<String>, i64)>) {
+    store::set_setting("meeting_declined", &declined.as_ref().and_then(|d| serde_json::to_string(d).ok()).unwrap_or_default());
+    MEETING_DECLINED.with(|d| *d.borrow_mut() = declined);
+}
+
 /// The meeting of the last notes, as it is written down between runs of the
 /// app. A call can go on while the app is closed and opened again (an update
 /// does that): the same meeting is then known again, and gets no second page.
@@ -1880,9 +1897,12 @@ thread_local! {
     static PAD_WATCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// When the meeting was written down last, as one that goes on (`meeting_seen`).
     static MEETING_KEPT: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
-    /// The person said no to notes of the call that is on: it asks no more
-    /// until that call ends.
-    static MEETING_DECLINED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The person said no to notes of a call: the program it was in (none:
+    /// notes made by hand), and when that call was last seen. It asks no more
+    /// while that call is on, and not when it goes quiet for a while and
+    /// comes back, or when the app is closed and opened during it (see
+    /// `still_declined`). Written down as the setting `meeting_declined`.
+    static MEETING_DECLINED: std::cell::RefCell<Option<(Option<String>, i64)>> = const { std::cell::RefCell::new(None) };
 }
 
 /// The pages made as meeting notes (the newest few hundred), wherever they
@@ -5601,7 +5621,19 @@ impl AppState {
                 ui.active = active.and_then(|id| ui.tabs.iter().position(|t| t.id == id)).unwrap_or(last);
             }
         }
+        let folder = self.pages.peek().get(page).and_then(|p| p.parent_id.clone());
         self.delete_forever(page);
+        // The "Meeting notes" page that the app made for it, with nothing in
+        // it now: it goes too. (Each call that was refused left one more
+        // empty "Meeting notes" in the sidebar of the space that was open.)
+        if let Some(folder) = folder {
+            let own = self.pages.peek().get(&folder).is_some_and(|p| p.title == "Meeting notes" && p.icon.as_deref() == Some("folder:blue") && !p.favorite);
+            let holds_nothing = children_of(&self.pages.peek(), Some(&folder)).is_empty()
+                && self.blocks.peek().get(&folder).map_or(true, |bs| bs.iter().all(|b| b.kind == BlockKind::Text && (b.text.trim().is_empty() || b.text == "Notes from your meetings, newest first.")));
+            if own && holds_nothing {
+                self.delete_forever(&folder);
+            }
+        }
         true
     }
 
@@ -5610,9 +5642,19 @@ impl AppState {
         if self.listen_offer.peek().as_deref() == Some(page) {
             self.listen_offer.set(None);
         }
-        if self.drop_meeting_draft(page) {
-            MEETING_DECLINED.with(|d| d.set(true));
+        self.decline_meeting(page);
+    }
+
+    /// The person said no to the notes of a call (see `drop_meeting_draft`):
+    /// when its empty page went, the no is kept for as long as that call
+    /// goes on. Says whether the page went.
+    fn decline_meeting(self, page: &str) -> bool {
+        let app = MEETING.with(|m| m.borrow().as_ref().filter(|n| n.page == page).and_then(|n| n.app));
+        let went = self.drop_meeting_draft(page);
+        if went {
+            set_declined(Some((app.map(str::to_string), now_ms())));
         }
+        went
     }
 
     /// Write the date line of the last meeting's notes again (when it ends,
@@ -5667,6 +5709,13 @@ impl AppState {
             MEETING_KEPT.with(|at| at.set(now_ms()));
             self.keep_meeting();
         }
+        // A call the person said no to goes on: seen now. (Not while there
+        // are notes of a meeting: then the call that is on is that meeting.)
+        let now = now_ms();
+        let no_notes = MEETING.with(|m| m.borrow().as_ref().map_or(true, |n| n.ended.is_some()));
+        if let Some((of, _)) = MEETING_DECLINED.with(|d| d.borrow().clone()).filter(|(_, seen)| no_notes && now - seen >= 30_000 && now - seen < SAME_MEETING_MS) {
+            set_declined(Some((of, now)));
+        }
     }
 
     /// As the app opens: take up the meeting that an earlier run wrote down.
@@ -5675,6 +5724,8 @@ impl AppState {
     /// Gives the program of a meeting that was on then, less than an hour
     /// ago, for the watcher (`Watch::after`).
     pub fn recall_meeting(self) -> Option<&'static str> {
+        let declined = store::setting("meeting_declined").and_then(|s| serde_json::from_str::<(Option<String>, i64)>(&s).ok());
+        MEETING_DECLINED.with(|d| *d.borrow_mut() = declined);
         if MEETING.with(|m| m.borrow().is_some()) {
             return None;
         }
@@ -5786,8 +5837,20 @@ impl AppState {
     /// notes page, unless it is the meeting of the last notes that carries
     /// on, and show its pad (the app is usually behind the meeting).
     pub fn meeting_started(self, app: &'static str) {
-        if self.carry_on_meeting() || MEETING_DECLINED.with(|d| d.get()) {
+        if self.carry_on_meeting() {
             return;
+        }
+        // The call the person said no to (it went quiet and is back, or the
+        // app was opened again during it): it asks no more.
+        let now = now_ms();
+        let on_now = self.meeting_event(now).map(|e| (e.id.clone(), e.start, e.end));
+        let declined = MEETING_DECLINED.with(|d| d.borrow().clone());
+        if still_declined(declined.as_ref(), app, now, on_now.as_ref()) {
+            crate::meeting::log("No notes of this call, as the person said");
+            return set_declined(declined.map(|(of, _)| (of, now)));
+        }
+        if declined.is_some() {
+            set_declined(None);
         }
         let id = self.make_meeting_notes(Some(app));
         // The app is behind the call: its pad asks on the screen itself,
@@ -6049,7 +6112,11 @@ impl AppState {
 
     /// The meeting ended at `at`: its date line gets the end time and length.
     pub fn meeting_ended(mut self, at: i64) {
-        MEETING_DECLINED.with(|d| d.set(false));
+        // (A no to this call stays for a while: the call can go quiet and
+        // come back. It is counted from the end.)
+        if let Some((of, seen)) = MEETING_DECLINED.with(|d| d.borrow().clone()) {
+            set_declined(Some((of, seen.max(at))));
+        }
         if let Some(page) = MEETING.with(|m| m.borrow().as_ref().filter(|n| n.draft && n.ended.is_none()).map(|n| n.page.clone())) {
             if self.drop_meeting_draft(&page) {
                 return;
@@ -6193,9 +6260,7 @@ impl AppState {
             // Never while it listens: the pad is the sign that it does.
             Command::NotNow => {
                 if !listens {
-                    if self.drop_meeting_draft(&page) {
-                        MEETING_DECLINED.with(|d| d.set(true));
-                    }
+                    self.decline_meeting(&page);
                     self.close_pad();
                 }
             }
@@ -8926,6 +8991,7 @@ impl AppState {
             "forget_meeting" => {
                 MEETING.with(|m| *m.borrow_mut() = None);
                 self.keep_meeting();
+                set_declined(None);
             }
             // (For the self-test: the watcher hears the sound of the meeting's
             // program again, with no microphone; the answer is left for the test.)
@@ -9316,6 +9382,20 @@ mod tests {
         assert!(!same_meeting(None, t0 + 28 * MIN, t0 + 29 * MIN, Some(&review)));
         // A meeting with no event: the same one for 20 minutes, then a new one.
         assert!(same_meeting(None, t0, t0 + 19 * MIN, None));
+        // A no to a call holds while that call can still be the one that is
+        // back: the same program, within the same time, and no event of the
+        // calendar that starts about now.
+        let no = (Some("Discord".to_string()), t0);
+        assert!(still_declined(Some(&no), "Discord", t0 + 7 * MIN, None), "the call went quiet and is back");
+        assert!(still_declined(Some(&no), "Discord", t0 + 19 * MIN, Some(&focus)), "an event that is on, but did not start now");
+        assert!(!still_declined(Some(&no), "Discord", t0 + 21 * MIN, None), "a later call asks again");
+        assert!(!still_declined(Some(&no), "Microsoft Teams", t0 + MIN, None), "a call in another program asks");
+        let late = (Some("Discord".to_string()), t0 + 25 * MIN);
+        assert!(still_declined(Some(&late), "Discord", t0 + 29 * MIN, None));
+        assert!(!still_declined(Some(&late), "Discord", t0 + 29 * MIN, Some(&review)), "a meeting of the calendar starts now");
+        assert!(!still_declined(None, "Discord", t0, None));
+        // (Notes made by hand and then refused: any program.)
+        assert!(still_declined(Some(&(None, t0)), "Zoom", t0 + MIN, None));
         assert!(!same_meeting(None, t0, t0 + 20 * MIN, None));
         // …and an event that started long before does not cut it in two.
         assert!(same_meeting(None, t0, t0 + 5 * MIN, Some(&focus)));

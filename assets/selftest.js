@@ -1775,6 +1775,11 @@ await run('Meeting notes', async () => {
   $('#listen-no', asked)?.click();
   check('"Not now" on an empty page of a call takes the page away: no page is kept', await until(() => listed() === 1 && $$('.tab').length === tabsBefore, 3000), `${listed()} pages, ${$$('.tab').length - tabsBefore} new tabs`);
   T().command('meeting_ended');
+  // The call went quiet and is back (or the app was opened again): the no holds.
+  T().command('meeting_started');
+  await wait(700);
+  check('A call that the person said no to does not ask again when it comes back', listed() === 1 && $$('.tab').length === tabsBefore && !$$('.pane').some((p) => p.offsetParent && $('#listen-no', p)), `${listed()} pages, ${$$('.tab').length - tabsBefore} new tabs`);
+  T().command('meeting_ended');
   // A call nobody says yes to: at its end, its empty page goes.
   T().command('forget_meeting');
   T().command('meeting_started');

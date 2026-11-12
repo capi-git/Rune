@@ -22,6 +22,8 @@ const LINK_PREFIX: &str = crate::inline::PAGE_URL;
 
 const INSTRUCTIONS: &str = "Rune is the user's local notes workspace: pages and a calendar. \
 Pages nest inside other pages and each has an id. Find ids with search_pages or list_pages before reading or editing. \
+The workspace has spaces (as Work, Personal): each top-level page is in one space, and a sub-page is in the space of its parent. list_pages names the spaces and says which one is open in Rune. \
+When the person names a space for a new page (\"in my Personal space\"), pass that name as `space` to create_page; without `space`, a new top-level page goes to the space that is open in Rune, which may not be the one they mean. To put a page in another space, use update_page with `space`. You cannot make a space: if the one they name does not exist, ask them. \
 Page content is Markdown: # / ## / ### headings, paragraphs, - bullets, 1. numbered items, - [ ] / - [x] to-dos, > quotes, \
 ``` code fences and --- dividers; indent list items by two spaces to nest them. \
 A line that is exactly [Title](rune://page/<id>) is a link to another page; sub-pages appear in their parent this way. \
@@ -484,12 +486,54 @@ impl Server {
         self.store.save_blocks_at(page_id, blocks, now_ms()).map_err(db_error)
     }
 
+    // ----- spaces -----------------------------------------------------------
+
+    /// The spaces, in their order, and the one that is open in Rune.
+    fn spaces(&self) -> Result<(Vec<Space>, Id), String> {
+        let spaces = self.store.load_spaces().map_err(db_error)?;
+        let open = self.store.get_setting("space").filter(|id| spaces.iter().any(|s| &s.id == id)).or_else(|| spaces.first().map(|s| s.id.clone())).unwrap_or_default();
+        Ok((spaces, open))
+    }
+
+    /// The space the tool call names (`space`: its name, in any letters, or
+    /// its id), if it names one. A name that no space has is an error that
+    /// says which spaces there are: a page must never go to another space
+    /// than the one that was asked for.
+    fn space_arg(&self, args: &Value) -> Result<Option<Space>, String> {
+        let Some(asked) = arg_str(args, "space").map(str::trim).filter(|s| !s.is_empty()) else { return Ok(None) };
+        let (spaces, _) = self.spaces()?;
+        let low = asked.to_lowercase();
+        let exact = spaces.iter().find(|s| s.id == asked || s.display_name().to_lowercase() == low);
+        // (A part of the name is enough when only one space has it: "personal"
+        // for "Personal projects".)
+        let found = exact.or_else(|| {
+            let mut with: Vec<&Space> = spaces.iter().filter(|s| s.display_name().to_lowercase().contains(&low)).collect();
+            if with.len() == 1 { with.pop() } else { None }
+        });
+        match found {
+            Some(space) => Ok(Some(space.clone())),
+            None => {
+                let names: Vec<String> = spaces.iter().map(|s| format!("\"{}\"", s.display_name())).collect();
+                Err(format!(
+                    "No space is named \"{asked}\". The spaces are: {}. Use one of these names, or ask the person to make the space in Rune first (you cannot make a space). Nothing was changed.",
+                    names.join(", ")
+                ))
+            }
+        }
+    }
+
+    /// The name of the space a page is in (a page with no space is in the first).
+    fn space_name(spaces: &[Space], id: &str) -> String {
+        spaces.iter().find(|s| s.id == id).or(spaces.first()).map(|s| s.display_name().to_string()).unwrap_or_default()
+    }
+
     // ----- tools ------------------------------------------------------------
 
     fn search_pages(&self, args: &Value) -> ToolResult {
         let query = arg_str(args, "query").unwrap_or("").trim().to_lowercase();
         let limit = arg_u64(args, "limit")?.unwrap_or(10).clamp(1, 50) as usize;
         let (pages, blocks) = self.load()?;
+        let (spaces, _) = self.spaces()?;
         let terms: Vec<&str> = query.split_whitespace().collect();
 
         let mut hits: Vec<(i64, i64, Value)> = Vec::new();
@@ -536,6 +580,7 @@ impl Server {
                 "title": page.display_title(),
                 "icon": page.icon,
                 "path": path_of(&pages, &page.id),
+                "space": Self::space_name(&spaces, &page.space_id),
                 "snippet": snippet,
                 "link": format!("{LINK_PREFIX}{}", page.id),
             });
@@ -553,6 +598,8 @@ impl Server {
             live_page(&pages, pid)?;
         }
         let depth = arg_u64(args, "depth")?.unwrap_or(3).clamp(1, 10) as usize;
+        let (spaces, open) = self.spaces()?;
+        let only = self.space_arg(args)?;
 
         fn node(pages: &HashMap<Id, Page>, page: &Page, depth: usize) -> Value {
             let kids = children_of(pages, Some(&page.id));
@@ -568,9 +615,23 @@ impl Server {
             })
         }
 
-        let roots: Vec<Value> =
-            children_of(&pages, parent.as_deref()).iter().map(|p| node(&pages, p, depth)).collect();
-        Ok(pretty(&json!({ "parent_id": parent, "depth": depth, "pages": roots })))
+        // (A page with no space is in the first one, as the app shows it.)
+        let first = spaces.first().map(|s| s.id.clone()).unwrap_or_default();
+        let space_of = |p: &Page| if spaces.iter().any(|s| s.id == p.space_id) { p.space_id.clone() } else { first.clone() };
+        let roots: Vec<Value> = children_of(&pages, parent.as_deref())
+            .iter()
+            .filter(|p| parent.is_some() || only.as_ref().map_or(true, |s| space_of(p) == s.id))
+            .map(|p| {
+                let mut entry = node(&pages, p, depth);
+                // The top-level pages of every space come in one list: each says its space.
+                if parent.is_none() {
+                    entry["space"] = json!(Self::space_name(&spaces, &p.space_id));
+                }
+                entry
+            })
+            .collect();
+        let listed: Vec<Value> = spaces.iter().map(|s| json!({ "name": s.display_name(), "open_in_rune": s.id == open })).collect();
+        Ok(pretty(&json!({ "parent_id": parent, "depth": depth, "spaces": listed, "pages": roots })))
     }
 
     fn read_page(&self, args: &Value) -> ToolResult {
@@ -578,13 +639,15 @@ impl Server {
         let (pages, blocks) = self.load()?;
         let page = live_page(&pages, &id)?;
         let body = render_body(&pages, blocks.get(&id).map(Vec::as_slice).unwrap_or(&[]));
+        let (spaces, _) = self.spaces()?;
         let header = format!(
-            "---\nid: {}\ntitle: {}\nicon: {}\nparent_id: {}\npath: {}\nfavorite: {}\nupdated: {}\nlink: {LINK_PREFIX}{}\n---\n\n",
+            "---\nid: {}\ntitle: {}\nicon: {}\nparent_id: {}\npath: {}\nspace: {}\nfavorite: {}\nupdated: {}\nlink: {LINK_PREFIX}{}\n---\n\n",
             page.id,
             quoted(page.display_title()),
             page.icon.as_deref().unwrap_or("none"),
             page.parent_id.as_deref().unwrap_or("none (top level)"),
             quoted(&path_of(&pages, &page.id)),
+            quoted(&Self::space_name(&spaces, &page.space_id)),
             page.favorite,
             iso8601(page.updated_at),
             page.id,
@@ -602,12 +665,26 @@ impl Server {
         }
         let markdown = strip_title_heading(arg_str(args, "markdown").unwrap_or(""), &title);
 
+        let (spaces, open) = self.spaces()?;
+        let asked = self.space_arg(args)?;
         let mut page = Page::new(parent.clone(), next_position(&pages, parent.as_deref()));
-        // A sub-page joins its parent's space; a top-level page joins the space
-        // the app last showed (empty falls back to the first space on load).
-        page.space_id = match &parent {
-            Some(pid) => pages.get(pid).map(|p| p.space_id.clone()).unwrap_or_default(),
-            None => self.store.get_setting("space").unwrap_or_default(),
+        // A sub-page joins its parent's space. A top-level page goes to the
+        // space that the call names; with none named, to the space that is
+        // open in Rune (empty falls back to the first space on load).
+        page.space_id = match (&parent, &asked) {
+            (Some(pid), asked) => {
+                let of_parent = pages.get(pid).map(|p| p.space_id.clone()).unwrap_or_default();
+                if let Some(space) = asked.as_ref().filter(|s| Self::space_name(&spaces, &s.id) != Self::space_name(&spaces, &of_parent)) {
+                    return Err(format!(
+                        "The parent page is in the space \"{}\", not in \"{}\": a sub-page is in the space of its parent. Leave out `space`, or choose a parent page in that space. Nothing was made.",
+                        Self::space_name(&spaces, &of_parent),
+                        space.display_name()
+                    ));
+                }
+                of_parent
+            }
+            (None, Some(space)) => space.id.clone(),
+            (None, None) => open,
         };
         page.title = title;
         page.icon = icon;
@@ -628,6 +705,7 @@ impl Server {
             "id": page.id,
             "title": page.display_title(),
             "parent_id": parent,
+            "space": Self::space_name(&spaces, &page.space_id),
             "blocks": body.len(),
             "link": format!("{LINK_PREFIX}{}", page.id),
         })))
@@ -877,8 +955,30 @@ impl Server {
             }
             changed.push("parent_id");
         }
+        // To another space: to its top level, with the pages under it. (With a
+        // parent in the same call, the parent says the space.)
+        if let Some(space) = self.space_arg(args)? {
+            match page.parent_id.as_ref().filter(|_| args.get("parent_id").is_some()) {
+                Some(np) => {
+                    let of_parent = pages.get(np).map(|p| p.space_id.clone()).unwrap_or_default();
+                    if of_parent != space.id {
+                        return Err(format!("The new parent page is not in the space \"{}\": a sub-page is in the space of its parent. Pass `space` or `parent_id`, not both. Nothing was changed.", space.display_name()));
+                    }
+                }
+                None => {
+                    if page.parent_id.is_some() || page.space_id != space.id {
+                        page.position = next_position(&pages, None);
+                        page.parent_id = None;
+                        page.row_of = None;
+                        page.space_id = space.id.clone();
+                        new_space = Some(space.id.clone());
+                        changed.push("space");
+                    }
+                }
+            }
+        }
         if changed.is_empty() {
-            return Err("Nothing to update: pass title, icon, favorite or parent_id.".into());
+            return Err("Nothing to update: pass title, icon, favorite, parent_id or space.".into());
         }
         page.updated_at = now_ms();
         self.save_page(&page)?;
@@ -896,6 +996,7 @@ impl Server {
             let (_, blocks) = self.load()?;
             self.name_row_cell(&page, &blocks)?;
         }
+        let (spaces, _) = self.spaces()?;
         Ok(pretty(&json!({
             "page_id": id,
             "updated": changed,
@@ -903,6 +1004,7 @@ impl Server {
             "icon": page.icon,
             "favorite": page.favorite,
             "parent_id": page.parent_id,
+            "space": Self::space_name(&spaces, &page.space_id),
         })))
     }
 
@@ -1239,11 +1341,12 @@ fn tool_definitions() -> Value {
         {
             "name": "list_pages",
             "title": "List pages",
-            "description": "List the page tree: top-level pages, or the sub-pages of parent_id, nested `depth` levels deep (default 3). Trashed pages are left out.",
+            "description": "List the page tree: top-level pages (of every space, each with the name of its space; or of one space, with `space`), or the sub-pages of parent_id, nested `depth` levels deep (default 3). Also names the spaces and says which one is open in Rune. Trashed pages are left out.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "parent_id": page_id,
+                    "space": { "type": "string", "description": "Only the top-level pages of the space with this name." },
                     "depth": { "type": "integer", "minimum": 1, "maximum": 10, "description": "Levels of sub-pages to include (default 3)." }
                 }
             },
@@ -1263,13 +1366,14 @@ fn tool_definitions() -> Value {
         {
             "name": "create_page",
             "title": "Create a page",
-            "description": "Create a page with a title and optional Markdown content. With parent_id it becomes a sub-page and a link to it is added to the end of the parent page. Returns the new page's id.",
+            "description": "Create a page with a title and optional Markdown content. With parent_id it becomes a sub-page and a link to it is added to the end of the parent page. A top-level page goes to the space named by `space`, or, with none named, to the space that is open in Rune. Returns the new page's id and its space.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "title": { "type": "string", "description": "Page title." },
                     "markdown": { "type": "string", "description": "Page content as Markdown (don't repeat the title as a heading)." },
                     "parent_id": { "type": "string", "description": "Optional parent page id; omit for a top-level page." },
+                    "space": { "type": "string", "description": "For a top-level page: the name of the space it goes in (see list_pages). Omit to use the space that is open in Rune." },
                     "icon": { "type": "string", "description": "Optional emoji icon, e.g. 📝." }
                 },
                 "required": ["title"]
@@ -1357,7 +1461,7 @@ fn tool_definitions() -> Value {
         {
             "name": "update_page",
             "title": "Update page details",
-            "description": "Change a page's title, icon or favorite flag, or move it under another page (parent_id; empty string moves it to the top level). Content is unchanged.",
+            "description": "Change a page's title, icon or favorite flag, move it under another page (parent_id; empty string moves it to the top level), or move it to the top level of another space (space). Its sub-pages go with it. Content is unchanged.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1365,7 +1469,8 @@ fn tool_definitions() -> Value {
                     "title": { "type": "string" },
                     "icon": { "type": "string", "description": "Emoji, or empty to remove the icon." },
                     "favorite": { "type": "boolean" },
-                    "parent_id": { "type": "string", "description": "New parent page id, or empty for top level." }
+                    "parent_id": { "type": "string", "description": "New parent page id, or empty for top level." },
+                    "space": { "type": "string", "description": "The name of the space to move the page to (to its top level)." }
                 },
                 "required": ["page_id"]
             },
@@ -2104,6 +2209,54 @@ mod tests {
         assert_eq!((p.parent_id.as_deref(), p.title.as_str(), p.space_id.as_str()), (Some(shelf.as_str()), "Trip to Rome", side.id.as_str()), "the page itself is moved and named");
         assert_eq!(pages[&list].space_id, side.id, "and what is under it goes with it");
         assert_eq!(pages[&list].parent_id.as_deref(), Some(trip.as_str()));
+    }
+
+    #[test]
+    fn a_new_page_goes_to_the_space_that_is_named() {
+        let mut s = server();
+        let work = Space::new("Work", "blue", 0.0);
+        let own = Space::new("Personal projects", "green", 1.0);
+        s.store.save_space(&work).unwrap();
+        s.store.save_space(&own).unwrap();
+        // Rune shows "Work"; the person asks for a page in the other space.
+        s.store.set_setting("space", &work.id).unwrap();
+        let (text, err) = call(&mut s, "create_page", json!({ "title": "Projects", "space": "personal" }));
+        assert!(!err, "{text}");
+        let made = json_of(&text);
+        assert_eq!(made["space"], "Personal projects");
+        let folder = made["id"].as_str().unwrap().to_string();
+        let (pages, _) = s.store.load().unwrap();
+        assert_eq!(pages[&folder].space_id, own.id);
+        // With no space named: the space that is open, and the answer says which.
+        let (text, _) = call(&mut s, "create_page", json!({ "title": "Inbox" }));
+        assert_eq!(json_of(&text)["space"], "Work");
+        // A name that no space has changes nothing, and names the spaces.
+        let (text, err) = call(&mut s, "create_page", json!({ "title": "Lost", "space": "Holidays" }));
+        assert!(err && text.contains("\"Work\"") && text.contains("\"Personal projects\"") && text.contains("Nothing was changed"), "{text}");
+        assert_eq!(s.store.load().unwrap().0.len(), 2);
+        // A sub-page is in the space of its parent; another space with it is refused.
+        let (text, err) = call(&mut s, "create_page", json!({ "title": "Plan", "parent_id": folder, "space": "Work" }));
+        assert!(err && text.contains("Nothing was made"), "{text}");
+        let (text, err) = call(&mut s, "create_page", json!({ "title": "Plan", "parent_id": folder }));
+        assert!(!err, "{text}");
+        let plan = json_of(&text)["id"].as_str().unwrap().to_string();
+        // The list names the spaces, the one that is open, and the space of each top-level page.
+        let (text, _) = call(&mut s, "list_pages", json!({}));
+        let listed = json_of(&text);
+        let named: Vec<(String, bool)> = listed["spaces"].as_array().unwrap().iter().map(|sp| (sp["name"].as_str().unwrap().to_string(), sp["open_in_rune"].as_bool().unwrap())).collect();
+        assert!(named.contains(&("Work".to_string(), true)) && named.contains(&("Personal projects".to_string(), false)), "{named:?}");
+        assert_eq!(named.iter().filter(|(_, open)| *open).count(), 1);
+        let of: Vec<(String, String)> = listed["pages"].as_array().unwrap().iter().map(|p| (p["title"].as_str().unwrap().to_string(), p["space"].as_str().unwrap().to_string())).collect();
+        assert!(of.contains(&("Projects".to_string(), "Personal projects".to_string())) && of.contains(&("Inbox".to_string(), "Work".to_string())), "{of:?}");
+        let (text, _) = call(&mut s, "list_pages", json!({ "space": "Work" }));
+        assert_eq!(json_of(&text)["pages"].as_array().unwrap().len(), 1);
+        // A page moved to another space goes to its top level, with what is under it.
+        let (text, err) = call(&mut s, "update_page", json!({ "page_id": folder, "space": "Work" }));
+        assert!(!err && json_of(&text)["space"] == "Work", "{text}");
+        let (pages, _) = s.store.load().unwrap();
+        assert_eq!((pages[&folder].space_id.as_str(), pages[&plan].space_id.as_str(), pages[&plan].parent_id.as_deref()), (work.id.as_str(), work.id.as_str(), Some(folder.as_str())));
+        let (text, _) = call(&mut s, "read_page", json!({ "page_id": plan }));
+        assert!(text.contains("space: \"Work\""), "{text}");
     }
 
     #[test]
