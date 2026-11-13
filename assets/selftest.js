@@ -766,8 +766,26 @@ await run('Settings: transparency', async () => {
   check('Each section opens with its own page', opened === 5, String(opened));
   check('Settings rows have a name and a control', $$('.settings-view .set-row').length >= 4 && $$('.settings-view .set-row .set-label').length >= 4);
   check('The sidebar and page are hidden behind Settings', getComputedStyle($('.work-card')).visibility === 'hidden');
+  // The row of tabs stays in view over Settings: a press on a tab leaves
+  // Settings. (It did nothing on the tab in front, and on another tab it
+  // changed the tab under Settings, which stayed.)
+  $('.tab.active').click();
+  check('A press on the tab in front leaves Settings', await until(() => !$('.settings-view'), 1500));
+  // (Two tabs: a page, and Home beside it.)
+  treeItem('Typing test').click();
+  await until(() => $('.tab.active')?.textContent.includes('Typing test'), 2000);
+  $('.new-tab').click();
+  await until(() => $$('.tab').length > 1, 2000);
+  await openSettings();
+  await until(() => $('.settings-view'));
+  const other = $$('.tab').find((t) => !t.classList.contains('active'));
+  other.click();
+  check('A press on another tab leaves Settings and shows that tab', await until(() => !$('.settings-view') && other.isConnected && $$('.tab').find((t) => t.dataset.tab === other.dataset.tab)?.classList.contains('active'), 1500));
+  await oneTab();
+  await openSettings();
+  await until(() => $('.settings-view'));
   $('.settings-back').click();
-  check('Back to notes closes Settings', await until(() => !$('.settings-view') && getComputedStyle($('.work-card')).visibility === 'visible'));
+  check('Back to notes closes Settings', await until(() => !$('.settings-view')&& getComputedStyle($('.work-card')).visibility === 'visible'));
 });
 
 await run('Search', async () => {
@@ -1573,8 +1591,23 @@ await run('Calendar in a narrow pane', async () => {
   {
     const hours = $('.cal-hours');
     const days = hours.querySelector('.cal-gutter').getBoundingClientRect().right - hours.getBoundingClientRect().left;
-    const lines = parseFloat(getComputedStyle(hours).backgroundPositionX);
+    const lines = hours.querySelector('.cal-line').getBoundingClientRect().left - hours.getBoundingClientRect().left;
     check('The lines of the hours begin where the days begin', Math.abs(lines - days) < 1, `lines at ${lines}, days at ${Math.round(days)}`);
+    // An event begins at the line of its hour, also on a zoomed page. (The
+    // lines were a repeated picture that went away from the events there.)
+    const off = () => {
+      const top = hours.getBoundingClientRect().top;
+      const all = [...hours.querySelectorAll('.cal-line')].map((l) => l.getBoundingClientRect().top - top);
+      const z = all[1] / 48;
+      return all.map((y, h) => Math.abs(y - h * 48 * z)).reduce((a, b) => Math.max(a, b), 0);
+    };
+    const zoomWas = $('.app').style.getPropertyValue('--zoom');
+    $('.app').style.setProperty('--zoom', '0.9');
+    await wait(60);
+    const far = off();
+    $('.app').style.setProperty('--zoom', zoomWas);
+    await wait(60);
+    check('There is a line for each hour, each at the place its events start from, also on a zoomed page', hours.querySelectorAll('.cal-line').length === 24 && far < 1.5 && off() < 0.5, `${far} / ${off()}`);
   }
   const bar = $('.cal-toolbar');
   const middles = $$('.cal-toolbar > *').map((el) => Math.round(el.getBoundingClientRect().top + el.getBoundingClientRect().height / 2));
@@ -6826,7 +6859,7 @@ if (window.__n2_real_pad) {
     const pageNow = () => $$('.pane').find((p) => datedName.test(p.querySelector('.title-input')?.value || '') && p.offsetParent);
     let p = await probed((p) => p.open && p.shown && p.form === 'ask' && p.wide);
     check('The pad opens in a window of its own, as big as its card', !p.failed && p.wide === 328 && p.high > 110 && p.high < 190 && !$('#pad-inline'), JSON.stringify(p));
-    check('The window is a panel that does not make the app the active one, on every desktop and beside a full screen', p.panel && p.nonactivating && p.all_spaces && p.beside_full_screen && p.level === 3, JSON.stringify(p));
+    check('The window is a panel that does not make the app the active one, on every desktop and beside a full screen', p.panel && p.nonactivating && p.server_nonactivating !== false && p.all_spaces && p.beside_full_screen && p.level === 3, JSON.stringify(p));
     check('It takes no keyboard as it opens, and cannot while it only asks', !p.key && !p.can_key, JSON.stringify(p));
     check('It sits at the corner of the screen, and is kept out of screen shares', Math.abs(p.gap_right - 20) < 1.5 && Math.abs(p.gap_bottom - 20) < 1.5 && p.hidden_from_shares, JSON.stringify(p));
     check('macOS says that it is on the space in view', p.on_space, JSON.stringify(p));
@@ -6834,6 +6867,21 @@ if (window.__n2_real_pad) {
     // have the keyboard and the app is not the active one (a true mouse
     // event to the window, not a click made by script).
     const press = (selector) => T().command('pad_press:' + selector);
+    // The × of the pad says no to the notes of this meeting. The person is
+    // in another program then: the app stays behind it. (It came forward.)
+    const mainBefore = p.main || {};
+    press('#pad-not-now');
+    await probed((q) => !q.open, 4000);
+    await wait(700);
+    const gone = await probe();
+    check(
+      'A press on the × of the pad closes it, and does not bring the app forward',
+      !gone.open && !!gone.main && !gone.main.active && !gone.main.key && gone.main.order >= mainBefore.order - 1,
+      JSON.stringify([mainBefore, gone.main]),
+    );
+    T().command('forget_meeting');
+    T().command('meeting_started');
+    p = await probed((p) => p.open && p.shown && p.form === 'ask' && p.wide);
     press('#pad-listen');
     check('A press of the mouse on Listen acts at the first press, and starts the listener of the app', await until(() => $('.listen-bar.on') && $('#listening-row'), 5000));
     const page = await until(pageNow, 4000);

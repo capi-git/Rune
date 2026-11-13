@@ -1,6 +1,6 @@
 [package]
 name = "notion2"
-version = "0.1.18"
+version = "0.1.19"
 edition = "2021"
 description = "A Notion-style workspace app written in Rust"
 

@@ -87,6 +87,8 @@ pub fn probe() -> serde_json::Value {
     facts["open"] = pad::window_facts().is_some().into();
     facts["form"] = pad::latest_form().map(|f| f.name()).into();
     facts["result"] = pad::result();
+    // (This window, not the pad: what a press in the pad did to the app.)
+    facts["main"] = pad::main_facts(&dioxus::desktop::window().window);
     if let (Some((left, top, wide, high)), Some(area)) = (PUT.get(), AREA.get()) {
         facts["wide"] = wide.into();
         facts["high"] = high.into();

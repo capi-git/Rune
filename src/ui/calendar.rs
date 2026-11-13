@@ -628,6 +628,10 @@ fn WeekGrid(days: Vec<NaiveDate>, events: Vec<Event>, selected: Option<String>, 
                     document::eval(&format!("const s=document.querySelector('.cal-scroll');if(s)s.scrollTop={}", 8.0 * HOUR_PX - 8.0));
                 },
                 div { class: "cal-hours", style: "height: {total}px",
+                    // (Before the days, so that the days lie over them.)
+                    for h in 0..24u32 {
+                        div { key: "line-{h}", class: "cal-line", style: "top: {h as f64 * HOUR_PX}px" }
+                    }
                     div { class: "cal-gutter times",
                         for h in 1..24u32 {
                             div { class: "cal-hour-label", style: "top: {h as f64 * HOUR_PX}px", "{when::hour_label(h)}" }

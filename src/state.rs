@@ -4565,6 +4565,10 @@ impl AppState {
             ui.tabs.push(Tab::new(Route::Home));
             ui.active = ui.tabs.len() - 1;
             ui.popover = None;
+            // (As a press on a tab: the new tab is what the person asked to see.)
+            if ui.modal == Some(Modal::Settings) {
+                ui.modal = None;
+            }
         }
         self.save_ui();
     }
@@ -4573,7 +4577,11 @@ impl AppState {
         self.clear_slash();
         {
             let ui = self.ui.peek();
-            if index == ui.active && ui.popover.is_none() {
+            // (Settings lies over the page while the row of tabs stays in
+            // view: a press on a tab leaves Settings, also on the tab in
+            // front. It did nothing there, and on another tab it changed
+            // the tab under Settings.)
+            if index == ui.active && ui.popover.is_none() && ui.modal != Some(Modal::Settings) {
                 return;
             }
         }
@@ -4583,6 +4591,9 @@ impl AppState {
                 ui.active = index;
 
                 ui.popover = None;
+                if ui.modal == Some(Modal::Settings) {
+                    ui.modal = None;
+                }
             }
         }
         self.save_ui();

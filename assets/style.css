@@ -3442,12 +3442,20 @@ body[data-resizing] .sash:active::after {
   display: grid;
   grid-template-columns: 56px repeat(var(--days, 7), minmax(0, 1fr));
   position: relative;
-  /* The lines of the hours begin where the days begin: in the column of
-     the hours they ran through the words ("7 AM" looked struck out). */
-  background-image: linear-gradient(var(--sep) 1px, transparent 1px);
-  background-size: 100% 48px;
-  background-position: 56px 0;
-  background-repeat: repeat-y;
+}
+/* The line of each hour: one element, at the place that the events of that
+   hour start from. (The lines were one picture, repeated every 48 points.
+   On a zoomed page each repeat was rounded to whole points of the screen,
+   so down the day the lines went away from the events: an event at 4 PM
+   began some points under its line.) They begin where the days begin: in
+   the column of the hours they ran through the words. */
+.cal-line {
+  position: absolute;
+  left: 56px;
+  right: 0;
+  height: 1px;
+  background: var(--sep);
+  pointer-events: none;
 }
 .cal-gutter.times {
   position: relative;
@@ -4666,8 +4674,8 @@ body[data-dragging="seg"] .tab.seg-source {
   /* (The lines of the hours begin where the days begin here too: begun at
      the width of the wide column, the first day had none in its first 12
      points.) */
-  .cal-hours {
-    background-position: 44px 0;
+  .cal-line {
+    left: 44px;
   }
   .cal-wday {
     flex-direction: column;

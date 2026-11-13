@@ -498,7 +498,7 @@ pub fn hidden_from_shares() -> bool {
 // The window: a panel that does not make the app the active one
 // ---------------------------------------------------------------------------
 
-pub use native::{bring_out, first_click_acts, leave_keyboard, make_panel, press, screen_area, take_keyboard};
+pub use native::{bring_out, first_click_acts, leave_keyboard, main_facts, make_panel, press, screen_area, take_keyboard};
 
 mod native {
     use dioxus::desktop::tao::platform::macos::WindowExtMacOS;
@@ -614,10 +614,72 @@ mod native {
             let mask: usize = msg_send![window, styleMask];
             // NSWindowStyleMaskNonactivatingPanel.
             let _: () = msg_send![window, setStyleMask: mask | (1usize << 7)];
+            // The style alone did not reach the window server, because it
+            // is given after the window was made: a press on the pad made
+            // the app the active one, and when the pad then closed (its ×),
+            // the app's own window came in front of the program the person
+            // was in. The window says it to the window server itself.
+            let tells: bool = msg_send![window, respondsToSelector: objc2::sel!(_setPreventsActivation:)];
+            if tells {
+                let _: () = msg_send![window, _setPreventsActivation: true];
+            }
+            if server_keeps_app_inactive(window) == Some(false) {
+                tell_server_no_activation(window);
+            }
             let _: () = msg_send![window, setFloatingPanel: true];
             let _: () = msg_send![window, setHidesOnDeactivate: false];
             let _: () = msg_send![window, setBecomesKeyOnlyIfNeeded: false];
             true
+        }
+    }
+
+    /// (For the self-test.) Whether the window server itself knows the
+    /// window as one that does not make its app the active one when it is
+    /// pressed. The style of the window says so too, but the window server
+    /// decides at a press, and a style given after the window was made did
+    /// not reach it. None: this macOS does not tell.
+    fn server_keeps_app_inactive(window: *mut AnyObject) -> Option<bool> {
+        type Connection = unsafe extern "C" fn() -> i32;
+        type Tags = unsafe extern "C" fn(i32, u32, *mut u32, i32) -> i32;
+        // SAFETY: two functions of the window server's library, looked up by
+        // name (so that a macOS without them is no fault); the shapes are
+        // theirs, and the tags are two words of 32 bits.
+        unsafe {
+            let connection = libc::dlsym(libc::RTLD_DEFAULT, c"CGSMainConnectionID".as_ptr());
+            let tags = libc::dlsym(libc::RTLD_DEFAULT, c"CGSGetWindowTags".as_ptr());
+            if connection.is_null() || tags.is_null() {
+                return None;
+            }
+            let connection: Connection = std::mem::transmute(connection);
+            let tags: Tags = std::mem::transmute(tags);
+            let number: isize = msg_send![window, windowNumber];
+            let mut out = [0u32; 2];
+            if tags(connection(), number as u32, out.as_mut_ptr(), 64) != 0 {
+                return None;
+            }
+            // (The tag "prevents activation".)
+            Some(out[0] & (1 << 16) != 0)
+        }
+    }
+
+    /// Say to the window server that a press on this window does not make
+    /// the app the active one, when the window's own way did not (see
+    /// `make_panel`). Nothing happens on a macOS without the function.
+    fn tell_server_no_activation(window: *mut AnyObject) {
+        type Connection = unsafe extern "C" fn() -> i32;
+        type Tags = unsafe extern "C" fn(i32, u32, *const u32, i32) -> i32;
+        // SAFETY: as in `server_keeps_app_inactive`.
+        unsafe {
+            let connection = libc::dlsym(libc::RTLD_DEFAULT, c"CGSMainConnectionID".as_ptr());
+            let tags = libc::dlsym(libc::RTLD_DEFAULT, c"CGSSetWindowTags".as_ptr());
+            if connection.is_null() || tags.is_null() {
+                return;
+            }
+            let connection: Connection = std::mem::transmute(connection);
+            let tags: Tags = std::mem::transmute(tags);
+            let number: isize = msg_send![window, windowNumber];
+            let set = [1u32 << 16, 0];
+            tags(connection(), number as u32, set.as_ptr(), 64);
         }
     }
 
@@ -665,6 +727,38 @@ mod native {
                 WAS.store(was as usize, Ordering::Relaxed);
             }
         });
+    }
+
+    /// (For the self-test.) What macOS says about a window of the app that
+    /// is not the pad: whether the app is the active one, whether the window
+    /// has the keyboard, and its place among all windows on the screen,
+    /// counted from the front (0: in front of all).
+    pub fn main_facts(window: &Window) -> serde_json::Value {
+        let window = object(window);
+        if window.is_null() {
+            return serde_json::json!({});
+        }
+        // SAFETY: the live window and the app; the messages take plain
+        // integers or nothing, and the list holds numbers.
+        unsafe {
+            let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+            let active: bool = msg_send![app, isActive];
+            let key: bool = msg_send![window, isKeyWindow];
+            let number: isize = msg_send![window, windowNumber];
+            // NSWindowNumberListAllApplications: the windows of every program, front to back.
+            let all: *mut AnyObject = msg_send![class!(NSWindow), windowNumbersWithOptions: 1usize];
+            let count: usize = msg_send![all, count];
+            let mut order: i64 = -1;
+            for i in 0..count {
+                let n: *mut AnyObject = msg_send![all, objectAtIndex: i];
+                let v: isize = msg_send![n, integerValue];
+                if v == number {
+                    order = i as i64;
+                    break;
+                }
+            }
+            serde_json::json!({ "active": active, "key": key, "order": order })
+        }
     }
 
     /// Show the pad: on every desktop and beside a full-screen window, over
@@ -783,6 +877,7 @@ mod native {
                 "beside_full_screen": spaces & (1 << 8) != 0,
                 "hidden_from_shares": sharing == 0,
                 "app_active": active,
+                "server_nonactivating": server_keeps_app_inactive(window),
             })
         }
     }
