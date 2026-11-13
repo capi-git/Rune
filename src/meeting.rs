@@ -8,7 +8,7 @@
 //! to, and no permission is needed: the app only asks *whether* audio is in
 //! use, and by which program.
 //!
-//! `notion2 --meeting-probe` prints what this sees, for checking it during a
+//! `rune --meeting-probe` prints what this sees, for checking it during a
 //! real meeting.
 
 use std::ffi::c_void;
@@ -504,7 +504,7 @@ pub fn load_setting() {
     ENABLED.store(crate::store::setting("meeting_notes").as_deref() != Some("off"), Ordering::Relaxed);
 }
 
-/// `notion2 --meeting-probe`: what the watcher sees right now.
+/// `rune --meeting-probe`: what the watcher sees right now.
 pub fn probe() -> String {
     let users = audio_users();
     let mut out = String::new();

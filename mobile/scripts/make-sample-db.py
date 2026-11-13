@@ -196,7 +196,7 @@ def main() -> int:
     mobile = book.page(home, "Mobile app", "rocket:orange", parent=projects, favorite=True, edited_min_ago=10, cover="preset:sea", blocks=[
         b("text", "The same pages as on the Mac, made for **one hand** and short moments. This page has every kind of block, so it shows how each one looks on the iPhone."),
         b("heading1", "Heading 1: the plan"),
-        b("text", "Inline text can be **bold**, _italic_, **_both_**, ~~struck out~~ or `inline code`. A link goes to [the web](https://example.com/notes) or to [another page](notion2://page/ROADMAP). Characters such as 2 \\* 3 \\* 4, snake\\_case and \\[brackets\\] show as typed."),
+        b("text", "Inline text can be **bold**, _italic_, **_both_**, ~~struck out~~ or `inline code`. A link goes to [the web](https://example.com/notes) or to [another page](rune://page/ROADMAP). Characters such as 2 \\* 3 \\* 4, snake\\_case and \\[brackets\\] show as typed."),
         b("heading2", "Heading 2: first version"),
         b("todo", "Read every page", checked=True),
         b("todo", "Search page names and text", checked=True),
@@ -257,7 +257,7 @@ def main() -> int:
     refs = {"ROADMAP": roadmap, "IDEAS": ideas, "OLD": old}
     for key, value in refs.items():
         db.execute("UPDATE blocks SET target=? WHERE target=?", (value, key))
-        db.execute("UPDATE blocks SET text=replace(text, ?, ?)", (f"notion2://page/{key}", f"notion2://page/{value}"))
+        db.execute("UPDATE blocks SET text=replace(text, ?, ?)", (f"rune://page/{key}", f"rune://page/{value}"))
     book.blocks(projects, [b("page", target=mobile), b("page", target=roadmap)])
     book.blocks(journal, [b("text", "Notes by day and by trip."), b("page", target=lisbon)])
     book.blocks(meetings, [b("page", target=sync_notes)])
@@ -363,7 +363,7 @@ def main() -> int:
     db.close()
     # The pictures of a workspace are files beside its database. The sample
     # has one: the app's icon, in "<file>.files".
-    icon = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Notion2", "Assets.xcassets", "AppIcon.appiconset", "AppIcon.png")
+    icon = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Rune", "Assets.xcassets", "AppIcon.appiconset", "AppIcon.png")
     if os.path.exists(icon):
         os.makedirs(path + ".files", exist_ok=True)
         shutil.copyfile(icon, os.path.join(path + ".files", PICTURE))

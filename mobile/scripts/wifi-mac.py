@@ -13,7 +13,7 @@ link with a code that works once, give each iPhone a token, and serve the files.
     --name NAME   the Mac's name in the link (default: the name in its device file)
     --code CODE   use this pairing code in place of a new one
 
-It prints "LINK notion2://pair?…": that link is what the QR code holds. In the
+It prints "LINK rune://pair?…": that link is what the QR code holds. In the
 Simulator, open it with:  xcrun simctl openurl booted "<link>"
 
 What it keeps (the certificate, its key, the iPhones it knows) is in
@@ -80,7 +80,7 @@ class Mac:
         subprocess.run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", self.key], check=True)
         os.chmod(self.key, 0o600)
         subprocess.run(
-            ["openssl", "req", "-new", "-x509", "-key", self.key, "-out", self.cert, "-days", "3650", "-subj", "/CN=Notion 2.0"],
+            ["openssl", "req", "-new", "-x509", "-key", self.key, "-out", self.cert, "-days", "3650", "-subj", "/CN=Rune"],
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -320,7 +320,7 @@ def main() -> int:
     else:
         hosts = ["localhost"]
     query = [("v", "1")] + [("host", h) for h in hosts] + [("port", str(port)), ("cert", mac.fingerprint), ("code", mac.code), ("name", mac.name)]
-    link = "notion2://pair?" + urllib.parse.urlencode(query, quote_via=urllib.parse.quote)
+    link = "rune://pair?" + urllib.parse.urlencode(query, quote_via=urllib.parse.quote)
     print(f"LINK {link}", flush=True)
     print(f"Serving {mac.root} as \"{mac.name}\" on port {port}. The code works once, for {CODE_LIFE // 60} minutes. Ctrl-C stops.", flush=True)
     if qr:

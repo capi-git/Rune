@@ -1,7 +1,7 @@
 //! Giving a page to a chat in Aven (the person's AI chat app).
 //!
 //! Chats in Aven already reach this workspace through the Rune
-//! connector (`notion2 --mcp`), so what a chat needs is to be told which
+//! connector (`rune --mcp`), so what a chat needs is to be told which
 //! page: the note as text, led by a line that names the live page, so the AI
 //! can also read or change the page itself.
 //!
@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 /// A test never opens another app.
 fn testing() -> bool {
-    cfg!(test) || std::env::var_os("NOTION2_SELFTEST").is_some()
+    cfg!(test) || std::env::var_os("RUNE_SELFTEST").is_some()
 }
 
 /// The installed Aven, if there is one. (A test run acts as if there were,
@@ -62,7 +62,7 @@ pub fn note_for_chat(title: &str, page_id: &str, markdown: &str) -> String {
 
 /// Where notes handed to Aven are kept until its chat has read them.
 fn outbox() -> Option<PathBuf> {
-    Some(dirs::cache_dir()?.join("Notion 2.0").join("Sent to Aven"))
+    Some(dirs::cache_dir()?.join("Rune").join("Sent to Aven"))
 }
 
 /// Write the note where Aven can open it. Notes sent more than a week ago

@@ -8,7 +8,7 @@
 #
 # One time before "submit", store your Apple sign-in for the check tool:
 #   xcrun notarytool store-credentials rune-notary --team-id <your team id>
-# (N2_NOTARY_PROFILE names another profile.)
+# (RUNE_NOTARY_PROFILE names another profile.)
 #
 # The app in target/release stays as built: your own copy updates from it.
 set -euo pipefail
@@ -19,18 +19,21 @@ APP="target/release/Rune.app"
 STAMP="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist")"
 OUT="target/release/notarized/$STAMP"
 COPY="$OUT/Rune.app"
-PROFILE_NAME="${N2_NOTARY_PROFILE:-rune-notary}"
+PROFILE_NAME="${RUNE_NOTARY_PROFILE:-rune-notary}"
 
 case "${1:-}" in
   sign)
-    IDENTITY="${N2_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null | awk -F'"' '/Developer ID Application/ {print $2; exit}')}"
+    IDENTITY="${RUNE_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null | awk -F'"' '/Developer ID Application/ {print $2; exit}')}"
     [ -n "$IDENTITY" ] || { echo "No Developer ID Application certificate on this Mac." >&2; exit 1; }
     [ -e "$COPY" ] && { echo "$COPY is there already (this build was signed for the check before)." >&2; exit 1; }
     mkdir -p "$OUT"
     ditto "$APP" "$COPY"
     # Each program inside, then the app: with the hardened runtime, a time
-    # stamp from Apple, and what the app may ask the person for.
-    for helper in n2listen:listen n2cal:cal; do
+    # stamp from Apple, and what the app may ask the person for. (The app's
+    # own program, Contents/MacOS/Rune, is signed with the app; the link
+    # notion2 beside it is no program of its own and is sealed as a link.
+    # The signing identifiers keep the first name: see scripts/bundle.sh.)
+    for helper in rune-listen:listen rune-cal:cal; do
       name="${helper%%:*}"
       [ -f "$COPY/Contents/MacOS/$name" ] || continue
       codesign --force --options runtime --timestamp --entitlements scripts/entitlements.plist \

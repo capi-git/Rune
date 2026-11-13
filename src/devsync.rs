@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 /// The folder of the Mac's own sync state, beside the notes file: the
 /// certificate, the paired iPhones, and `sync-v1/`.
 pub fn state_dir(db: &Path) -> PathBuf {
-    if std::env::var_os("NOTION2_DB").is_some() {
+    if std::env::var_os("RUNE_DB").is_some() {
         let mut name = db.to_path_buf().into_os_string();
         name.push(".sync");
         return PathBuf::from(name);
@@ -31,9 +31,11 @@ pub fn own_folder(db: &Path) -> PathBuf {
 }
 
 /// The folder in iCloud Drive, when the iPhone app has made it (the Mac
-/// never makes it). `NOTION2_ICLOUD_SYNC` names another folder (tests).
+/// never makes it). `RUNE_ICLOUD_SYNC` names another folder (tests). (The
+/// container keeps the app's first name, notion2: it is registered with
+/// Apple under that name, and the iPhone's files are in it.)
 pub fn icloud_folder() -> Option<PathBuf> {
-    let root = match std::env::var_os("NOTION2_ICLOUD_SYNC").filter(|p| !p.is_empty()) {
+    let root = match std::env::var_os("RUNE_ICLOUD_SYNC").filter(|p| !p.is_empty()) {
         Some(p) => PathBuf::from(p),
         None => dirs::home_dir()?.join("Library/Mobile Documents/iCloud~com~jackhagan~notion2/Documents"),
     };
@@ -203,7 +205,7 @@ fn restart(icloud: bool, wifi_on: bool) -> Result<(), String> {
         let on_put: Arc<dyn Fn() + Send + Sync> = Arc::new(nudge);
         let config = wifi::Config { folder: own_folder(&db), state: state.clone(), device, name };
         // A test run listens on this Mac only: macOS then asks nothing.
-        if std::env::var_os("NOTION2_SELFTEST").is_some() {
+        if std::env::var_os("RUNE_SELFTEST").is_some() {
             Some(wifi::Server::start_local(config, 0, on_put)?)
         } else {
             Some(wifi::Server::start(config, on_put)?)

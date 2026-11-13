@@ -718,7 +718,7 @@ document.addEventListener('selectionchange', () => {
 
 // ----- API used from Rust -----------------------------------------------------
 
-window.__n2 = {
+window.__rune = {
   focusMode(on) {
     requestAnimationFrame(() =>
       requestAnimationFrame(() => {
@@ -1290,7 +1290,7 @@ document.addEventListener(
     // One line that is just what the app keeps of the picked blocks copied
     // last (see `copy_picked`) goes to the app, which puts that line in with
     // its formats. (Typed in as words, its stars and backslashes showed.)
-    const kept = !text.includes('\n') && window.__n2 && window.__n2.keptCopy === text;
+    const kept = !text.includes('\n') && window.__rune && window.__rune.keptCopy === text;
     if (isCode(t) || (!text.includes('\n') && !kept)) {
       pasting = true;
       document.execCommand('insertText', false, text.replace(/\r\n?/g, '\n'));
@@ -2003,7 +2003,7 @@ const segBarTarget = (e) => {
 // What a drag of a tab, page or block carries: a type only this app reads.
 // (Plain text, even empty, makes the drag look like text to other apps, and
 // shelf or drop-zone apps then offer themselves as a place to drop it.)
-const OWN_DRAG = 'application/x-notion2-drag';
+const OWN_DRAG = 'application/x-rune-drag';
 const markOwnDrag = (dt) => {
   dt.clearData();
   dt.setData(OWN_DRAG, '1');
@@ -2264,32 +2264,32 @@ document.addEventListener('dragend', endDrag);
 // keeps the latest scene per drawing, so a frame that opens again (a page
 // shown again, the same page in both panes) gets it straight away.
 
-const scenes = Object.assign({}, window.__n2_scenes || {});
-delete window.__n2_scenes;
+const scenes = Object.assign({}, window.__rune_scenes || {});
+delete window.__rune_scenes;
 const drawingFrames = (id) =>
   [...document.querySelectorAll('.drawing[data-drawing]')].filter((d) => d.dataset.drawing === id).map((d) => d.querySelector('iframe.drawing-frame')).filter(Boolean);
-const loadInto = (frame, json) => frame.contentWindow && frame.contentWindow.postMessage({ n2draw: 'load', json }, '*');
+const loadInto = (frame, json) => frame.contentWindow && frame.contentWindow.postMessage({ runedraw: 'load', json }, '*');
 
 window.addEventListener('message', (e) => {
   const d = e.data;
-  if (!d || typeof d !== 'object' || typeof d.n2draw !== 'string') return;
+  if (!d || typeof d !== 'object' || typeof d.runedraw !== 'string') return;
   const frame = [...document.querySelectorAll('iframe.drawing-frame')].find((f) => f.contentWindow === e.source);
   const box = frame && frame.closest('.drawing');
   if (!box) return;
   const id = box.dataset.drawing;
-  if (d.n2draw === 'ready') {
+  if (d.runedraw === 'ready') {
     box.dataset.ready = '1';
     if (id in scenes) loadInto(frame, scenes[id]);
     else send({ t: 'drawing_ready', id }); // this window has no scene yet: ask for it
-  } else if (d.n2draw === 'save' && typeof d.json === 'string') {
+  } else if (d.runedraw === 'save' && typeof d.json === 'string') {
     scenes[id] = d.json;
     box.dataset.saves = String((Number(box.dataset.saves) || 0) + 1);
     send({ t: 'drawing_save', page: box.dataset.page, id, data: d.json });
     // The same drawing open in the other pane follows along.
     drawingFrames(id).forEach((f) => f !== frame && f.closest('.drawing').dataset.ready && loadInto(f, d.json));
-  } else if (d.n2draw === 'expand') {
+  } else if (d.runedraw === 'expand') {
     setExpanded(box, !box.dataset.expanded);
-  } else if (d.n2draw === 'probe') {
+  } else if (d.runedraw === 'probe') {
     box.dataset.probe = JSON.stringify(d.info || {});
   }
 });
@@ -2309,7 +2309,7 @@ function setExpanded(box, on) {
     delete box.dataset.expanded;
   }
   const frame = box.querySelector('iframe.drawing-frame');
-  if (frame && frame.contentWindow) frame.contentWindow.postMessage({ n2draw: 'expanded', on }, '*');
+  if (frame && frame.contentWindow) frame.contentWindow.postMessage({ runedraw: 'expanded', on }, '*');
   if (on && frame) frame.focus();
 }
 
@@ -2332,7 +2332,7 @@ document.addEventListener(
       // the frame is gone by then: the save it sends as it goes comes from
       // no window the page knows, and was dropped.
       const frame = box.querySelector('iframe.drawing-frame');
-      if (frame && frame.contentWindow) frame.contentWindow.postMessage({ n2draw: 'flush' }, '*');
+      if (frame && frame.contentWindow) frame.contentWindow.postMessage({ runedraw: 'flush' }, '*');
       if (box.dataset.expanded) setExpanded(box, false);
       delete box.dataset.active;
     });
@@ -2654,7 +2654,7 @@ const seedPicker = (letter) => {
   };
   tick();
 };
-window.__n2.focusCell = (id, r, c) => {
+window.__rune.focusCell = (id, r, c) => {
   const box = document.querySelector(`.table-block[data-table="${id}"]`);
   if (!box) return;
   const tr = box.querySelector(`tr[data-r="${r}"]`);
@@ -2664,7 +2664,7 @@ window.__n2.focusCell = (id, r, c) => {
   intoCell(cellAt(box, r, c) || (tr && typedCells(tr)[0]) || (Number(r) === 0 ? box.querySelector('.cell') : null));
 };
 // Where the columns that stay in place are, once the page shows them.
-window.__n2.freezeColumns = (id) =>
+window.__rune.freezeColumns = (id) =>
   requestAnimationFrame(() => {
     const box = document.querySelector(`.table-block[data-table="${id}"]`);
     if (!box) return;
@@ -2679,7 +2679,7 @@ window.__n2.freezeColumns = (id) =>
     cutTable(box);
   });
 window.addEventListener('resize', () => {
-  for (const box of document.querySelectorAll('.table-block[data-frozen]:not([data-frozen="0"])')) window.__n2.freezeColumns(box.dataset.table);
+  for (const box of document.querySelectorAll('.table-block[data-frozen]:not([data-frozen="0"])')) window.__rune.freezeColumns(box.dataset.table);
   for (const box of document.querySelectorAll('.table-block')) {
     if (box.scrollLeft > 0) queueCut(box);
     else syncBar(box);
@@ -3396,7 +3396,10 @@ document.addEventListener(
         const line = press.target.closest && press.target.closest('.at-row');
         if (line) chooseAt(Number(line.dataset.at));
       });
-      document.body.appendChild(box);
+      // In the app's own element: it holds the colours and the letters of
+      // the look. (On the page's body the list had neither: black words
+      // with no box, over what was behind them.)
+      (document.querySelector('.app') || document.body).appendChild(box);
       atList = { field, box, rows: [], on: 0, start: 0, n: 0 };
     }
     atList.start = typed.start;
@@ -3407,7 +3410,7 @@ document.addEventListener(
   },
   true,
 );
-window.__n2.pagesFound = (n, rows) => {
+window.__rune.pagesFound = (n, rows) => {
   if (!atList || atList.n !== n) return;
   atList.rows = Array.isArray(rows) ? rows : [];
   atList.on = 0;
@@ -4247,7 +4250,7 @@ const hearLost = () => {
   delete document.body.dataset.dictating;
   send({ t: 'shortcut', name: 'dictate_stop' });
 };
-window.__n2.hearStart = () => {
+window.__rune.hearStart = () => {
   const id = document.body.dataset.dictating;
   const box = id && document.getElementById(id);
   if (!box || document.activeElement !== box) return hearLost();
@@ -4265,14 +4268,14 @@ window.__n2.hearStart = () => {
   const mic = document.querySelector(`[data-dictate="${id}"]`);
   if (mic) mic.classList.add('hearing');
 };
-window.__n2.hear = (text) => {
+window.__rune.hear = (text) => {
   if (!hearBox) return;
   if (!hearBox.isConnected || document.activeElement !== hearBox) return hearLost();
   hearBox.value = hearBase + (hearBase && !/\s$/.test(hearBase) ? ' ' : '') + text;
   hearBox.dispatchEvent(new Event('input', { bubbles: true }));
   hearBox.scrollTop = hearBox.scrollHeight;
 };
-window.__n2.hearEnd = hearEnd;
+window.__rune.hearEnd = hearEnd;
 // Leaving the box, or Return in it, ends the listening at once.
 const hearLeave = (e) => {
   if (!hearBox || e.target !== hearBox) return;
@@ -4396,11 +4399,11 @@ const paintFind = () => {
     count.textContent = !findInput() || !findInput().value ? '' : findMatches.length ? `${findAt + 1} of ${findMatches.length}` : 'No matches';
   }
   if (!canHighlight) return;
-  if (findMatches.length) CSS.highlights.set('n2-find', new Highlight(...findMatches));
-  else CSS.highlights.delete('n2-find');
+  if (findMatches.length) CSS.highlights.set('rune-find', new Highlight(...findMatches));
+  else CSS.highlights.delete('rune-find');
   const current = findMatches[findAt];
-  if (current) CSS.highlights.set('n2-find-current', new Highlight(current));
-  else CSS.highlights.delete('n2-find-current');
+  if (current) CSS.highlights.set('rune-find-current', new Highlight(current));
+  else CSS.highlights.delete('rune-find-current');
 };
 
 const revealMatch = () => {
@@ -5336,13 +5339,13 @@ window.addEventListener('mouseup', () => {
 // The player is a view of its own over the frame the page draws for it
 // (#player-screen). Rust has to know where the frame is: when it opens, and
 // when the window changes size.
-window.__n2_player = () => {
+window.__rune_player = () => {
   const frame = document.getElementById('player-screen');
   if (!frame) return;
   const r = frame.getBoundingClientRect();
   send({ t: 'player_place', x: r.left, y: r.top, w: r.width, h: r.height });
 };
-addEventListener('resize', () => requestAnimationFrame(window.__n2_player));
+addEventListener('resize', () => requestAnimationFrame(window.__rune_player));
 
 // The player is moved by its bar and gets another size by a corner. While
 // that goes on the page moves the dock and the player follows it; at the end
@@ -5352,7 +5355,7 @@ addEventListener('resize', () => requestAnimationFrame(window.__n2_player));
   const EDGE = 8;
   const LEAST = 260;
   let drag = null;
-  const follow = () => window.__n2_player && window.__n2_player();
+  const follow = () => window.__rune_player && window.__rune_player();
   const tell = (dock, w) => {
     const r = dock.getBoundingClientRect();
     const h = r.left + r.width / 2 < innerWidth / 2 ? 'left' : 'right';
@@ -5687,7 +5690,7 @@ window.addEventListener(
 // Mermaid (built into the app, see assets/mermaid), in the colours of the app.
 // The library loads the first time a page shows a diagram.
 
-const DIAGRAM_LIB = 'n2draw://app/mermaid.min.js';
+const DIAGRAM_LIB = 'runedraw://app/mermaid.min.js';
 let diagramLib = null;
 const loadDiagramLib = () => {
   if (!diagramLib) {
@@ -5781,7 +5784,7 @@ const drawDiagram = async (el, look, key) => {
   }
   const source = el.dataset.diagram;
   // (Its own name: Mermaid works in a part of the page with that name.)
-  const name = `n2-diagram-${++diagramCount}`;
+  const name = `rune-diagram-${++diagramCount}`;
   try {
     await mermaid.parse(source);
     const { svg } = await mermaid.render(name, source);
@@ -5874,7 +5877,7 @@ document.addEventListener(
   { capture: true, passive: true },
 );
 
-window.__n2_test = { selIn, setSel, command: (name) => send({ t: 'shortcut', name }) };
+window.__rune_test = { selIn, setSel, command: (name) => send({ t: 'shortcut', name }) };
 
 // Keep this script alive so dioxus.send() stays connected.
 await new Promise(() => {});

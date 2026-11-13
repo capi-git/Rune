@@ -1,4 +1,4 @@
-/* Notion 2.0 styles. The shell follows Aven: the top row and sidebar are one
+/* Rune styles. The shell follows Aven: the top row and sidebar are one
    see-through surface (window glass), and the page sits on it in one rounded
    card. No lines between them. */
 
@@ -4637,10 +4637,10 @@ body[data-dragging="seg"] .tab.seg-source {
   font-variant-numeric: tabular-nums;
   color: var(--text-3);
 }
-::highlight(n2-find) {
+::highlight(rune-find) {
   background-color: rgba(250, 204, 21, 0.38);
 }
-::highlight(n2-find-current) {
+::highlight(rune-find-current) {
   background-color: rgba(249, 115, 22, 0.6);
 }
 @media (prefers-reduced-motion: reduce) {

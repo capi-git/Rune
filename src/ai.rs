@@ -259,7 +259,7 @@ pub fn shown() -> bool {
     if PRETEND_NONE.load(std::sync::atomic::Ordering::Relaxed) {
         return false;
     }
-    if CANNED.lock().unwrap_or_else(|e| e.into_inner()).is_some() || std::env::var_os("NOTION2_SELFTEST").is_some() {
+    if CANNED.lock().unwrap_or_else(|e| e.into_inner()).is_some() || std::env::var_os("RUNE_SELFTEST").is_some() {
         return true;
     }
     match local::installed_cached() {

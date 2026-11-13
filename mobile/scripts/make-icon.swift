@@ -5,7 +5,7 @@ import AppKit
 
 let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
 let svg = root.appendingPathComponent("Support/AppIcon.svg")
-let out = root.appendingPathComponent("Notion2/Assets.xcassets/AppIcon.appiconset/AppIcon.png")
+let out = root.appendingPathComponent("Rune/Assets.xcassets/AppIcon.appiconset/AppIcon.png")
 guard let image = NSImage(contentsOf: svg) else {
     FileHandle.standardError.write("could not load \(svg.path)\n".data(using: .utf8)!)
     exit(1)

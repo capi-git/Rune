@@ -4,7 +4,7 @@ use crate::model::{Block, BlockKind, Event, Id, Page, Space};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct Store {
     conn: Connection,
@@ -38,16 +38,135 @@ pub const REFUSED_LOCKED: &str = "The page is locked: it can be changed only in 
 /// 7: a page can be locked (a line of the kind "locked", see lock.rs).
 pub const SCHEMA: i64 = 7;
 
+/// The folder of the notes, in the person's Application Support folder.
+pub const FOLDER: &str = "Rune";
+/// The name that folder had before the app was Rune. The app gives the
+/// folder its new name as it starts (`move_folder`) and leaves a link of
+/// this name in its place, for the programs that still look there: an older
+/// Rune, a connector that was started before the move, a script.
+pub const OLD_FOLDER: &str = "Notion 2.0";
+/// The notes file in that folder. (Its name is part of what two devices and
+/// older programs know: it stays.)
+const FILE: &str = "workspace.db";
+
+/// The folder of the notes in `base`, for the app and for the connector
+/// alike (`Store::default_path` is the only caller): `Rune` when it holds a
+/// notes file; else the folder of the first name when that one holds a
+/// notes file (the app did not move it yet, or could not); else `Rune`.
+pub fn folder_in(base: &Path) -> PathBuf {
+    let (new, old) = (base.join(FOLDER), base.join(OLD_FOLDER));
+    if !new.join(FILE).is_file() && old.join(FILE).is_file() {
+        old
+    } else {
+        new
+    }
+}
+
+/// What `move_folder_in` did.
+#[derive(Debug, PartialEq)]
+pub enum FolderMove {
+    /// There was nothing to move.
+    Nothing,
+    /// The folder has its new name, and a link of the first name is in its place.
+    Moved,
+    /// The folder of the first name is still there and nothing was changed:
+    /// what to tell the person.
+    Stayed(String),
+}
+
+/// Give the notes folder of the first name in `base` the name `Rune`: the
+/// whole folder in one step (a rename; never a copy, never a merge of two
+/// folders, never over a file), and then a link of the first name to it.
+/// Only when `Rune` is not there or is an empty folder, and the folder of
+/// the first name is a real folder (a link says that the move was made).
+/// When the rename fails, or `Rune` is in the way, nothing is changed and
+/// `folder_in` goes on giving the folder that holds the notes.
+///
+/// What else can have the notes open in this moment, and why this is safe:
+/// - A connector (`--mcp`) or an older Rune that opened the notes file
+///   before the move keeps its open files: a rename of the folder does not
+///   change them, and the log files beside the notes file (`-wal`, `-shm`)
+///   move with the folder, so every program still writes to the same files.
+///   What such a program then opens by the path it knows (a backup, a
+///   picture, the watcher's record, the notes file again) goes through the
+///   link to the same folder. SQLite's locks belong to the file, not to its
+///   path, so a program that opened it by the first name and one that
+///   opened it by the new name still wait for each other.
+/// - Between the rename and the link there is a moment with no folder of
+///   the first name. A program that looks for a file there in that moment
+///   is told that there is none; one that STARTS in that moment makes an
+///   empty folder of the first name with an empty notes file. Then the link
+///   cannot be made, the notes are safe in `Rune`, and the next start says
+///   that there are notes in two folders.
+/// - Two copies of the app that start together: one rename takes the
+///   folder, the other fails (the folder is gone, or is a link by then) and
+///   that copy sees that the move was made.
+pub fn move_folder_in(base: &Path) -> FolderMove {
+    let (new, old) = (base.join(FOLDER), base.join(OLD_FOLDER));
+    let real_folder = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_dir());
+    if !real_folder(&old) {
+        return FolderMove::Nothing;
+    }
+    let old_has_notes = old.join(FILE).is_file();
+    let free = match std::fs::symlink_metadata(&new) {
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+        Ok(m) => m.file_type().is_dir() && std::fs::read_dir(&new).is_ok_and(|mut inside| inside.next().is_none()),
+    };
+    let stayed = |why: &str| format!("Your notes are still in the folder “{OLD_FOLDER}”: {why}. Nothing was changed, and Rune uses the notes where they are.");
+    if !free {
+        return if old_has_notes && new.join(FILE).is_file() {
+            FolderMove::Stayed(format!("There are notes in two folders, “{FOLDER}” and “{OLD_FOLDER}” (in Library ▸ Application Support). Rune uses the folder “{FOLDER}” and changed nothing in the two."))
+        } else if old_has_notes {
+            FolderMove::Stayed(stayed(&format!("a folder “{FOLDER}” with other files is in the place they would move to")))
+        } else {
+            FolderMove::Nothing
+        };
+    }
+    match std::fs::rename(&old, &new) {
+        Ok(()) => {
+            // (A relative link: it holds when the home folder is moved or restored.)
+            if let Err(e) = std::os::unix::fs::symlink(FOLDER, &old) {
+                eprintln!("The notes folder is now {}, but the link {} could not be made ({e}).", new.display(), old.display());
+            }
+            FolderMove::Moved
+        }
+        // Another copy of the app made the move in this moment.
+        Err(_) if !real_folder(&old) => FolderMove::Nothing,
+        Err(e) if old_has_notes => FolderMove::Stayed(stayed(&format!("the folder could not get the name “{FOLDER}” ({e})"))),
+        Err(_) => FolderMove::Nothing,
+    }
+}
+
+/// As the app starts, before it opens the notes file: the notes folder gets
+/// the app's name (see `move_folder_in`). Only the app calls this, one time.
+/// The connector, the commands of `main` and a run on a notes file of its
+/// own (`RUNE_DB`) never move anything: they use the folder `folder_in` gives.
+pub fn move_folder() {
+    if std::env::var_os("RUNE_DB").is_some_and(|p| !p.is_empty()) {
+        return;
+    }
+    let Some(base) = dirs::data_dir() else { return };
+    match move_folder_in(&base) {
+        FolderMove::Nothing => {}
+        FolderMove::Moved => eprintln!("The notes folder is now {} (a link named “{OLD_FOLDER}” is in its old place).", base.join(FOLDER).display()),
+        FolderMove::Stayed(why) => {
+            eprintln!("{why}");
+            tell(&why);
+        }
+    }
+}
+
 impl Store {
-    /// `~/Library/Application Support/Notion 2.0/workspace.db`, or the file named
-    /// by `NOTION2_DB` (handy for tests and for trying the MCP server safely).
+    /// `~/Library/Application Support/Rune/workspace.db` (or the folder of
+    /// the first name while the notes are still there: see `folder_in`), or
+    /// the file named by `RUNE_DB` (handy for tests and for trying the MCP
+    /// server safely).
     pub fn default_path() -> PathBuf {
-        if let Some(path) = std::env::var_os("NOTION2_DB").filter(|p| !p.is_empty()) {
+        if let Some(path) = std::env::var_os("RUNE_DB").filter(|p| !p.is_empty()) {
             return PathBuf::from(path);
         }
         let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
-        // The folder keeps the app's first name: the notes stay where they are.
-        base.join("Notion 2.0").join("workspace.db")
+        folder_in(&base).join(FILE)
     }
 
     pub fn open(path: PathBuf) -> rusqlite::Result<Store> {
@@ -55,7 +174,7 @@ impl Store {
             let _ = std::fs::create_dir_all(dir);
         }
         let conn = Connection::open(&path)?;
-        // The app and the MCP server (`notion2 --mcp`) can both have the file
+        // The app and the MCP server (`rune --mcp`) can both have the file
         // open; wait briefly for the other's write instead of failing.
         conn.busy_timeout(BUSY_WAIT)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
@@ -1021,7 +1140,7 @@ mod tests {
 
     #[test]
     fn a_file_from_a_newer_program_is_known_and_keeps_its_mark() {
-        let dir = std::env::temp_dir().join(format!("notion2-schema-{}", crate::model::new_id()));
+        let dir = std::env::temp_dir().join(format!("rune-schema-{}", crate::model::new_id()));
         let path = dir.join("workspace.db");
         let store = Store::open(path.clone()).unwrap();
         assert!(!store.from_newer_program());
@@ -1041,7 +1160,7 @@ mod tests {
 
     #[test]
     fn the_log_is_not_emptied_while_another_program_reads_and_that_is_said() {
-        let dir = std::env::temp_dir().join(format!("notion2-checkpoint-{}", crate::model::new_id()));
+        let dir = std::env::temp_dir().join(format!("rune-checkpoint-{}", crate::model::new_id()));
         let path = dir.join("workspace.db");
         let store = Store::open(path.clone()).unwrap();
         store.save_blocks("p", &[Block::text("one")]).unwrap();
@@ -1165,9 +1284,208 @@ mod tests {
         assert!(pages.is_empty() && loaded.is_empty());
     }
 
+    /// A stand-in for the person's Application Support folder.
+    fn base(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("rune-folder-{name}-{}", crate::model::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A notes folder as a person has it: the notes file with one page, a
+    /// picture, a backup and the watcher's record.
+    fn notes_folder(dir: &Path, title: &str) {
+        let store = Store::open(dir.join(FILE)).unwrap();
+        let mut page = Page::new(None, 1.0);
+        page.title = title.into();
+        store.save_page(&page).unwrap();
+        drop(store);
+        std::fs::create_dir_all(dir.join("Files")).unwrap();
+        std::fs::write(dir.join("Files/picture.png"), b"\x89PNG picture").unwrap();
+        std::fs::create_dir_all(dir.join("Backups")).unwrap();
+        std::fs::write(dir.join("Backups/workspace-1.db"), b"a backup").unwrap();
+        std::fs::write(dir.join("meeting-watch.log"), "2026-11-12 09:00:00 Started Teams\n").unwrap();
+    }
+
+    fn titles(db: &Path) -> Vec<String> {
+        let (pages, _) = Store::open(db.to_path_buf()).unwrap().load().unwrap();
+        let mut titles: Vec<String> = pages.values().map(|p| p.title.clone()).collect();
+        titles.sort();
+        titles
+    }
+
+    /// Every file under `dir` with what it holds (links are not followed).
+    fn listing(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut found = Vec::new();
+        let mut folders = vec![dir.to_path_buf()];
+        while let Some(folder) = folders.pop() {
+            for entry in std::fs::read_dir(&folder).unwrap().flatten() {
+                let kind = entry.file_type().unwrap();
+                if kind.is_dir() {
+                    folders.push(entry.path());
+                } else if kind.is_symlink() {
+                    found.push((entry.path(), std::fs::read_link(entry.path()).unwrap().to_string_lossy().as_bytes().to_vec()));
+                } else {
+                    found.push((entry.path(), std::fs::read(entry.path()).unwrap()));
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    fn is_link(path: &Path) -> bool {
+        std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+    }
+
+    #[test]
+    fn the_notes_folder_is_the_one_that_holds_the_notes() {
+        let b = base("decide");
+        let (new, old) = (b.join(FOLDER), b.join(OLD_FOLDER));
+        assert_eq!(folder_in(&b), new, "a first start: the new name");
+        // Only the folder of the first name (the app did not move it yet).
+        notes_folder(&old, "Old");
+        assert_eq!(folder_in(&b), old);
+        // An empty folder of the new name beside it changes nothing.
+        std::fs::create_dir_all(&new).unwrap();
+        assert_eq!(folder_in(&b), old);
+        // Both hold notes: the new name.
+        notes_folder(&new, "New");
+        assert_eq!(folder_in(&b), new);
+        // Only the new one.
+        std::fs::remove_dir_all(&old).unwrap();
+        assert_eq!(folder_in(&b), new);
+        // The first name is a link to the new one (after the move): the new name.
+        std::os::unix::fs::symlink(FOLDER, &old).unwrap();
+        assert_eq!(folder_in(&b), new);
+        let _ = std::fs::remove_dir_all(b);
+    }
+
+    #[test]
+    fn the_folder_of_the_first_name_moves_whole_and_one_time() {
+        let b = base("move");
+        let (new, old) = (b.join(FOLDER), b.join(OLD_FOLDER));
+        notes_folder(&old, "Kept");
+        // A connector that has the notes open while the app starts.
+        let connector = Store::open(old.join(FILE)).unwrap();
+        connector.save_blocks("p", &[Block::text("before the move")]).unwrap();
+        let before: Vec<(PathBuf, Vec<u8>)> = listing(&old).into_iter().filter(|(p, _)| !p.to_string_lossy().contains("workspace.db")).collect();
+
+        assert_eq!(move_folder_in(&b), FolderMove::Moved);
+        assert!(new.is_dir() && !is_link(&new));
+        assert!(is_link(&old), "a link is in the old place");
+        assert_eq!(std::fs::read_link(&old).unwrap(), PathBuf::from(FOLDER), "and it is relative");
+        assert_eq!(folder_in(&b), new);
+        let after: Vec<(PathBuf, Vec<u8>)> = listing(&new).into_iter().filter(|(p, _)| !p.to_string_lossy().contains("workspace.db")).collect();
+        let moved: Vec<(PathBuf, Vec<u8>)> = before.into_iter().map(|(p, bytes)| (new.join(p.strip_prefix(&old).unwrap()), bytes)).collect();
+        assert_eq!(after, moved, "every other file is there as it was: the picture, the backup, the record");
+        assert_eq!(std::fs::read(old.join("Files/picture.png")).unwrap(), b"\x89PNG picture", "and is found by the old path too");
+
+        // The connector goes on with the files it has open, and the app
+        // (the new path) and an older program (the old path) see what it writes.
+        connector.save_blocks("p", &[Block::text("after the move")]).unwrap();
+        let app = Store::open(new.join(FILE)).unwrap();
+        let older = Store::open(old.join(FILE)).unwrap();
+        assert_eq!(app.load_page_blocks("p").unwrap()[0].text, "after the move");
+        assert_eq!(older.load_page_blocks("p").unwrap()[0].text, "after the move");
+        app.save_blocks("p", &[Block::text("from the app")]).unwrap();
+        assert_eq!(connector.load_page_blocks("p").unwrap()[0].text, "from the app");
+        assert_eq!(older.load_page_blocks("p").unwrap()[0].text, "from the app");
+        drop((connector, app, older));
+        assert_eq!(titles(&new.join(FILE)), vec!["Kept"]);
+
+        // A second start changes nothing.
+        let once = listing(&b);
+        assert_eq!(move_folder_in(&b), FolderMove::Nothing);
+        assert_eq!(listing(&b), once);
+        assert!(is_link(&old) && new.is_dir());
+        let _ = std::fs::remove_dir_all(b);
+    }
+
+    #[test]
+    fn the_folder_moves_into_an_empty_folder_of_the_new_name() {
+        let b = base("empty");
+        let (new, old) = (b.join(FOLDER), b.join(OLD_FOLDER));
+        notes_folder(&old, "Kept");
+        std::fs::create_dir_all(&new).unwrap();
+        assert_eq!(move_folder_in(&b), FolderMove::Moved);
+        assert!(is_link(&old) && !is_link(&new));
+        assert_eq!(titles(&new.join(FILE)), vec!["Kept"]);
+        assert!(new.join("Files/picture.png").is_file() && new.join("Backups/workspace-1.db").is_file() && new.join("meeting-watch.log").is_file());
+        let _ = std::fs::remove_dir_all(b);
+    }
+
+    #[test]
+    fn nothing_moves_when_there_is_nothing_to_move() {
+        // A first start: no folder at all.
+        let b = base("none");
+        assert_eq!(move_folder_in(&b), FolderMove::Nothing);
+        assert!(listing(&b).is_empty());
+        // Only the new name.
+        notes_folder(&b.join(FOLDER), "New");
+        let was = listing(&b);
+        assert_eq!(move_folder_in(&b), FolderMove::Nothing);
+        assert_eq!(listing(&b), was);
+        assert!(!b.join(OLD_FOLDER).exists(), "no link is made where no folder was");
+        // The first name is a link already (the move was made before).
+        std::os::unix::fs::symlink(FOLDER, b.join(OLD_FOLDER)).unwrap();
+        let was = listing(&b);
+        assert_eq!(move_folder_in(&b), FolderMove::Nothing);
+        assert_eq!(listing(&b), was);
+        let _ = std::fs::remove_dir_all(b);
+    }
+
+    #[test]
+    fn two_folders_with_notes_are_left_as_they_are_and_that_is_said() {
+        let b = base("both");
+        let (new, old) = (b.join(FOLDER), b.join(OLD_FOLDER));
+        notes_folder(&old, "Old");
+        notes_folder(&new, "New");
+        let was = listing(&b);
+        let FolderMove::Stayed(said) = move_folder_in(&b) else { panic!("nothing may move") };
+        assert!(said.contains("notes in two folders") && said.contains("uses the folder “Rune”"), "{said}");
+        assert_eq!(listing(&b), was, "nothing was changed");
+        assert!(!is_link(&old) && !is_link(&new));
+        assert_eq!(folder_in(&b), new);
+        assert_eq!((titles(&new.join(FILE)), titles(&old.join(FILE))), (vec!["New".to_string()], vec!["Old".to_string()]));
+        // A folder of the new name that holds other files, and no notes: the
+        // notes stay where they are and are used there.
+        let b2 = base("other");
+        let (new, old) = (b2.join(FOLDER), b2.join(OLD_FOLDER));
+        notes_folder(&old, "Old");
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(new.join("something.txt"), "of another program").unwrap();
+        let was = listing(&b2);
+        let FolderMove::Stayed(said) = move_folder_in(&b2) else { panic!("nothing may move") };
+        assert!(said.starts_with("Your notes are still in the folder “Notion 2.0”") && said.contains("Nothing was changed"), "{said}");
+        assert_eq!(listing(&b2), was);
+        assert_eq!(folder_in(&b2), old);
+        let _ = std::fs::remove_dir_all(b);
+        let _ = std::fs::remove_dir_all(b2);
+    }
+
+    #[test]
+    fn a_rename_that_fails_changes_nothing_and_that_is_said() {
+        use std::os::unix::fs::PermissionsExt;
+        let b = base("fails");
+        let (new, old) = (b.join(FOLDER), b.join(OLD_FOLDER));
+        notes_folder(&old, "Old");
+        let was = listing(&b);
+        // The folder above cannot be written to: no name in it can change.
+        std::fs::set_permissions(&b, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let done = move_folder_in(&b);
+        std::fs::set_permissions(&b, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let FolderMove::Stayed(said) = done else { panic!("the rename must fail: {done:?}") };
+        assert!(said.starts_with("Your notes are still in the folder “Notion 2.0”") && said.contains("could not get the name “Rune”") && said.contains("uses the notes where they are"), "{said}");
+        assert_eq!(listing(&b), was, "nothing was changed");
+        assert!(!new.exists() && !is_link(&old));
+        assert_eq!(folder_in(&b), old, "and the app goes on with the notes where they are");
+        assert_eq!(titles(&old.join(FILE)), vec!["Old"]);
+        let _ = std::fs::remove_dir_all(b);
+    }
+
     #[test]
     fn data_version_changes_when_another_connection_writes() {
-        let dir = std::env::temp_dir().join(format!("notion2-store-test-{}", crate::model::new_id()));
+        let dir = std::env::temp_dir().join(format!("rune-store-test-{}", crate::model::new_id()));
         let path = dir.join("workspace.db");
         let app = Store::open(path.clone()).unwrap();
         let other = Store::open(path).unwrap();

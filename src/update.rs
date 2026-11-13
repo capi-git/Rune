@@ -17,7 +17,7 @@
 //! before its window opens, the watcher puts the old copy back, opens it,
 //! and that build is not offered again.
 //!
-//! `notion2 --update-check` and `--update-install` do the same from Terminal,
+//! `rune --update-check` and `--update-install` do the same from Terminal,
 //! without opening a window or restarting.
 //!
 //! On every Mac but the one that builds the app there is no build folder.
@@ -30,9 +30,9 @@
 use std::path::{Path, PathBuf};
 
 /// This build's number; none for a plain `cargo build` (which never updates).
-pub const BUILD: Option<&str> = option_env!("N2_BUILD_STAMP");
+pub const BUILD: Option<&str> = option_env!("RUNE_BUILD_STAMP");
 /// The commit this build was made from, when the build script knew it.
-pub const COMMIT: Option<&str> = option_env!("N2_BUILD_COMMIT");
+pub const COMMIT: Option<&str> = option_env!("RUNE_BUILD_COMMIT");
 /// Where the build script puts the app (on the Mac that built this copy).
 pub const DEFAULT_SOURCE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/release/Rune.app");
 
@@ -46,8 +46,18 @@ const ASSET: &str = "Rune.zip";
 /// How often the releases are asked without "Check now".
 const ASK_EVERY_MS: i64 = 20 * 60 * 60 * 1000;
 
+/// The app's bundle id keeps the app's first name: macOS keeps what the
+/// person allowed (the microphone, the calendars, the notifications) by it,
+/// and every build that people have takes an update only with this id.
 const BUNDLE_ID: &str = "com.jackhagan.notion2";
-const PROGRAM: &str = "Contents/MacOS/notion2";
+/// The app's program, in its bundle.
+const PROGRAM: &str = "Contents/MacOS/Rune";
+/// The program under its first name. A build made before the name Rune has
+/// only this file, and takes an update only when the new app has a file of
+/// this name; people's AI tools start the connector by it too. So the
+/// bundle keeps a link of this name to the program (scripts/bundle.sh),
+/// and an app that has only this file is still a build of this app.
+const OLD_PROGRAM: &str = "Contents/MacOS/notion2";
 
 /// A newer build that can be installed.
 #[derive(Clone, Debug, PartialEq)]
@@ -86,10 +96,16 @@ fn plist_value(plist: &str, key: &str) -> Option<String> {
 /// The build number of an app on disk, if it is a build of this app.
 pub fn build_of(app: &Path) -> Option<u64> {
     let plist = std::fs::read_to_string(app.join("Contents/Info.plist")).ok()?;
-    if plist_value(&plist, "CFBundleIdentifier").as_deref() != Some(BUNDLE_ID) || !app.join(PROGRAM).is_file() {
+    if plist_value(&plist, "CFBundleIdentifier").as_deref() != Some(BUNDLE_ID) || program_of(app).is_none() {
         return None;
     }
     number(&plist_value(&plist, "CFBundleVersion")?)
+}
+
+/// The program of an app on disk: under its name of today, else under its
+/// first name (a build made before the name Rune).
+fn program_of(app: &Path) -> Option<PathBuf> {
+    [PROGRAM, OLD_PROGRAM].iter().map(|p| app.join(p)).find(|p| p.is_file())
 }
 
 /// The app this program runs from; none when it was started straight from a
@@ -97,7 +113,8 @@ pub fn build_of(app: &Path) -> Option<u64> {
 pub fn own_app() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let app = exe.parent()?.parent()?.parent()?;
-    (app.extension().is_some_and(|e| e == "app") && app.join(PROGRAM) == exe).then(|| app.to_path_buf())
+    // (Started through the link of the first name, the program is still this app's.)
+    (app.extension().is_some_and(|e| e == "app") && [PROGRAM, OLD_PROGRAM].iter().any(|p| app.join(p) == exe)).then(|| app.to_path_buf())
 }
 
 /// Where newer builds come from: the setting, else where the build script
@@ -216,14 +233,14 @@ pub fn release_in(answer: &str) -> Option<Release> {
 }
 
 /// Where releases that were brought to this Mac are kept until they are
-/// installed, with the updater's notes (`NOTION2_UPDATE_DIR` names another
+/// installed, with the updater's notes (`RUNE_UPDATE_DIR` names another
 /// folder, for a test).
 fn downloads() -> Option<PathBuf> {
     // A unit test keeps its notes in a folder of its own, never the person's.
     #[cfg(test)]
     return Some(tests::DIR.with(|d| d.borrow().clone()));
     #[allow(unreachable_code)]
-    if let Some(dir) = std::env::var_os("NOTION2_UPDATE_DIR").filter(|d| !d.is_empty()) {
+    if let Some(dir) = std::env::var_os("RUNE_UPDATE_DIR").filter(|d| !d.is_empty()) {
         return Some(PathBuf::from(dir));
     }
     Some(PathBuf::from(std::env::var_os("HOME")?).join("Library/Caches/Rune Updates"))
@@ -525,7 +542,7 @@ pub fn tidy_at(own: &Path) {
 
 /// Settings a watcher passes on to the app it opens (for a test on a
 /// throwaway workspace; none are set in normal use).
-const PASSED_ON: [&str; 3] = ["NOTION2_DB", "NOTION2_UPDATE_DIR", "NOTION2_UPDATE_FEED"];
+const PASSED_ON: [&str; 3] = ["RUNE_DB", "RUNE_UPDATE_DIR", "RUNE_UPDATE_FEED"];
 
 /// `open` the app at `app` as a new copy; with `wait`, the program ends when
 /// the app does.
@@ -547,7 +564,7 @@ fn open_app(app: &Path, wait: bool) -> std::io::Result<std::process::Child> {
 /// The old program (kept beside the app) watches the new one start, and
 /// puts itself back if it does not (see `watch`).
 pub fn relaunch(own: &Path, build: u64) -> ! {
-    let watcher = beside(own, "old").map(|old| old.join(PROGRAM)).filter(|p| p.is_file());
+    let watcher = beside(own, "old").and_then(|old| program_of(&old));
     let watching = watcher.and_then(|program| {
         std::process::Command::new(program)
             .arg("--update-watch")
@@ -684,12 +701,12 @@ fn roll_back(own: &Path, build: u64) -> Result<(), String> {
     Ok(())
 }
 
-/// `notion2 --update-watch <app> <build>`: started by `relaunch` from the
+/// `rune --update-watch <app> <build>`: started by `relaunch` from the
 /// old program (kept beside the app), to open the new copy and watch it start.
 pub fn watch_command(args: &[String]) -> i32 {
     let at = args.iter().position(|a| a == "--update-watch").unwrap_or(0);
     let (Some(own), Some(build)) = (args.get(at + 1).map(PathBuf::from), args.get(at + 2).and_then(|b| number(b))) else {
-        eprintln!("Usage: notion2 --update-watch <app> <build>");
+        eprintln!("Usage: rune --update-watch <app> <build>");
         return 2;
     };
     // A moment's wait, so the copy that started this has gone before the
@@ -777,7 +794,7 @@ pub async fn check(now: bool) -> (Option<Update>, Option<String>) {
     // The settings are read here, on the UI thread, where the workspace lives.
     let (own, build, source) = (own_app(), own_build(), source());
     let at = crate::model::now_ms();
-    let feed = std::env::var("NOTION2_UPDATE_FEED").ok().filter(|f| !f.is_empty());
+    let feed = std::env::var("RUNE_UPDATE_FEED").ok().filter(|f| !f.is_empty());
     let ask = from_releases() && (feed.is_some() || online()) && (now || time_to_ask(at));
     if ask {
         crate::store::set_setting("update_asked_at", &at.to_string());
@@ -833,7 +850,7 @@ pub fn describe() -> String {
     }
 }
 
-/// `notion2 --update-check` / `--update-install`: say what is on offer, and
+/// `rune --update-check` / `--update-install`: say what is on offer, and
 /// with `install`, put it in place (no restart).
 pub fn command_line(install: bool) -> i32 {
     println!("{}", describe());
@@ -843,9 +860,9 @@ pub fn command_line(install: bool) -> i32 {
         println!("This copy does not update itself (it is not an installed build).");
         return 0;
     };
-    // NOTION2_UPDATE_FEED names another feed than the published releases
+    // RUNE_UPDATE_FEED names another feed than the published releases
     // (for a test), and has this copy use it even beside a build folder.
-    let test_feed = std::env::var("NOTION2_UPDATE_FEED").ok().filter(|f| !f.is_empty());
+    let test_feed = std::env::var("RUNE_UPDATE_FEED").ok().filter(|f| !f.is_empty());
     let mut found = None;
     if source.exists() && test_feed.is_none() {
         println!("Update source: {}", source.display());
@@ -928,7 +945,7 @@ mod tests {
 
     thread_local! {
         /// The updater's folder for this test (each test runs on a thread of its own).
-        pub(super) static DIR: RefCell<PathBuf> = RefCell::new(std::env::temp_dir().join(format!("notion2-update-notes-{}", std::process::id())));
+        pub(super) static DIR: RefCell<PathBuf> = RefCell::new(std::env::temp_dir().join(format!("rune-update-notes-{}", std::process::id())));
     }
 
     /// Give this test an updater's folder of its own.
@@ -950,7 +967,7 @@ mod tests {
     }
 
     fn temp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("notion2-update-{name}-{}", crate::model::now_ms()));
+        let d = std::env::temp_dir().join(format!("rune-update-{name}-{}", crate::model::now_ms()));
         std::fs::create_dir_all(&d).unwrap();
         d
     }
@@ -958,27 +975,56 @@ mod tests {
     #[test]
     fn only_a_newer_build_of_this_app_is_an_update() {
         let dir = temp("offer");
-        let own = fake_app(&dir.join("Applications"), "Notion 2.0.app", "20261109120000", "old", BUNDLE_ID);
-        let newer = fake_app(&dir.join("build"), "Notion 2.0.app", "20261109130000", "new", BUNDLE_ID);
+        let own = fake_app(&dir.join("Applications"), "Rune.app", "20261109120000", "old", BUNDLE_ID);
+        let newer = fake_app(&dir.join("build"), "Rune.app", "20261109130000", "new", BUNDLE_ID);
         assert_eq!(build_of(&newer), Some(20261109130000));
         assert_eq!(available_at(&own, 20261109120000, &newer).map(|u| u.build), Some(20261109130000));
         assert_eq!(available_at(&own, 20261109130000, &newer), None, "the same build");
         assert_eq!(available_at(&own, 20261109140000, &newer), None, "an older build");
         assert_eq!(available_at(&own, 1, &own), None, "the app is never its own update");
-        let other = fake_app(&dir.join("other"), "Notion 2.0.app", "20991231000000", "x", "com.example.other");
+        let other = fake_app(&dir.join("other"), "Rune.app", "20991231000000", "x", "com.example.other");
         assert_eq!(available_at(&own, 20261109120000, &other), None, "another app");
         assert_eq!(available_at(&own, 20261109120000, &dir.join("missing.app")), None);
-        let dev = fake_app(&dir.join("dev"), "Notion 2.0.app", "0.1.0", "x", BUNDLE_ID);
+        let dev = fake_app(&dir.join("dev"), "Rune.app", "0.1.0", "x", BUNDLE_ID);
         assert_eq!(build_of(&dev), None, "a build with no build number");
         assert_eq!(build_label(20261109133153), "9 Nov 2026, 13:31");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
+    fn an_app_is_known_by_its_program_under_either_name() {
+        let dir = temp("names");
+        // A build of today, as the build script makes it: the program, and
+        // the link of its first name beside it.
+        let today = fake_app(&dir.join("today"), "Rune.app", "20261112120000", "program of today", BUNDLE_ID);
+        std::os::unix::fs::symlink("Rune", today.join(OLD_PROGRAM)).unwrap();
+        assert_eq!(build_of(&today), Some(20261112120000));
+        assert_eq!(program_of(&today), Some(today.join(PROGRAM)));
+        assert!(today.join(OLD_PROGRAM).is_file(), "what a build made before the name Rune asks of an update");
+        // A build made before the name Rune has only the first name.
+        let before = fake_app(&dir.join("Applications"), "Rune.app", "20261111120000", "program of before", BUNDLE_ID);
+        std::fs::rename(before.join(PROGRAM), before.join(OLD_PROGRAM)).unwrap();
+        assert_eq!(build_of(&before), Some(20261111120000));
+        assert_eq!(program_of(&before), Some(before.join(OLD_PROGRAM)));
+        // Each is an update of the other kind, and the copy keeps the link.
+        let update = available_at(&before, 20261111120000, &today).unwrap();
+        install_at(&before, &update).unwrap();
+        assert_eq!(std::fs::read_to_string(before.join(PROGRAM)).unwrap(), "program of today");
+        assert!(before.join(OLD_PROGRAM).symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_link(before.join(OLD_PROGRAM)).unwrap(), PathBuf::from("Rune"));
+        let old = beside(&before, "old").unwrap();
+        assert_eq!(program_of(&old), Some(old.join(OLD_PROGRAM)), "the watcher is the old program, under its own name");
+        // An app with neither is no build of this app.
+        std::fs::remove_file(old.join(OLD_PROGRAM)).unwrap();
+        assert_eq!(build_of(&old), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn an_update_swaps_the_app_and_tidies_up_later() {
         let dir = temp("swap");
-        let own = fake_app(&dir.join("Applications"), "Notion 2.0.app", "20261109120000", "old program", BUNDLE_ID);
-        let newer = fake_app(&dir.join("build"), "Notion 2.0.app", "20261109130000", "new program", BUNDLE_ID);
+        let own = fake_app(&dir.join("Applications"), "Rune.app", "20261109120000", "old program", BUNDLE_ID);
+        let newer = fake_app(&dir.join("build"), "Rune.app", "20261109130000", "new program", BUNDLE_ID);
         let update = available_at(&own, 20261109120000, &newer).unwrap();
         install_at(&own, &update).unwrap();
         assert_eq!(std::fs::read_to_string(own.join(PROGRAM)).unwrap(), "new program");
@@ -991,7 +1037,7 @@ mod tests {
         assert!(!old.exists());
         // Installing again over leftovers of an earlier try works too.
         std::fs::create_dir_all(beside(&own, "new").unwrap()).unwrap();
-        let newest = fake_app(&dir.join("build2"), "Notion 2.0.app", "20261109140000", "newest program", BUNDLE_ID);
+        let newest = fake_app(&dir.join("build2"), "Rune.app", "20261109140000", "newest program", BUNDLE_ID);
         install_at(&own, &available_at(&own, 20261109130000, &newest).unwrap()).unwrap();
         assert_eq!(std::fs::read_to_string(own.join(PROGRAM)).unwrap(), "newest program");
         // A source that is gone fails and leaves the app as it is.

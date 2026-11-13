@@ -1,7 +1,14 @@
 //! Rune: a local-first workspace of notes and a calendar, written in Rust.
-//! (It was called Notion 2.0 at first. The names inside keep that: the
-//! program is `notion2`, the notes folder and the page links too, so that
-//! nothing a person had set up stops working.)
+//! (It was called Notion 2.0 at first, and the names inside are Rune now.
+//! A few identities keep the first name, because the system or a person's
+//! notes hold them: the bundle id `com.jackhagan.notion2` and the helpers'
+//! signing identifiers (macOS keeps what the person allowed by them, and a
+//! build that people have takes an update only with that id: update.rs);
+//! the iCloud container of the iPhone sync (devsync.rs); and the page links
+//! `notion2://page/…` of older notes, which are still read (inline.rs).
+//! For older builds and the AI tools people connected, the app bundle keeps
+//! a link `Contents/MacOS/notion2` to the program (update.rs), and the
+//! notes folder leaves a link "Notion 2.0" where it was (store.rs).)
 
 mod ai;
 mod attach;
@@ -56,15 +63,15 @@ thread_local! {
 }
 
 fn main() {
-    // `notion2 --mcp`: serve the workspace to AI agents over stdio, no window.
+    // `rune --mcp`: serve the workspace to AI agents over stdio, no window.
     if std::env::args().skip(1).any(|arg| arg == "--mcp") {
         std::process::exit(mcp::run_stdio());
     }
-    // `notion2 --meeting-probe`: print which programs use audio now, and
+    // `rune --meeting-probe`: print which programs use audio now, and
     // whether that counts as a Teams meeting (for checking during a real one).
-    // `notion2 --update-check` / `--update-install`: what the updater sees,
+    // `rune --update-check` / `--update-install`: what the updater sees,
     // and the swap itself, with no window and no restart.
-    // `notion2 --update-watch <app> <build>`: the old program, after an
+    // `rune --update-watch <app> <build>`: the old program, after an
     // update, opens the new copy and puts itself back if that does not start.
     if std::env::args().skip(1).any(|arg| arg == "--update-watch") {
         let args: Vec<String> = std::env::args().skip(1).collect();
@@ -73,12 +80,12 @@ fn main() {
     if let Some(flag) = std::env::args().skip(1).find(|arg| arg == "--update-check" || arg == "--update-install") {
         std::process::exit(update::command_line(flag == "--update-install"));
     }
-    // `notion2 --listen-test <report> …`: run the real listener (see listen::test).
+    // `rune --listen-test <report> …`: run the real listener (see listen::test).
     if std::env::args().skip(1).any(|arg| arg == "--listen-test") {
         let args: Vec<String> = std::env::args().skip(1).collect();
         std::process::exit(listen::test(&args));
     }
-    // `notion2 --transcript-into <page id> <lines file> …`: put a transcript
+    // `rune --transcript-into <page id> <lines file> …`: put a transcript
     // kept outside the app into a page (see listen::into_page).
     if std::env::args().skip(1).any(|arg| arg == "--transcript-into") {
         let args: Vec<String> = std::env::args().skip(1).collect();
@@ -89,6 +96,9 @@ fn main() {
         return;
     }
 
+    // The notes folder gets the app's name. Only here: the app itself,
+    // before it opens the notes file (never the connector or a command above).
+    store::move_folder();
     let store = match store::Store::open(store::Store::default_path()) {
         Ok(s) => s,
         Err(e) => {
@@ -105,11 +115,11 @@ fn main() {
     store::install(store);
     meeting::load_setting();
     // Sync with the iPhone, when it was turned on in Settings.
-    if std::env::var_os("NOTION2_SELFTEST").is_none() {
+    if std::env::var_os("RUNE_SELFTEST").is_none() {
         devsync::start_from_settings();
     }
     // A newer build waiting? Install it and start again (never in a test run).
-    if std::env::var_os("NOTION2_SELFTEST").is_none() {
+    if std::env::var_os("RUNE_SELFTEST").is_none() {
         update::at_launch();
     }
 
@@ -128,10 +138,10 @@ fn main() {
 }
 
 /// A developer self-test that stays out of the person's way: its window is
-/// behind the others and does not take the keyboard. (NOTION2_SELFTEST_FRONT=1
+/// behind the others and does not take the keyboard. (RUNE_SELFTEST_FRONT=1
 /// gives the test its window in front, as it was before.)
 pub fn quiet_test() -> bool {
-    std::env::var_os("NOTION2_SELFTEST").is_some() && std::env::var_os("NOTION2_SELFTEST_FRONT").is_none()
+    std::env::var_os("RUNE_SELFTEST").is_some() && std::env::var_os("RUNE_SELFTEST_FRONT").is_none()
 }
 
 /// Settings for every window: see-through glass behind the sidebar and top

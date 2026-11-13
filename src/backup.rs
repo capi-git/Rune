@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn backups_are_complete_copies_and_only_the_newest_are_kept() {
-        let dir = std::env::temp_dir().join(format!("notion2-backup-test-{}", now_ms()));
+        let dir = std::env::temp_dir().join(format!("rune-backup-test-{}", now_ms()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("workspace.db");
         let store = Store::open(db.clone()).unwrap();

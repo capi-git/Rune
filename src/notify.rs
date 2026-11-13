@@ -66,7 +66,7 @@ pub fn available() -> bool {
 
 define_class!(
     #[unsafe(super(NSObject))]
-    #[name = "Notion2NotificationDelegate"]
+    #[name = "RuneNotificationDelegate"]
     struct Delegate;
 
     unsafe impl NSObjectProtocol for Delegate {}

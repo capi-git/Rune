@@ -13,7 +13,9 @@ BUNDLE_ID="com.jackhagan.notion2.mobile"
 SIM="${SIM:-booted}"
 SOURCE="${1:-}"
 if [ -z "$SOURCE" ]; then
-  BACKUPS="$HOME/Library/Application Support/Notion 2.0/Backups"
+  # (The Mac app's folder. It was "Notion 2.0" at first: the Mac app moves it
+  # at its first start, and a link of that name still leads here.)
+  BACKUPS="$HOME/Library/Application Support/Rune/Backups"
   SOURCE="$(ls -t "$BACKUPS"/workspace-*.db 2>/dev/null | head -1 || true)"
   [ -n "$SOURCE" ] || { echo "No backup in $BACKUPS. In the Mac app: Settings, Back up now." >&2; exit 1; }
 fi

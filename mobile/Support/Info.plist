@@ -2,7 +2,9 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- A workspace file sent to the iPhone (AirDrop, Files) can be opened with this app. -->
+	<!-- A workspace file sent to the iPhone (AirDrop, Files) can be opened with this app.
+	     The identifiers in this file keep the app's first name ("notion2"): the
+	     system and Apple know the app, its file type and its iCloud folder by them. -->
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>
@@ -56,8 +58,9 @@
 			<string>Any</string>
 		</dict>
 	</dict>
-	<!-- The QR code that the Mac shows holds a link "notion2://pair?…": the
-	     camera opens the app with it (docs/sync-wifi.md). -->
+	<!-- The QR code that the Mac shows holds a link "rune://pair?…" (a Mac from
+	     before the app's rename: "notion2://pair?…"): the camera opens the app
+	     with it (docs/sync-wifi.md). -->
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

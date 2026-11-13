@@ -1,7 +1,7 @@
 //! Listening to a meeting (or to the person, for the voice box).
 //!
-//! The hearing is done by a small program of its own, `n2listen`
-//! (helper/n2listen.swift, built into the app beside this one): it hears the
+//! The hearing is done by a small program of its own, `rune-listen`
+//! (helper/rune-listen.swift, built into the app beside this one): it hears the
 //! microphone and, for a meeting, the sound the Mac plays, turns speech into
 //! text on this Mac, and prints what it hears a line at a time. This module
 //! starts it, reads those lines, and keeps the transcript.
@@ -61,7 +61,7 @@ pub fn parse(line: &str) -> Option<Heard> {
 
 /// Where the listener program is: beside this one, inside the app.
 pub fn helper() -> Option<PathBuf> {
-    let path = std::env::current_exe().ok()?.parent()?.join("n2listen");
+    let path = std::env::current_exe().ok()?.parent()?.join("rune-listen");
     path.is_file().then_some(path)
 }
 
@@ -79,7 +79,7 @@ pub fn on_this_mac() -> Option<bool> {
     }
 }
 
-/// What `n2listen --check` says about recognition on this Mac.
+/// What `rune-listen --check` says about recognition on this Mac.
 fn on_this_mac_in(answer: &str) -> Option<bool> {
     serde_json::from_str::<serde_json::Value>(answer.trim()).ok()?.get("on_device")?.as_bool()
 }
@@ -87,7 +87,7 @@ fn on_this_mac_in(answer: &str) -> Option<bool> {
 /// Ask the listener program, off the calling thread. It asks for no
 /// permission and hears nothing.
 pub fn learn_where_speech_goes() {
-    if testing() || std::env::var_os("NOTION2_SELFTEST").is_some() {
+    if testing() || std::env::var_os("RUNE_SELFTEST").is_some() {
         return;
     }
     let Some(helper) = helper() else { return };
@@ -108,9 +108,9 @@ pub fn where_speech_goes() -> &'static str {
 }
 
 /// A test run hears a stand-in, unless it asks for the real listener
-/// (`NOTION2_REAL_LISTENER`, to prove the real one end to end).
+/// (`RUNE_REAL_LISTENER`, to prove the real one end to end).
 fn testing() -> bool {
-    std::env::var_os("NOTION2_SELFTEST").is_some() && std::env::var_os("NOTION2_REAL_LISTENER").is_none()
+    std::env::var_os("RUNE_SELFTEST").is_some() && std::env::var_os("RUNE_REAL_LISTENER").is_none()
 }
 
 /// Whether the app's own listener hears the speaker, and not the Mac's
@@ -120,7 +120,7 @@ pub fn own_ears() -> bool {
     match crate::store::setting("voice_engine").as_deref() {
         Some("builtin") => available(),
         Some("dictation") => false,
-        _ => std::env::var_os("NOTION2_SELFTEST").is_none() && helper().is_some(),
+        _ => std::env::var_os("RUNE_SELFTEST").is_none() && helper().is_some(),
     }
 }
 
@@ -226,7 +226,7 @@ pub fn start_from(source: Source) -> Result<(Listener, UnboundedReceiver<Heard>)
     Ok((Listener::Program { child, input }, rx))
 }
 
-/// `notion2 --listen-test <report> [--file <sound file>] [--seconds <n>]`: run
+/// `rune --listen-test <report> [--file <sound file>] [--seconds <n>]`: run
 /// the real listener and write every line it says to `report`, with no window.
 /// With a sound file it hears that file in place of the microphone; without
 /// one it hears the microphone for `n` seconds (8 if not given), and with
@@ -713,7 +713,7 @@ pub fn keep_changes(page: &[Block], toggle: Option<&Id>, kept: usize, written: &
     *written = heard;
 }
 
-/// `notion2 --transcript-into <page id> <lines file> [--notes <markdown
+/// `rune --transcript-into <page id> <lines file> [--notes <markdown
 /// file>] [--fresh-notes]`: put a transcript kept outside the app into a
 /// page's "Transcript" toggle, with no window. Each line of the file is
 /// `seconds<TAB>me|others<TAB>words` (as made from `--listen-test` reports).
@@ -723,7 +723,7 @@ pub fn keep_changes(page: &[Block], toggle: Option<&Id>, kept: usize, written: &
 pub fn into_page(args: &[String]) -> i32 {
     let value = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let (Some(page), Some(file)) = (value("--transcript-into"), args.iter().position(|a| a == "--transcript-into").and_then(|i| args.get(i + 2)).cloned()) else {
-        eprintln!("usage: notion2 --transcript-into <page id> <lines file> [--notes <markdown file>] [--fresh-notes]");
+        eprintln!("usage: rune --transcript-into <page id> <lines file> [--notes <markdown file>] [--fresh-notes]");
         return 2;
     };
     let text = match std::fs::read_to_string(&file) {

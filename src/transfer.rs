@@ -141,7 +141,7 @@ fn rewrite_page_urls(text: &str, href: impl Fn(&str) -> Option<String>) -> Strin
 }
 
 /// An empty Excalidraw scene, for a drawing nobody has drawn in yet.
-const EMPTY_SCENE: &str = r#"{"type":"excalidraw","version":2,"source":"notion2","elements":[],"appState":{},"files":{}}"#;
+const EMPTY_SCENE: &str = r#"{"type":"excalidraw","version":2,"source":"rune","elements":[],"appState":{},"files":{}}"#;
 
 /// The kept pictures a page shows outside its lines: its cover, when it is
 /// the person's own picture, and the pictures in the cells of its tables.
@@ -480,7 +480,7 @@ fn is_external(target: &str) -> bool {
 /// `space`. The top page gets `position` among the space's top pages.
 pub fn import(path: &Path, space: &str, position: f64) -> Result<Imported, String> {
     let is_zip = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip"));
-    let temp = std::env::temp_dir().join(format!("notion2-import-{}", now_ms()));
+    let temp = std::env::temp_dir().join(format!("rune-import-{}", now_ms()));
     let result = (|| {
         let (nodes, wrapper_title) = if is_zip {
             std::fs::create_dir_all(&temp).map_err(|e| e.to_string())?;
@@ -648,7 +648,7 @@ mod tests {
     use super::*;
 
     fn temp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("notion2-transfer-{name}-{}", now_ms()));
+        let d = std::env::temp_dir().join(format!("rune-transfer-{name}-{}", now_ms()));
         std::fs::create_dir_all(&d).unwrap();
         d
     }

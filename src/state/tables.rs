@@ -149,7 +149,7 @@ impl AppState {
     /// Put the caret in a cell, once the page shows it.
     fn focus_cell(&self, id: &str, r: usize, c: usize) {
         document::eval(&format!(
-            "requestAnimationFrame(()=>requestAnimationFrame(()=>window.__n2 && window.__n2.focusCell({}, {r}, {c})))",
+            "requestAnimationFrame(()=>requestAnimationFrame(()=>window.__rune && window.__rune.focusCell({}, {r}, {c})))",
             serde_json::to_string(id).unwrap_or_default()
         ));
     }

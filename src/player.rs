@@ -48,7 +48,7 @@ thread_local! {
 /// when the player is ready and when it cannot play (see `words`).
 pub fn page(video: &Video) -> String {
     // A test run that plays a real video plays it without sound.
-    let mute = u8::from(std::env::var_os("NOTION2_SELFTEST").is_some());
+    let mute = u8::from(std::env::var_os("RUNE_SELFTEST").is_some());
     format!(
         r#"<!doctype html>
 <html><head><meta charset="utf-8"><meta name="referrer" content="strict-origin-when-cross-origin">

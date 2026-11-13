@@ -32,9 +32,9 @@ fn send(action: Sel) -> bool {
 
 /// Whether Dictation may really be started now: always, except in a test
 /// run, which must not make the Mac listen (unless it asks for exactly that
-/// with `NOTION2_REAL_DICTATION`, to prove the real thing).
+/// with `RUNE_REAL_DICTATION`, to prove the real thing).
 pub fn allowed() -> bool {
-    std::env::var_os("NOTION2_SELFTEST").is_none() || std::env::var_os("NOTION2_REAL_DICTATION").is_some()
+    std::env::var_os("RUNE_SELFTEST").is_none() || std::env::var_os("RUNE_REAL_DICTATION").is_some()
 }
 
 /// Start Dictation for the text box in front. False if this macOS can't.

@@ -2,7 +2,7 @@
 """Write the icon set of the iPhone app from the desktop app's.
 
 Reads `src/ui/icons.rs` (the drawings, the colours and the old emoji icons)
-and writes `mobile/Core/Sources/Notion2Core/IconData.swift`. Run it again when
+and writes `mobile/Core/Sources/RuneCore/IconData.swift`. Run it again when
 an icon is added or changed on the desktop:
 
     python3 mobile/scripts/gen-icons.py
@@ -14,7 +14,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "src" / "ui" / "icons.rs"
-TARGET = ROOT / "mobile" / "Core" / "Sources" / "Notion2Core" / "IconData.swift"
+TARGET = ROOT / "mobile" / "Core" / "Sources" / "RuneCore" / "IconData.swift"
 
 
 def section(text: str, start: str, end: str) -> str:

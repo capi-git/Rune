@@ -10,7 +10,7 @@
   const testing = params.get('test') === '1';
   const { Excalidraw, getSceneVersion, serializeAsJSON, restoreElements } = window.ExcalidrawLib;
   const h = React.createElement;
-  const tell = (kind, extra) => parent.postMessage(Object.assign({ n2draw: kind }, extra), '*');
+  const tell = (kind, extra) => parent.postMessage(Object.assign({ runedraw: kind }, extra), '*');
   const dark = matchMedia('(prefers-color-scheme: dark)');
 
   let api = null;
@@ -116,22 +116,22 @@
       onChange,
       UIOptions: { canvasActions: { loadScene: false, saveToActiveFile: false, toggleTheme: false, export: { saveFileToDisk: true } } },
       renderTopRightUI: () =>
-        h('button', { className: 'n2-expand', title: expanded ? 'Back to the page' : 'Expand', onClick: () => tell('expand') }, icon(expanded)),
+        h('button', { className: 'rune-expand', title: expanded ? 'Back to the page' : 'Expand', onClick: () => tell('expand') }, icon(expanded)),
     });
   }
 
   addEventListener('message', (e) => {
     if (e.source !== parent || !e.data || typeof e.data !== 'object') return;
     const d = e.data;
-    if (d.n2draw === 'load') load(typeof d.json === 'string' ? d.json : '');
-    else if (d.n2draw === 'expanded') setExpandedState(!!d.on);
+    if (d.runedraw === 'load') load(typeof d.json === 'string' ? d.json : '');
+    else if (d.runedraw === 'expanded') setExpandedState(!!d.on);
     // (A press outside the drawing: see the page script.)
-    else if (d.n2draw === 'flush') {
+    else if (d.runedraw === 'flush') {
       if (timer) save();
     }
-    else if (testing && d.n2draw === 'probe') probe();
-    else if (testing && d.n2draw === 'test-add') testAdd();
-    else if (testing && d.n2draw === 'test-expand') document.querySelector('.n2-expand')?.click();
+    else if (testing && d.runedraw === 'probe') probe();
+    else if (testing && d.runedraw === 'test-add') testAdd();
+    else if (testing && d.runedraw === 'test-expand') document.querySelector('.rune-expand')?.click();
   });
 
   // ----- only in the app's self-test -----
@@ -145,7 +145,7 @@
         elements: api ? api.getSceneElements().length : -1,
         dark: !!document.querySelector('.excalidraw.theme--dark'),
         font: fonts.length > 0,
-        expandButton: !!document.querySelector('.n2-expand'),
+        expandButton: !!document.querySelector('.rune-expand'),
       },
     });
   }

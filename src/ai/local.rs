@@ -37,9 +37,9 @@ pub fn binary_name(provider: Provider) -> &'static str {
 // Finding the tools
 // ---------------------------------------------------------------------------
 
-const MARK_A: &str = "__N2_PATH_";
-const START: &str = "__N2_PATH_START__";
-const END: &str = "__N2_PATH_END__";
+const MARK_A: &str = "__RUNE_PATH_";
+const START: &str = "__RUNE_PATH_START__";
+const END: &str = "__RUNE_PATH_END__";
 
 /// Pull the PATH printed between the markers out of a login shell's output,
 /// ignoring anything the shell's startup files printed around it.
@@ -272,14 +272,14 @@ pub fn claude_args(system: &str, model: &str, effort: &str, optional: bool, tool
 /// (`--mcp`), on the same notes, with the file for the record of changes.
 pub fn tools_config(tools: &Tools) -> String {
     // (A test names the program: the program of a test is not the app.)
-    let program = std::env::var("NOTION2_TOOLS_PROGRAM")
+    let program = std::env::var("RUNE_TOOLS_PROGRAM")
         .ok()
         .filter(|p| !p.is_empty())
-        .unwrap_or_else(|| std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "notion2".into()));
+        .unwrap_or_else(|| std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "rune".into()));
     let mut env = serde_json::Map::new();
     env.insert(crate::mcp::JOURNAL_ENV.into(), Value::String(tools.journal.display().to_string()));
-    if let Some(db) = std::env::var_os("NOTION2_DB").filter(|d| !d.is_empty()) {
-        env.insert("NOTION2_DB".into(), Value::String(db.to_string_lossy().into_owned()));
+    if let Some(db) = std::env::var_os("RUNE_DB").filter(|d| !d.is_empty()) {
+        env.insert("RUNE_DB".into(), Value::String(db.to_string_lossy().into_owned()));
     }
     serde_json::json!({ "mcpServers": { super::TOOLS_NAME: { "command": program, "args": ["--mcp"], "env": env } } }).to_string()
 }
@@ -704,7 +704,7 @@ struct TempDir(PathBuf);
 
 impl TempDir {
     fn new() -> Result<Self, String> {
-        let dir = std::env::temp_dir().join(format!("notion2-ai-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("rune-ai-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't create a work folder: {e}"))?;
         Ok(TempDir(dir))
     }
@@ -1016,12 +1016,12 @@ mod tests {
 
     #[test]
     fn marked_path_ignores_shell_noise() {
-        let out = "Welcome!\nlast login...\n__N2_PATH_START__/opt/homebrew/bin:/usr/bin__N2_PATH_END__\nbye\n";
+        let out = "Welcome!\nlast login...\n__RUNE_PATH_START__/opt/homebrew/bin:/usr/bin__RUNE_PATH_END__\nbye\n";
         assert_eq!(parse_marked_path(out).as_deref(), Some("/opt/homebrew/bin:/usr/bin"));
         assert_eq!(parse_marked_path("no markers here"), None);
-        assert_eq!(parse_marked_path("__N2_PATH_START____N2_PATH_END__"), None);
+        assert_eq!(parse_marked_path("__RUNE_PATH_START____RUNE_PATH_END__"), None);
         // An echoed command shows the split markers, never the joined ones.
-        let echoed = "+zsh:1> printf '\\n%s%s%s%s%s\\n' __N2_PATH_ START__ /bin __N2_PATH_ END__\n__N2_PATH_START__/bin__N2_PATH_END__\n";
+        let echoed = "+zsh:1> printf '\\n%s%s%s%s%s\\n' __RUNE_PATH_ START__ /bin __RUNE_PATH_ END__\n__RUNE_PATH_START__/bin__RUNE_PATH_END__\n";
         assert_eq!(parse_marked_path(echoed).as_deref(), Some("/bin"));
     }
 
@@ -1066,7 +1066,7 @@ mod tests {
     /// prints the lines it is given, then does what `then` says.
     fn stand_in(name: &str, lines: &[&str], then: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("n2-stand-in-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rune-stand-in-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("tool.sh");
         let mut script = String::from("#!/bin/sh\ncat > /dev/null\n");
@@ -1112,7 +1112,7 @@ mod tests {
         // with the tools of Rune may have, and does not say that.
         let (how, _, _) = run(stand_in("silent-plain", &[text], "sleep 60"));
         assert!(matches!(&how, Attempt::Failed(why) if why.contains("Nothing was changed")), "{how:?}");
-        let tools = Tools { journal: std::env::temp_dir().join("n2-stand-in-none.jsonl") };
+        let tools = Tools { journal: std::env::temp_dir().join("rune-stand-in-none.jsonl") };
         let path = stand_in("silent-tools", &[text], "sleep 60");
         let (tx, _rx) = futures_channel::mpsc::unbounded();
         let how = super::super::runtime().block_on(async { attempt(Provider::ClaudeCode, &path, "", "", "", "Hello", &[], Some(&tools), &[], &tx).await });
@@ -1228,7 +1228,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"x
         assert!(t.windows(2).any(|w| w[0] == "--allowedTools" && w[1] == "mcp__rune"));
         let config: Value = serde_json::from_str(&t[t.iter().position(|x| x == "--mcp-config").unwrap() + 1]).unwrap();
         assert_eq!(config["mcpServers"]["rune"]["args"][0], "--mcp");
-        assert_eq!(config["mcpServers"]["rune"]["env"]["NOTION2_AI_JOURNAL"], "/tmp/run.jsonl");
+        assert_eq!(config["mcpServers"]["rune"]["env"]["RUNE_AI_JOURNAL"], "/tmp/run.jsonl");
         // A use of a tool in the answer of Claude Code is a step.
         let mut parser = ClaudeParser::default();
         let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"mcp__rune__create_page","input":{"title":"Fitness"}}]}}"#;
@@ -1253,7 +1253,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"x
         let ct = codex_args(Path::new("/tmp/x"), "", "", true, Some(&tools));
         assert!(ct.windows(2).any(|w| w[0] == "-c" && w[1].starts_with("mcp_servers.rune.command=\"")));
         assert!(ct.windows(2).any(|w| w[0] == "-c" && w[1] == "mcp_servers.rune.args=[\"--mcp\"]"));
-        assert!(ct.windows(2).any(|w| w[0] == "-c" && w[1].starts_with("mcp_servers.rune.env={") && w[1].contains("NOTION2_AI_JOURNAL=\"/tmp/run.jsonl\"")), "{ct:?}");
+        assert!(ct.windows(2).any(|w| w[0] == "-c" && w[1].starts_with("mcp_servers.rune.env={") && w[1].contains("RUNE_AI_JOURNAL=\"/tmp/run.jsonl\"")), "{ct:?}");
         assert_eq!(ct.last().map(String::as_str), Some("-"));
         let mut cp = CodexParser::default();
         let started = r#"{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"rune","tool":"create_page","arguments":{"title":"Fitness"},"status":"in_progress"}}"#;
@@ -1268,7 +1268,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"x
         assert_eq!(message["message"]["content"][0]["source"]["data"], "AAAA");
         assert_eq!(message["message"]["content"][1]["text"], "What is this?");
         // …and to Codex as a file.
-        let dir = std::env::temp_dir().join(format!("n2-pictures-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rune-pictures-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let files = picture_files(&dir, &[shot]);
         assert!(files.len() == 1 && files[0].ends_with("picture-1.png") && std::fs::read(&files[0]).unwrap() == vec![0, 0, 0]);
@@ -1342,7 +1342,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"x
         assert!(pages.iter().all(|(_, text)| text.trim().len() > 20), "each sub-page has its workout");
         let made: Vec<(String, String)> = pages.iter().enumerate().map(|(i, (n, _))| (n.clone(), format!("p{i}"))).collect();
         let linked = link_pages(&main, &made);
-        let found = made.iter().filter(|(_, id)| linked.contains(&format!("notion2://page/{id}"))).count();
+        let found = made.iter().filter(|(_, id)| linked.contains(&format!("rune://page/{id}"))).count();
         eprintln!("linked in the page: {found} of {}\n{linked}", made.len());
         assert_eq!(found, 3, "the page links to each sub-page by its name");
         assert!(!main.contains("turn each workout"), "the page no longer tells the person to do it");
@@ -1355,15 +1355,15 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"x
     #[ignore = "calls the installed AI tools"]
     fn live_agent_tools() {
         use super::super::{build_agent_messages, start_with, Tools};
-        let dir = std::env::temp_dir().join(format!("n2-live-agent-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rune-live-agent-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("ws.db");
         let journal = dir.join("run.jsonl");
-        let program = std::env::current_dir().unwrap().join("target/debug/notion2");
+        let program = std::env::current_dir().unwrap().join("target/debug/rune");
         assert!(program.exists(), "build the app first: {}", program.display());
-        std::env::set_var("NOTION2_DB", &db);
-        std::env::set_var("NOTION2_TOOLS_PROGRAM", &program);
+        std::env::set_var("RUNE_DB", &db);
+        std::env::set_var("RUNE_TOOLS_PROGRAM", &program);
         // The notes: a page the person is on, and two pages about running.
         let store = crate::store::Store::open(db.clone()).unwrap();
         let mut server = crate::mcp::Server::new(store);
@@ -1416,28 +1416,28 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"x
 
     /// The real tool asked for a tracker: the table it makes must be a
     /// database (kinds, coloured options, money, totals, a name), not a
-    /// plain grid. `N2_ASK` changes the request; `N2_KEEP` names a folder
+    /// plain grid. `RUNE_ASK` changes the request; `RUNE_KEEP` names a folder
     /// to keep the notes in (to look at them in the app).
     #[test]
     #[ignore = "calls the installed AI tools"]
     fn live_agent_table() {
         use super::super::{build_agent_messages, start_with, Tools};
-        let dir = std::env::var_os("N2_KEEP").map(std::path::PathBuf::from).unwrap_or_else(|| std::env::temp_dir().join(format!("n2-live-table-{}", std::process::id())));
+        let dir = std::env::var_os("RUNE_KEEP").map(std::path::PathBuf::from).unwrap_or_else(|| std::env::temp_dir().join(format!("rune-live-table-{}", std::process::id())));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("ws.db");
         let journal = dir.join("run.jsonl");
-        let program = std::env::current_dir().unwrap().join("target/debug/notion2");
+        let program = std::env::current_dir().unwrap().join("target/debug/rune");
         assert!(program.exists(), "build the app first: {}", program.display());
-        std::env::set_var("NOTION2_DB", &db);
-        std::env::set_var("NOTION2_TOOLS_PROGRAM", &program);
+        std::env::set_var("RUNE_DB", &db);
+        std::env::set_var("RUNE_TOOLS_PROGRAM", &program);
         let store = crate::store::Store::open(db.clone()).unwrap();
         let mut server = crate::mcp::Server::new(store);
         let id_of = |v: serde_json::Value| serde_json::from_str::<Value>(v["content"][0]["text"].as_str().unwrap()).unwrap()["id"].as_str().unwrap().to_string();
         let here = id_of(server.tool("create_page", &serde_json::json!({ "title": "Home", "markdown": "My notes." })));
         drop(server);
 
-        let asked = std::env::var("N2_ASK").unwrap_or_else(|_| "Make me a trading journal to log my trades.".to_string());
+        let asked = std::env::var("RUNE_ASK").unwrap_or_else(|_| "Make me a trading journal to log my trades.".to_string());
         let messages = build_agent_messages(&here, "Home", "# Home\n\nMy notes.", &asked, "2026-11-11 09:30, Wednesday");
         let prefs = super::super::Prefs { provider: Some(Provider::ClaudeCode), ..Default::default() };
         let started = Instant::now();
@@ -1465,7 +1465,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"x
                 }
             }
         }
-        if let Some(keep) = std::env::var_os("N2_KEEP") {
+        if let Some(keep) = std::env::var_os("RUNE_KEEP") {
             let _ = std::fs::write(std::path::Path::new(&keep).join("answer.md"), &text);
         }
         let table = tables.first().expect("a table");
@@ -1473,35 +1473,35 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"x
         assert!(!table.name.is_empty(), "the table has a name");
         assert!((0..table.columns()).any(|c| !table.column(c).options.is_empty() && table.column(c).options.iter().any(|o| o.color != crate::table::Color::Default)), "a choice column with colours");
         assert!((0..table.columns()).any(|c| table.kind(c) == crate::table::Kind::Date), "a date column");
-        assert!(std::env::var_os("N2_ASK").is_some() || (0..table.columns()).any(|c| !table.column(c).format.is_empty()), "a money column");
+        assert!(std::env::var_os("RUNE_ASK").is_some() || (0..table.columns()).any(|c| !table.column(c).format.is_empty()), "a money column");
         assert!((0..table.columns()).any(|c| table.column(c).total.is_some()), "a total at the foot");
     }
 
     /// The real tool on one request, with the time of each thing it sends:
     /// to see where a slow run spends its time. The request, the model and
-    /// the strength come from N2_LIVE_REQUEST, N2_LIVE_MODEL, N2_LIVE_EFFORT.
+    /// the strength come from RUNE_LIVE_REQUEST, RUNE_LIVE_MODEL, RUNE_LIVE_EFFORT.
     /// Build the app first (`cargo build`).
     #[test]
     #[ignore = "calls the installed AI tools"]
     fn live_agent_timeline() {
         use super::super::{build_agent_messages, start_with, Tools};
-        let dir = std::env::temp_dir().join(format!("n2-live-time-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rune-live-time-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("ws.db");
         let journal = dir.join("run.jsonl");
-        let program = std::env::current_dir().unwrap().join("target/debug/notion2");
+        let program = std::env::current_dir().unwrap().join("target/debug/rune");
         assert!(program.exists(), "build the app first: {}", program.display());
-        std::env::set_var("NOTION2_DB", &db);
-        std::env::set_var("NOTION2_TOOLS_PROGRAM", &program);
+        std::env::set_var("RUNE_DB", &db);
+        std::env::set_var("RUNE_TOOLS_PROGRAM", &program);
         let store = crate::store::Store::open(db.clone()).unwrap();
         let mut server = crate::mcp::Server::new(store);
         let made = server.tool("create_page", &serde_json::json!({ "title": "" }));
         let here = serde_json::from_str::<Value>(made["content"][0]["text"].as_str().unwrap()).unwrap()["id"].as_str().unwrap().to_string();
         drop(server);
-        let asked = std::env::var("N2_LIVE_REQUEST").unwrap_or_else(|_| "create me a trading journal".into());
-        let model = std::env::var("N2_LIVE_MODEL").unwrap_or_default();
-        let effort = std::env::var("N2_LIVE_EFFORT").unwrap_or_default();
+        let asked = std::env::var("RUNE_LIVE_REQUEST").unwrap_or_else(|_| "create me a trading journal".into());
+        let model = std::env::var("RUNE_LIVE_MODEL").unwrap_or_default();
+        let effort = std::env::var("RUNE_LIVE_EFFORT").unwrap_or_default();
         let messages = build_agent_messages(&here, "", "", &asked, "2026-11-10 19:50, Tuesday");
         let prefs = super::super::Prefs { provider: Some(Provider::ClaudeCode), claude_model: model.clone(), effort: effort.clone(), ..Default::default() };
         let started = Instant::now();
@@ -1536,14 +1536,14 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"x
     }
 
     /// The real tool with a picture: it must say what is in it. The picture
-    /// is the file named by N2_LIVE_PICTURE (a PNG), the words that must be
-    /// in the answer are in N2_LIVE_EXPECT.
+    /// is the file named by RUNE_LIVE_PICTURE (a PNG), the words that must be
+    /// in the answer are in RUNE_LIVE_EXPECT.
     #[test]
     #[ignore = "calls the installed AI tools"]
     fn live_picture() {
         use base64::Engine;
-        let file = std::env::var("N2_LIVE_PICTURE").expect("N2_LIVE_PICTURE names a PNG file");
-        let expect = std::env::var("N2_LIVE_EXPECT").unwrap_or_default();
+        let file = std::env::var("RUNE_LIVE_PICTURE").expect("RUNE_LIVE_PICTURE names a PNG file");
+        let expect = std::env::var("RUNE_LIVE_EXPECT").unwrap_or_default();
         let data = base64::engine::general_purpose::STANDARD.encode(std::fs::read(&file).unwrap());
         let picture = Picture { id: "p1".into(), media: "image/png".into(), data };
         let messages = super::super::build_messages(&super::super::AiAction::Ask, "# Notes", "", "What words are in the picture? Write them out.");

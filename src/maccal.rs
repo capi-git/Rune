@@ -2,7 +2,7 @@
 //! iCloud, Google or Outlook accounts it holds), shown beside the app's own
 //! events when the person turns that on in Settings. It is off until then.
 //!
-//! The reading is done by a small helper beside the app (helper/n2cal.swift),
+//! The reading is done by a small helper beside the app (helper/rune-cal.swift),
 //! so macOS asks the person one time, in the app's name. The events are only
 //! read: they are not kept in the notes file, not given to an AI tool, and
 //! never changed. A notes page can be made for one of them; which page goes
@@ -153,7 +153,7 @@ pub fn read(json: &str) -> Fetched {
 
 /// The helper: beside the app's own program, in the installed app.
 fn helper() -> Option<PathBuf> {
-    let beside = std::env::current_exe().ok()?.parent()?.join("n2cal");
+    let beside = std::env::current_exe().ok()?.parent()?.join("rune-cal");
     beside.is_file().then_some(beside)
 }
 
@@ -163,7 +163,7 @@ pub fn available() -> bool {
 }
 
 fn in_a_test() -> bool {
-    std::env::var_os("NOTION2_SELFTEST").is_some()
+    std::env::var_os("RUNE_SELFTEST").is_some()
 }
 
 /// What a test run reads in place of the Mac's calendars: two calendars and

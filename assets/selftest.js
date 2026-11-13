@@ -1,5 +1,5 @@
-// Developer self-test, run inside the real app window when NOTION2_SELFTEST is
-// set (always with a throwaway workspace via NOTION2_DB). It clicks and types
+// Developer self-test, run inside the real app window when RUNE_SELFTEST is
+// set (always with a throwaway workspace via RUNE_DB). It clicks and types
 // through the interface like a person would and reports what worked.
 
 const results = [];
@@ -37,7 +37,7 @@ const until = async (fn, ms = 2500, step = 30) => {
 const check = (name, ok, detail = '') => results.push({ name, ok: !!ok, detail: String(detail ?? '') });
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
-const T = () => window.__n2_test;
+const T = () => window.__rune_test;
 // New Page from Speech (⇧⌘D, in the File menu).
 const speakPage = () => T().command('voice');
 const key = (el, k, opts = {}) => el.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...opts }));
@@ -83,8 +83,8 @@ const views = {};
 // sends hover events of its own when the page changes under it (found when
 // one closed the floating sidebar in the middle of its check).
 for (const type of ['mouseover', 'mouseout', 'mousemove']) window.addEventListener(type, (e) => e.isTrusted && e.stopImmediatePropagation(), true);
-// NOTION2_SELFTEST_ONLY: run only the checks whose name holds one of these.
-const ONLY = String(window.__n2_only || '').split(',').map((o) => o.trim()).filter(Boolean);
+// RUNE_SELFTEST_ONLY: run only the checks whose name holds one of these.
+const ONLY = String(window.__rune_only || '').split(',').map((o) => o.trim()).filter(Boolean);
 const run = async (name, fn) => {
   if (ONLY.length && !ONLY.some((o) => name.includes(o))) return;
   dioxus.send({ progress: `${name} [${document.visibilityState}${document.hasFocus() ? ', focused' : ''}]` });
@@ -1516,6 +1516,28 @@ await run('Event panel', async () => {
   check('Nothing in the panel is wider than the panel', body.scrollWidth <= body.clientWidth + 1, `${body.scrollWidth} > ${body.clientWidth}`);
   const named = ['#ev-day', '#ev-start', '#ev-end', '#ev-repeat', '#ev-remind', '#ev-delete', '#ev-link', '#ev-notes'].filter((sel) => !($(sel)?.getAttribute('aria-label') || '').trim());
   check('Each control of the panel says what it is', named.length === 0, named.join(', '));
+  // "@" in the notes lists the pages, in a box with the app's own colours
+  // and letters. (The list was put outside the app's element: black words
+  // with no box, over what was behind them.)
+  {
+    const notes = $('#ev-notes');
+    const was = notes.value;
+    notes.focus();
+    notes.value = was + '@';
+    notes.setSelectionRange(notes.value.length, notes.value.length);
+    notes.dispatchEvent(new InputEvent('input', { bubbles: true, data: '@', inputType: 'insertText' }));
+    const list = await until(() => $('.at-list:not([hidden])'), 2000);
+    const look = list ? getComputedStyle(list) : null;
+    check(
+      '"@" in the notes of an event opens the list of pages, with the look of the app',
+      !!list && !!list.closest('.app') && look.backgroundColor !== 'rgba(0, 0, 0, 0)' && look.fontFamily === getComputedStyle($('.app')).fontFamily && $$('.at-row', list).length > 0,
+      list ? `${look.backgroundColor} | ${look.fontFamily} | in app: ${!!list.closest('.app')} | rows ${$$('.at-row', list).length}` : 'no list',
+    );
+    notes.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    notes.value = was;
+    notes.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    await wait(60);
+  }
   check('A row says its value too', $('#ev-repeat').getAttribute('aria-label') === 'Repeat: Does not repeat' && /^Starts at /.test($('#ev-start').getAttribute('aria-label')), `${$('#ev-repeat').getAttribute('aria-label')} | ${$('#ev-start').getAttribute('aria-label')}`);
 
   // A menu: Rune's own, the chosen row grey and in focus, the arrows move, Escape puts it away.
@@ -1772,7 +1794,7 @@ await run('Drawing block (Excalidraw)', async () => {
   check('Typing carries on in a new line after it', await until(() => document.activeElement?.classList.contains('blk')));
   check('The drawing frame loads Excalidraw', await until(() => box.dataset.ready === '1', 20000));
   let frame = box.querySelector('iframe');
-  frame.contentWindow.postMessage({ n2draw: 'probe' }, '*');
+  frame.contentWindow.postMessage({ runedraw: 'probe' }, '*');
   let info = JSON.parse((await until(() => box.dataset.probe, 8000)) || '{}');
   check('Excalidraw draws its canvas', info.canvas, JSON.stringify(info));
   check('Its hand-drawn font loads from inside the app', info.font, JSON.stringify(info));
@@ -1781,9 +1803,9 @@ await run('Drawing block (Excalidraw)', async () => {
   check('Until clicked, the page scrolls past it', getComputedStyle(cover).display !== 'none');
   cover.click();
   check('Clicking it starts drawing', box.dataset.active === '1' && getComputedStyle(cover).display === 'none');
-  frame.contentWindow.postMessage({ n2draw: 'test-add' }, '*');
+  frame.contentWindow.postMessage({ runedraw: 'test-add' }, '*');
   check('A new shape is saved', await until(() => Number(box.dataset.saves) >= 1, 6000), box.dataset.saves);
-  frame.contentWindow.postMessage({ n2draw: 'test-expand' }, '*');
+  frame.contentWindow.postMessage({ runedraw: 'test-expand' }, '*');
   check('Expand makes the drawing full screen', await until(() => box.dataset.expanded === '1', 3000));
   await wait(260);
   const pr = box.closest('.pane').getBoundingClientRect();
@@ -1801,14 +1823,14 @@ await run('Drawing block (Excalidraw)', async () => {
   check('Coming back reopens the drawing', box && (await until(() => box.dataset.ready === '1', 20000)));
   frame = box.querySelector('iframe');
   await wait(300);
-  frame.contentWindow.postMessage({ n2draw: 'probe' }, '*');
+  frame.contentWindow.postMessage({ runedraw: 'probe' }, '*');
   info = JSON.parse((await until(() => box.dataset.probe, 8000)) || '{}');
   check('The saved shape is back on the canvas', info.elements === 1, JSON.stringify(info));
   // A change, and the page is left at once by a press outside the drawing
   // (the drawing saves a moment after a change: this one was lost).
   box.querySelector('.drawing-cover').click();
   const savesBefore = Number(box.dataset.saves) || 0;
-  frame.contentWindow.postMessage({ n2draw: 'test-add' }, '*');
+  frame.contentWindow.postMessage({ runedraw: 'test-add' }, '*');
   await wait(120);
   const home = $$('.tile').find((t) => t.title === 'Home');
   const unsaved = (Number(box.dataset.saves) || 0) === savesBefore;
@@ -1820,7 +1842,7 @@ await run('Drawing block (Excalidraw)', async () => {
   await until(() => box.dataset.ready === '1', 20000);
   await wait(300);
   delete box.dataset.probe;
-  box.querySelector('iframe').contentWindow.postMessage({ n2draw: 'probe' }, '*');
+  box.querySelector('iframe').contentWindow.postMessage({ runedraw: 'probe' }, '*');
   info = JSON.parse((await until(() => box.dataset.probe, 8000)) || '{}');
   check('A change made just before the page is left is kept', unsaved && info.elements === 2, `${JSON.stringify(info)}, not yet saved at the press: ${unsaved}`);
   await oneTab();
@@ -1963,14 +1985,14 @@ await run('Find in page', async () => {
   treeItem('Getting Started').click();
   // Its own page, not the one that was in front before the click.
   await until(() => $('.pane .title-input')?.value === 'Getting Started' && $('.pane .blk'));
-  window.__n2.find();
+  window.__rune.find();
   const input = await until(() => $('#find-bar.show') && document.activeElement?.id === 'find-input' && $('#find-input'));
   check('⌘F opens the find bar with the cursor in it', input);
   input.value = 'the';
   input.dispatchEvent(new Event('input', { bubbles: true }));
   const count = await until(() => /^1 of \d+$/.test($('#find-count').textContent) && $('#find-count').textContent);
   check('It counts the matches', count, $('#find-count').textContent);
-  check('The matches are marked on the page', typeof CSS === 'undefined' || !CSS.highlights || CSS.highlights.has('n2-find'));
+  check('The matches are marked on the page', typeof CSS === 'undefined' || !CSS.highlights || CSS.highlights.has('rune-find'));
   key(input, 'Enter');
   check('Return goes to the next match', await until(() => $('#find-count').textContent.startsWith('2 of')), $('#find-count').textContent);
   key(input, 'Enter', { shiftKey: true });
@@ -1979,7 +2001,7 @@ await run('Find in page', async () => {
   input.dispatchEvent(new Event('input', { bubbles: true }));
   check('No matches is said plainly', await until(() => $('#find-count').textContent === 'No matches'));
   key(input, 'Escape');
-  check('Escape closes it and clears the marks', await until(() => !$('#find-bar.show')) && !(window.CSS && CSS.highlights && CSS.highlights.has('n2-find')));
+  check('Escape closes it and clears the marks', await until(() => !$('#find-bar.show')) && !(window.CSS && CSS.highlights && CSS.highlights.has('rune-find')));
 });
 
 await run('Page history', async () => {
@@ -2028,7 +2050,7 @@ await run('Backups', async () => {
 
 // Sync with the iPhone (src/devsync.rs). In a test run the Wi-Fi server
 // listens on this Mac only, so macOS asks nothing; the folder in iCloud
-// Drive is the one NOTION2_ICLOUD_SYNC names, when the runner gives one.
+// Drive is the one RUNE_ICLOUD_SYNC names, when the runner gives one.
 await run('Sync with the iPhone', async () => {
   await openSettings();
   check('Settings has a part for sync', await settingsSection('Sync'));
@@ -2066,7 +2088,7 @@ await run('Connect AI tools', async () => {
   const kinds = $$('[data-copy]', group || document).map((b) => b.dataset.copy).join(',');
   check('It offers Claude Code, Codex, JSON and the plain command', kinds === 'claude-code,codex,json,command', kinds);
   const shown = $$('.set-note.mono', group || document).map((n) => n.textContent).join(' ');
-  check('It shows the command, which ends in --mcp', /notion2' --mcp$/.test(shown.trim()), shown);
+  check('It shows the command, which ends in --mcp', /\/rune' --mcp$/i.test(shown.trim()), shown);
   check('AI from anywhere has its switch, on', $('#voice-anywhere')?.classList.contains('on') && $('#voice-anywhere').getAttribute('aria-label') === 'AI from anywhere');
   await wait(150);
   snap('settings-connector');
@@ -2081,7 +2103,7 @@ await run('Drags are private to the app', async () => {
   const types = [...dt.types];
   row.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: dt }));
   await wait(100);
-  check('A page drag carries nothing other apps can take', types.includes('application/x-notion2-drag') && !types.includes('text/plain'), types.join(', '));
+  check('A page drag carries nothing other apps can take', types.includes('application/x-rune-drag') && !types.includes('text/plain'), types.join(', '));
 });
 
 await run('Meeting notes', async () => {
@@ -2232,9 +2254,9 @@ await run('The AI from anywhere', async () => {
   await until(() => !$('#ai-input'));
 });
 
-// Only when asked for (NOTION2_REAL_DICTATION): does the Mac's Dictation
+// Only when asked for (RUNE_REAL_DICTATION): does the Mac's Dictation
 // start from a microphone beside a text box, and type what it hears there?
-if (window.__n2_real_dictation) {
+if (window.__rune_real_dictation) {
   await run('Real Dictation probe', async () => {
     await oneTab();
     $$('.tile').find((t) => t.title === 'Home').click();
@@ -2304,7 +2326,7 @@ await run('Pictures, tables and covers', async () => {
   clip.items.add(new File([png], 'Screenshot.png', { type: 'image/png' }));
   first.dispatchEvent(new ClipboardEvent('paste', { clipboardData: clip, bubbles: true, cancelable: true }));
   const img = await until(() => $('.image-block img', pane()), 4000);
-  check('A pasted screenshot becomes a picture in the page', img && img.src.startsWith('n2file://'), img?.src);
+  check('A pasted screenshot becomes a picture in the page', img && img.src.startsWith('runefile://'), img?.src);
   check('The picture is kept with the workspace and shows', await until(() => img.complete && img.naturalWidth === 1, 5000), `${img?.complete} ${img?.naturalWidth}`);
   check('Typing carries on in a line after the picture', await until(() => document.activeElement?.classList.contains('blk') && pane().contains(document.activeElement)));
   const under = () => $('.image-block', pane()).closest('.block-row').nextElementSibling;
@@ -4449,7 +4471,7 @@ await run('Diagrams', async () => {
   check('Its boxes have round corners', [...drawn.querySelectorAll('.node rect')].some((r) => Number(r.getAttribute('rx')) > 0));
   const wrong = await until(() => $('.diagram.wrong', pane), 6000);
   check('A diagram with a mistake says so in the page', wrong && /cannot be drawn/.test(wrong.textContent), wrong?.textContent);
-  check('…and no error drawing of the library is left in the window', !$('body > [id^="dn2-diagram"], body > svg[id^="n2-diagram"]'));
+  check('…and no error drawing of the library is left in the window', !$('body > [id^="drune-diagram"], body > svg[id^="rune-diagram"]'));
   $('[data-diagram-toggle]', wraps()[0]).click();
   check('"Edit" shows the code under the diagram', await until(() => wraps()[0].classList.contains('coding') && getComputedStyle($('.diagram-code', wraps()[0])).display === 'block' && $('.diagram-code .blk', wraps()[0])?.textContent.includes('flowchart LR'), 3000));
   $('[data-diagram-toggle]', wraps()[0]).click();
@@ -5109,7 +5131,7 @@ await run('Select all, copy and delete', async () => {
   const firstLine = $$('.blk', pane())[0];
   firstLine.focus();
   T().setSel(firstLine, 10);
-  window.__n2.pasteText(document.body.dataset.copied || '');
+  window.__rune.pasteText(document.body.dataset.copied || '');
   check('A heading cut and pasted in the app is the same heading, not one a size smaller', made && (await until(() => texts().startsWith('text:First line|heading1:Big words|'), 3000)), `${made ? '' : 'no heading made; '}${texts()} / ${JSON.stringify(document.body.dataset.copied)}`);
 
   // One line picked and copied comes back with its formats. (It went to the
@@ -5133,7 +5155,7 @@ await run('Select all, copy and delete', async () => {
     end.focus();
     T().setSel(end, end.textContent.replace(/\u200b/g, '').length);
     await nextLine(end);
-    window.__n2.pasteText(document.body.dataset.copied || '');
+    window.__rune.pasteText(document.body.dataset.copied || '');
     const last = () => $$('.blk', pane()).pop();
     const pasted = await until(() => last().querySelector('strong'), 3000);
     check('One line picked, copied and pasted in an empty line has its bold word, and no stars or backslashes', pasted && last().querySelector('strong')?.textContent === 'bold' && last().textContent.replace(/\u200b/g, '') === 'First line bold a_b', `${JSON.stringify(document.body.dataset.copied)} → ${last().innerHTML}`);
@@ -5203,7 +5225,7 @@ await run('Select all, copy and delete', async () => {
       const end = $$('.blocks > .block-row .blk', p()).pop();
       end.focus();
       T().setSel(end, end.textContent.replace(/\u200b/g, '').length);
-      window.__n2.pasteText(document.body.dataset.copied || '');
+      window.__rune.pasteText(document.body.dataset.copied || '');
     };
     check('⌘X takes a picked table out of the page', await cut(home));
     await pasteAtEnd(home);
@@ -5255,7 +5277,7 @@ await run('Select all, copy and delete', async () => {
     key(there, 'Enter');
     await until(() => document.activeElement?.classList.contains('blk') && document.activeElement);
     const land = () => shownPane('The table lands here');
-    window.__n2.pasteText(document.body.dataset.copied || '');
+    window.__rune.pasteText(document.body.dataset.copied || '');
     await until(() => tables(land()).length === 1, 4000);
     got = await rowWords(land);
     const crumbs = got.rent ? $$('.crumb', got.rent).map((c) => c.textContent.trim()).join(' / ') : '';
@@ -5298,7 +5320,7 @@ await run('Select all, copy and delete', async () => {
     key(third, 'Enter');
     await until(() => document.activeElement?.classList.contains('blk') && document.activeElement);
     const far = () => shownPane('A third place');
-    window.__n2.pasteText(document.body.dataset.copied || '');
+    window.__rune.pasteText(document.body.dataset.copied || '');
     await until(() => tables(far()).length === 1, 4000);
     T().command('undo');
     await until(() => tables(far()).length === 0, 4000);
@@ -6441,7 +6463,7 @@ await padRun('Meeting pad', async () => {
   const form = () => pad()?.dataset.form;
   const shown = () => $$('.pane').find((p) => datedName.test(p.querySelector('.title-input')?.value || '') && p.offsetParent);
   const rowsOf = (page) => $$('.block-row', page).map((r) => `${[...r.classList].find((c) => c.startsWith('kind-'))}:${(r.querySelector('.blk') || r).textContent.trim()}`);
-  const notepad = () => until(() => window.__n2pad && $('#pad-notes')?.dataset.ready, 3000);
+  const notepad = () => until(() => window.__runepad && $('#pad-notes')?.dataset.ready, 3000);
   // The next meeting: its page opens in a tab of its own (the pane on screen
   // may be the same element as before, with the new page in it).
   // A call makes no page the person sees until they say yes (Listen, Notes
@@ -6489,14 +6511,14 @@ await padRun('Meeting pad', async () => {
   // What is typed goes into the page.
   await notepad();
   check('An empty notepad says what it is for', $('#pad-notes').classList.contains('is-empty') && /They go into the page/.test($('#pad-notes').dataset.placeholder));
-  window.__n2pad.type(['Beta moves to Friday', 'Sam writes the notes']);
+  window.__runepad.type(['Beta moves to Friday', 'Sam writes the notes']);
   const typedIn = () => {
     const r = rowsOf(page);
     const n = r.indexOf('kind-heading2:Notes');
     return n >= 0 && r[n + 1] === 'kind-bulleted:Beta moves to Friday' && r[n + 2] === 'kind-bulleted:Sam writes the notes' && r[n + 3] === 'kind-heading2:Action items';
   };
   check('What is typed in the pad goes under Notes of the page, a bullet for each line', await until(typedIn, 4000), rowsOf(page).join(' | '));
-  window.__n2pad.type(['Beta moves to Friday the 14th']);
+  window.__runepad.type(['Beta moves to Friday the 14th']);
   check('A line that is changed or taken out in the pad is changed or taken out in the page', await until(() => {
     const r = rowsOf(page);
     const n = r.indexOf('kind-heading2:Notes');
@@ -6514,7 +6536,7 @@ await padRun('Meeting pad', async () => {
   $('#pad-pill').click();
   await until(() => form() === 'open');
   await notepad();
-  check('Opened again, the notepad has what was typed', window.__n2pad.lines().join('|') === 'Beta moves to Friday the 14th', window.__n2pad.lines().join('|'));
+  check('Opened again, the notepad has what was typed', window.__runepad.lines().join('|') === 'Beta moves to Friday the 14th', window.__runepad.lines().join('|'));
 
   // Stop while the meeting goes on: a pause (the person may not want a part
   // heard). The notes of what was heard are written; the pad stays.
@@ -6549,7 +6571,7 @@ await padRun('Meeting pad', async () => {
   const second = await opened();
   check('"Notes only" is a yes: the page of the call opens', second);
   await notepad();
-  window.__n2pad.type(['Only typed']);
+  window.__runepad.type(['Only typed']);
   await until(() => rowsOf(second).includes('kind-bulleted:Only typed'), 4000);
   T().command('meeting_ended');
   check('When a meeting with typed notes ends, the card says where they are and offers the page of the last time', (await until(() => form() === 'end', 4000)) && $('#pad-status')?.textContent === 'Your notes are in the page.' && $('.pad-same')?.textContent.trim() === 'Getting Started', pad()?.textContent);
@@ -6565,7 +6587,7 @@ await padRun('Meeting pad', async () => {
   await until(() => form() === 'open');
   const third = await opened();
   await notepad();
-  window.__n2pad.type(['Third']);
+  window.__runepad.type(['Third']);
   await until(() => rowsOf(third).includes('kind-bulleted:Third'), 4000);
   T().command('meeting_ended');
   check('Notes that are where the person chose before are not asked about again: the card says where they are', (await until(() => form() === 'end', 4000)) && !$('#pad-keep-in') && $('#pad-told')?.textContent === 'These notes are in “Getting Started”, as before.', pad()?.textContent);
@@ -6590,7 +6612,7 @@ await padRun('Meeting pad', async () => {
   await until(() => form() === 'open');
   const sixth = await opened();
   await notepad();
-  window.__n2pad.type(['Sixth']);
+  window.__runepad.type(['Sixth']);
   await until(() => rowsOf(sixth).includes('kind-bulleted:Sixth'), 4000);
   T().command('forget_meeting_slots');
   T().command('meeting_ended');
@@ -6826,11 +6848,11 @@ await padRun('A meeting joined during another call', async () => {
   T().command('forget_meeting');
 });
 
-// Only when asked for (NOTION2_REAL_PAD=1): opens the meeting pad's real
+// Only when asked for (RUNE_REAL_PAD=1): opens the meeting pad's real
 // window at the corner of the screen for some seconds, and clicks and types
 // in it. It proves what the check above cannot: that the window opens, is as
 // big as its card, takes no keyboard, and closes again without a fault.
-if (window.__n2_real_pad) {
+if (window.__rune_real_pad) {
   await padRun('Real meeting pad window', async () => {
     T().command('forget_meeting_slots');
     T().command('forget_meeting');
@@ -6892,7 +6914,7 @@ if (window.__n2_real_pad) {
     // gives the pad the keyboard for typing. The window server gives the
     // keyboard on a real click; an event made inside the app does not get it.)
     check('The window grew with the notepad, its bottom right corner kept', !p.failed && p.wide === 328 && p.high > 200 && Math.abs(p.gap_right - 20) < 1.5 && Math.abs(p.gap_bottom - 20) < 1.5, JSON.stringify(p));
-    inPad("(async () => { for (let i = 0; i < 40 && !(window.__n2pad && document.querySelector('#pad-notes')?.dataset.ready); i++) await new Promise((r) => setTimeout(r, 50)); window.__n2pad.type(['From the pad window']); })()");
+    inPad("(async () => { for (let i = 0; i < 40 && !(window.__runepad && document.querySelector('#pad-notes')?.dataset.ready); i++) await new Promise((r) => setTimeout(r, 50)); window.__runepad.type(['From the pad window']); })()");
     check('What is typed in the pad window goes into the page', await until(() => rows(page).includes('kind-bulleted:From the pad window'), 5000), rows(page).join(' | '));
     press('#pad-small');
     p = await probed((p) => p.form === 'small' && p.high < 40);
@@ -6927,11 +6949,11 @@ if (window.__n2_real_pad) {
   });
 }
 
-// Only when asked for (NOTION2_PAD_TRY=1): the meeting pad's real window, left
+// Only when asked for (RUNE_PAD_TRY=1): the meeting pad's real window, left
 // on the screen for the person to try by hand (a throwaway workspace, the
 // stand-in listener, the stand-in AI). It ends when the pad has gone, or
 // after five minutes.
-if (window.__n2_pad_try) {
+if (window.__rune_pad_try) {
   await padRun('Meeting pad to try by hand', async () => {
     T().command('forget_meeting_slots');
     T().command('forget_meeting');
@@ -7043,7 +7065,7 @@ await run('The voice box with the app’s own listener', async () => {
   await until(() => !$('.settings-view'));
   speakPage();
   const box = await until(() => $('.modal.voice #voice-text'));
-  const real = !!window.__n2_real_listener;
+  const real = !!window.__rune_real_listener;
   const heardIn = (el) => (real ? el.value.trim().length > 3 : el.value === 'So the budget is agreed.');
   check('With it, the words appear in the box as they are heard', await until(() => heardIn(box), real ? 15000 : 4000) && !$('.voice-help'), box?.value);
   key(document.body, 'Escape');
@@ -7697,9 +7719,9 @@ await run('A web address is a link', async () => {
   }
 });
 
-// Only when asked for (NOTION2_REAL_VIDEO=1): plays a real video from YouTube,
+// Only when asked for (RUNE_REAL_VIDEO=1): plays a real video from YouTube,
 // without sound, to prove that YouTube accepts the app's player.
-if (window.__n2_real_video) {
+if (window.__rune_real_video) {
   await run('Real YouTube probe', async () => {
     await oneTab();
     const title = await newPage('Real video');

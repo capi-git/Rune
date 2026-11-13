@@ -24,10 +24,10 @@ xcrun simctl boot "$UDID" >/dev/null 2>&1 || true
 xcrun simctl bootstatus "$UDID" >/dev/null
 
 echo "Building…"
-xcodebuild -project Notion2.xcodeproj -scheme Notion2 -configuration Debug \
+xcodebuild -project Rune.xcodeproj -scheme Rune -configuration Debug \
   -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath build build \
   | grep -E "error:|BUILD" || true
-APP="build/Build/Products/Debug-iphonesimulator/Notion2.app"
+APP="build/Build/Products/Debug-iphonesimulator/Rune.app"
 [ -d "$APP" ] || { echo "The build did not make the app." >&2; exit 1; }
 xcrun simctl install "$UDID" "$APP"
 xcrun simctl launch "$UDID" "$BUNDLE_ID" >/dev/null
@@ -35,7 +35,7 @@ xcrun simctl launch "$UDID" "$BUNDLE_ID" >/dev/null
 if [ "$SOURCE" = "--wifi" ]; then
   # The stand-in Mac serves a sync folder on this computer; the Simulator
   # reaches it at "localhost". The app starts with no notes of its own.
-  BACKUP="$(ls -t "$HOME/Library/Application Support/Notion 2.0/Backups"/workspace-*.db 2>/dev/null | head -1 || true)"
+  BACKUP="$(ls -t "$HOME/Library/Application Support/Rune/Backups"/workspace-*.db 2>/dev/null | head -1 || true)"
   if [ -z "$BACKUP" ]; then
     BACKUP="$(mktemp -d)/sample-backup.db"
     python3 scripts/make-sample-db.py "$BACKUP" >/dev/null
@@ -66,7 +66,7 @@ fi
 if [ "$SOURCE" = "--sync" ]; then
   # The Simulator has no iCloud account. A plain folder takes the place of
   # the iCloud Drive folder, and the app starts with no notes of its own.
-  BACKUP="$(ls -t "$HOME/Library/Application Support/Notion 2.0/Backups"/workspace-*.db 2>/dev/null | head -1 || true)"
+  BACKUP="$(ls -t "$HOME/Library/Application Support/Rune/Backups"/workspace-*.db 2>/dev/null | head -1 || true)"
   if [ -z "$BACKUP" ]; then
     BACKUP="$(mktemp -d)/sample-backup.db"
     python3 scripts/make-sample-db.py "$BACKUP" >/dev/null

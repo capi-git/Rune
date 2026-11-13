@@ -98,9 +98,9 @@ pub fn in_block(kind: BlockKind, text: &str) -> Option<Video> {
 }
 
 /// A test run shows no still picture and no player of YouTube's (nothing is
-/// fetched), unless it asks for the real thing (`NOTION2_REAL_VIDEO`).
+/// fetched), unless it asks for the real thing (`RUNE_REAL_VIDEO`).
 pub fn stand_in() -> bool {
-    std::env::var_os("NOTION2_SELFTEST").is_some() && std::env::var_os("NOTION2_REAL_VIDEO").is_none()
+    std::env::var_os("RUNE_SELFTEST").is_some() && std::env::var_os("RUNE_REAL_VIDEO").is_none()
 }
 
 /// The still picture of a video (from YouTube). Empty in a test run.

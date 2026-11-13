@@ -145,7 +145,7 @@ fn a_code_pairs_one_iphone_once() {
     let scene = Scene::new();
     let offer = scene.shared.offer(47815).unwrap();
     let fp = fingerprint(scene.state()).unwrap();
-    assert!(offer.link.starts_with(&format!("notion2://pair?v=1&host=localhost&port=47815&cert={fp}&code=")), "{}", offer.link);
+    assert!(offer.link.starts_with(&format!("rune://pair?v=1&host=localhost&port=47815&cert={fp}&code=")), "{}", offer.link);
     assert!(offer.link.ends_with("&name=Test%20Mac"));
     assert!(offer.expires_ms > now_ms() + 9 * 60 * 1000);
     let code = offer.link.split('&').find_map(|p| p.strip_prefix("code=")).unwrap().to_string();
@@ -372,14 +372,14 @@ fn the_certificate_is_made_once_and_the_qr_code_draws_the_link() {
     assert_eq!(sha256_hex(&der), first);
     fs::remove_dir_all(&base).unwrap();
 
-    let svg = qr_svg("notion2://pair?v=1&host=localhost").unwrap();
+    let svg = qr_svg("rune://pair?v=1&host=localhost").unwrap();
     assert!(svg.starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 "));
     assert!(svg.contains("fill=\"currentColor\""));
     assert!(!svg.contains("width="));
     // The finder pattern at the top left starts after the quiet zone.
     assert!(svg.contains("d=\"M4 4h7v1h-7z"), "{svg}");
 
-    assert_eq!(pair_link(&["a.local".into(), "10.0.0.2".into()], 1, "f", "c", "Jack's Mac"), "notion2://pair?v=1&host=a.local&host=10.0.0.2&port=1&cert=f&code=c&name=Jack%27s%20Mac");
+    assert_eq!(pair_link(&["a.local".into(), "10.0.0.2".into()], 1, "f", "c", "Jack's Mac"), "rune://pair?v=1&host=a.local&host=10.0.0.2&port=1&cert=f&code=c&name=Jack%27s%20Mac");
     assert!(valid_host("Jacks-MacBook-Pro.local") && valid_host("192.168.1.20"));
     assert!(!valid_host("a/b") && !valid_host("-a") && !valid_host("") && !valid_host("a b"));
 }
@@ -515,10 +515,10 @@ fn the_port_is_read_back() {
 /// The stand-in Mac of mobile/Core's `WifiRunTests`, as `wifi-mac.py DIR
 /// --port 0` is: it serves `$RUNE_STANDIN_FOLDER/sync-v1` on 127.0.0.1 and
 /// ::1 (port `$RUNE_STANDIN_PORT`, 0 for any), keeps its state in
-/// `$RUNE_STANDIN_FOLDER.mac`, prints `LINK notion2://pair?…`, and ends when
+/// `$RUNE_STANDIN_FOLDER.mac`, prints `LINK rune://pair?…`, and ends when
 /// the process that started it does. From the repository's root:
 ///
-///     cd mobile/Core && RUNE_STANDIN_MAC_CMD="cargo test --manifest-path $PWD/../../Cargo.toml --bin notion2 -q -- --ignored --exact devsync::wifi::tests::stand_in_mac --nocapture" swift test --filter WifiRunTests
+///     cd mobile/Core && RUNE_STANDIN_MAC_CMD="cargo test --manifest-path $PWD/../../Cargo.toml --bin rune -q -- --ignored --exact devsync::wifi::tests::stand_in_mac --nocapture" swift test --filter WifiRunTests
 #[test]
 #[ignore = "the stand-in Mac for WifiRunTests (mobile/Core); runs until its parent ends"]
 fn stand_in_mac() {

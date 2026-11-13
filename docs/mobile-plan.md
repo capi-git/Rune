@@ -1,4 +1,4 @@
-# Notion 2.0 on the iPhone: plan
+# Rune on the iPhone: plan
 
 Written 2026-11-09. The goal: read, and later edit, the same notes and calendar on
 the user's own iPhone. One user, no App Store, no server of ours.
@@ -122,7 +122,7 @@ database and tells the other device at once.
 - **For.** The quickest and most robust sync; Apple finds conflicts per record.
 - **Against.** The most work, and nearly all of it on the Mac. A Rust app cannot
   call CloudKit directly, so the Mac needs a Swift helper process (like
-  `helper/n2listen.swift`) or Objective-C bindings. The Mac app also needs the
+  `helper/rune-listen.swift`) or Objective-C bindings. The Mac app also needs the
   iCloud entitlement and an embedded provisioning profile, which changes
   `scripts/bundle.sh` and the self-updater.
 - **Same page changed on both.** The same rule as option A (newer wins, the other
@@ -143,7 +143,7 @@ are paired once with a code, and they exchange changes directly.
   a certificate that only the Mac has, and a code that works once. The phone then
   holds a token in its keychain. HTTPS, with the certificate checked against the
   fingerprint. What the desktop app needs:
-  1. Its own sync folder, `~/Library/Application Support/Notion 2.0/Sync/sync-v1/`,
+  1. Its own sync folder, `~/Library/Application Support/Rune/Sync/sync-v1/`,
      written by the same writer as option A (and copied into the iCloud folder
      when that exists).
   2. The certificate, made once; a listener for five requests, off the UI thread.
@@ -179,8 +179,8 @@ validity should apply; Xcode confirms it the first time it makes the profile.
 
 ```
 mobile/
-  Core/                Swift package "Notion2Core": no UI, tested with `swift test`
-    Sources/Notion2Core
+  Core/                Swift package "RuneCore": no UI, tested with `swift test`
+    Sources/RuneCore
       Model.swift          pages, blocks, events, spaces (as in src/model.rs)
       WorkspaceDatabase    read-only SQLite reader (as in src/store.rs)
       Inline.swift         inline text form (as in src/inline.rs)
@@ -188,8 +188,8 @@ mobile/
       Outline.swift        toggles, list numbers, page tree (src/model.rs, state.rs)
       Search.swift         titles and text (as in the desktop quick find)
       Icons*.swift         the icon set, generated from src/ui/icons.rs
-  Notion2/             the SwiftUI app (Home, Pages, Page, Search, Calendar, Settings)
-  Notion2.xcodeproj
+  Rune/                the SwiftUI app (Home, Pages, Page, Search, Calendar, Settings)
+  Rune.xcodeproj
   scripts/             sample data, load a copy into the Simulator, install on iPhone
 ```
 

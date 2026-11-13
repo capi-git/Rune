@@ -2,7 +2,7 @@
 //!
 //! Each picture is a file in a folder beside the database (never inside it,
 //! so the database stays small and quick to back up). A page shows one from
-//! the `n2file://` address, which only ever serves files of that folder, by
+//! the `runefile://` address, which only ever serves files of that folder, by
 //! a name the app itself made.
 
 use dioxus::desktop::wry::http::{header, Request, Response, StatusCode};
@@ -11,7 +11,7 @@ use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 /// The address pages load pictures from.
-pub const SCHEME: &str = "n2file";
+pub const SCHEME: &str = "runefile";
 /// The largest picture that is taken in.
 pub const LARGEST: usize = 30 * 1024 * 1024;
 
@@ -19,7 +19,7 @@ pub const LARGEST: usize = 30 * 1024 * 1024;
 /// "<database>.files" beside another one (a test's throwaway database).
 pub fn dir() -> PathBuf {
     let db = crate::store::Store::default_path();
-    if std::env::var_os("NOTION2_DB").is_some() {
+    if std::env::var_os("RUNE_DB").is_some() {
         let mut name = db.clone().into_os_string();
         name.push(".files");
         return PathBuf::from(name);
@@ -160,7 +160,7 @@ mod tests {
         // A whole picture, one dot wide. It goes to a clipboard with a name
         // of its own: the person's clipboard stays as it is.
         let dot = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==").unwrap();
-        let dir = std::env::temp_dir().join(format!("n2-copy-picture-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rune-copy-picture-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("dot.png");
         std::fs::write(&file, &dot).unwrap();
@@ -197,7 +197,7 @@ mod tests {
 
     #[test]
     fn a_picture_is_kept_under_a_new_name_and_other_things_are_refused() {
-        let folder = std::env::temp_dir().join(format!("n2files-{}", uuid::Uuid::new_v4().simple()));
+        let folder = std::env::temp_dir().join(format!("rune-files-{}", uuid::Uuid::new_v4().simple()));
         let name = save_in(&folder, PNG).unwrap();
         assert!(valid_name(&name) && name.ends_with(".png"));
         assert_eq!(std::fs::read(folder.join(&name)).unwrap(), PNG);

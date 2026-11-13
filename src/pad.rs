@@ -301,7 +301,7 @@ thread_local! {
     static WINDOWS: Cell<u64> = const { Cell::new(0) };
     /// A test run draws the pad in the first window, not in one of its own.
     static INLINE: Cell<bool> = const { Cell::new(false) };
-    /// A test run that asked for the pad's real window (NOTION2_REAL_PAD).
+    /// A test run that asked for the pad's real window (RUNE_REAL_PAD).
     static REAL: Cell<bool> = const { Cell::new(false) };
     /// The pad's window while it is open (its NSWindow), for `window_facts`.
     static OPEN_WINDOW: Cell<usize> = const { Cell::new(0) };
@@ -385,7 +385,7 @@ pub fn enabled() -> bool {
     if inline() || REAL.with(|r| r.get()) {
         return true;
     }
-    std::env::var_os("NOTION2_SELFTEST").is_none() && crate::store::setting("meeting_pad").as_deref() != Some("off")
+    std::env::var_os("RUNE_SELFTEST").is_none() && crate::store::setting("meeting_pad").as_deref() != Some("off")
 }
 
 pub fn set_enabled(on: bool) {

@@ -1,9 +1,13 @@
 # Rune for iPhone
 
-The iPhone app for Rune (the Mac app first called Notion 2.0): the same spaces,
-pages and calendar as the Mac app. Only what a person sees is called Rune; the
-names inside (`Notion2`, `com.jackhagan.notion2.mobile`, `notion2://`) stay, as
-on the Mac. It reads notes files up to form 6 (Rune 0.1.3 and later).
+The iPhone app for Rune: the same spaces, pages and calendar as the Mac app.
+The app was first called Notion 2.0. A few identifiers keep that name, because
+Apple or the person's data hold them: the app id `com.jackhagan.notion2.mobile`,
+the iCloud container `iCloud.com.jackhagan.notion2`, the file type
+`com.jackhagan.notion2.workspace` and the keychain name
+`com.jackhagan.notion2.wifi`. Links that begin with `notion2://` (from before
+the rename) are still read. It reads notes files up to form 6 (Rune 0.1.3 and
+later).
 The plan, and the decisions still open (sync), are in
 [`docs/mobile-plan.md`](../docs/mobile-plan.md).
 
@@ -33,7 +37,7 @@ What it shows:
   (text, headings, bulleted, numbered, to-do, toggle, quote, callout, code,
   divider, page link, table, chart, image), and a code block of the language
   `mermaid` as a diagram (with the Mac's own copy of Mermaid,
-  `assets/mermaid`, linked in as `Notion2/Vendor/mermaid.min.js`). Tables show
+  `assets/mermaid`, linked in as `Rune/Vendor/mermaid.min.js`). Tables show
   as on the Mac: column kinds (money, dates, tags, status, checkboxes,
   formulas), totals at the foot, the table's sort, filters and colour rules;
   the page of a row opens from the row. A drawing shows a placeholder. A picture
@@ -65,7 +69,7 @@ mobile/scripts/run-in-simulator.sh            # with the newest backup of the Ma
 mobile/scripts/run-in-simulator.sh --sample   # with sample notes: every kind of block
 ```
 
-Or open `mobile/Notion2.xcodeproj` in Xcode, pick a simulator and press Run, then
+Or open `mobile/Rune.xcodeproj` in Xcode, pick a simulator and press Run, then
 `mobile/scripts/sim-load.sh` to put a copy of the notes into the running app.
 
 To see sync at work (the Simulator has no iCloud account, so a folder stands in
@@ -91,7 +95,7 @@ In the Simulator tap **Open** (if asked), then **Connect**.
 
 The scripts never open the live `workspace.db`. They copy a backup: a complete,
 closed copy that the Mac app makes once a day in
-`~/Library/Application Support/Notion 2.0/Backups/` (and on "Back up now").
+`~/Library/Application Support/Rune/Backups/` (and on "Back up now").
 
 ## Put it on your iPhone
 
@@ -115,7 +119,7 @@ Then, each time you want to install or update:
 mobile/scripts/install-on-iphone.sh
 ```
 
-or open `mobile/Notion2.xcodeproj` in Xcode, choose the iPhone at the top of the
+or open `mobile/Rune.xcodeproj` in Xcode, choose the iPhone at the top of the
 window and press Run. With the paid developer account the app runs for one year;
 install again to renew it. The notes on the iPhone stay.
 
@@ -145,7 +149,7 @@ may find devices on your local network. Allow it (it can be changed in
 
 Until the Mac app syncs, load a copy by hand:
 
-1. On the Mac, open the folder `~/Library/Application Support/Notion 2.0/Backups`
+1. On the Mac, open the folder `~/Library/Application Support/Rune/Backups`
    (Finder › Go › Go to Folder).
 2. Send the newest `workspace-….db` file to the iPhone with AirDrop and choose
    **Rune**. Or save it to Files and, in the app, use
@@ -159,8 +163,8 @@ stand-in Mac serve a copy of a backup (a fixed copy: it does not follow the Mac
 app). macOS may ask whether Python may accept incoming connections: allow it.
 
 ```bash
-python3 mobile/scripts/make-sync-folder.py init "BACKUP.db" "$TMPDIR/notion2-wifi"
-python3 mobile/scripts/wifi-mac.py "$TMPDIR/notion2-wifi" --lan --qr
+python3 mobile/scripts/make-sync-folder.py init "BACKUP.db" "$TMPDIR/rune-wifi"
+python3 mobile/scripts/wifi-mac.py "$TMPDIR/rune-wifi" --lan --qr
 ```
 
 Point the iPhone's camera at the code and tap the banner. This works for an
@@ -191,11 +195,11 @@ iPhone's code against it.
 
 | Path | What |
 | --- | --- |
-| `Core/` | Swift package `Notion2Core`: model, `WorkspaceDatabase`, `Inline`, `Repeat`, `When`, `Outline`, `Search`, `Icons`, `SyncFormat`, `SyncEngine`, and for sync over Wi-Fi `WifiLink` (the QR code's link, file names), `WifiClient` (HTTPS to the Mac's own certificate), `WifiMirror` (which files to fetch), `WifiSync` (one run) |
-| `Notion2/` | The SwiftUI app: `RootView` (tabs and the glass bars), `Views/` (Home, Pages, Page, Search, Calendar, Settings), `Theme` (colours from the designs), `SyncCoordinator` (follows the iCloud Drive folder and the paired Mac while the app is in front; keeps the Mac's token in the keychain) |
-| `Notion2.xcodeproj` | The Xcode project. It picks up every file in `Notion2/` by itself |
-| `Support/Info.plist`, `Support/Notion2.entitlements` | Let the app open `.db` files sent to the iPhone, use its folder in iCloud Drive, open `notion2://pair?…` links (the QR code) and reach the Mac on the local network |
-| `scripts/gen-icons.py` | Writes `Core/Sources/Notion2Core/IconData.swift` from `src/ui/icons.rs`. Run it after an icon changes on the desktop (last run 2026-11-11, from Rune 0.1.7) |
+| `Core/` | Swift package `RuneCore`: model, `WorkspaceDatabase`, `Inline`, `Repeat`, `When`, `Outline`, `Search`, `Icons`, `SyncFormat`, `SyncEngine`, and for sync over Wi-Fi `WifiLink` (the QR code's link, file names), `WifiClient` (HTTPS to the Mac's own certificate), `WifiMirror` (which files to fetch), `WifiSync` (one run) |
+| `Rune/` | The SwiftUI app: `RootView` (tabs and the glass bars), `Views/` (Home, Pages, Page, Search, Calendar, Settings), `Theme` (colours from the designs), `SyncCoordinator` (follows the iCloud Drive folder and the paired Mac while the app is in front; keeps the Mac's token in the keychain) |
+| `Rune.xcodeproj` | The Xcode project. It picks up every file in `Rune/` by itself |
+| `Support/Info.plist`, `Support/Rune.entitlements` | Let the app open `.db` files sent to the iPhone, use its folder in iCloud Drive, open `rune://pair?…` links (the QR code; also `notion2://pair?…` from an older Mac) and reach the Mac on the local network |
+| `scripts/gen-icons.py` | Writes `Core/Sources/RuneCore/IconData.swift` from `src/ui/icons.rs`. Run it after an icon changes on the desktop (last run 2026-11-11, from Rune 0.1.7) |
 | `scripts/gen-app-icon.sh` | Makes the app icon from `Support/AppIcon.svg` (Rune's logo, `assets/logo.svg`, as a full square) with `scripts/make-icon.swift` |
 | `scripts/make-sample-db.py` | Makes sample notes with every kind of block |
 | `scripts/make-sync-folder.py` | Plays the part of the Mac in sync: writes a snapshot and change files. The reference for a writer |

@@ -1,4 +1,4 @@
-//! MCP server: `notion2 --mcp` lets AI agents (Aven, Claude Code, Claude Desktop,
+//! MCP server: `rune --mcp` lets AI agents (Aven, Claude Code, Claude Desktop,
 //! Codex) read and edit the workspace.
 //!
 //! Transport is stdio: one JSON-RPC 2.0 message per line in, one per line out.
@@ -87,11 +87,11 @@ pub fn run_stdio() -> i32 {
     let store = match Store::open(path.clone()) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[notion2 mcp] couldn't open the workspace at {}: {e}", path.display());
+            eprintln!("[rune mcp] couldn't open the workspace at {}: {e}", path.display());
             return 1;
         }
     };
-    eprintln!("[notion2 mcp] serving {}", path.display());
+    eprintln!("[rune mcp] serving {}", path.display());
     let mut server = Server::new(store);
     // Started by the app for its own AI: every change is written down, so
     // that the app can say what was done and take it back.
@@ -101,7 +101,7 @@ pub fn run_stdio() -> i32 {
     match server.serve(io::stdin().lock(), io::stdout().lock()) {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("[notion2 mcp] stopped: {e}");
+            eprintln!("[rune mcp] stopped: {e}");
             1
         }
     }
@@ -117,7 +117,7 @@ pub struct Server {
 type ToolResult = Result<String, String>;
 
 /// The environment variable that names the file for the record of changes.
-pub const JOURNAL_ENV: &str = "NOTION2_AI_JOURNAL";
+pub const JOURNAL_ENV: &str = "RUNE_AI_JOURNAL";
 
 /// One thing a tool changed, with what was there before it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -2024,7 +2024,7 @@ pub mod connect {
 
     /// Where this program is (the app's own executable).
     pub fn program() -> String {
-        std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "notion2".into())
+        std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "rune".into())
     }
 
     fn shell_quoted(s: &str) -> String {
@@ -2251,7 +2251,7 @@ mod tests {
 
     #[test]
     fn what_an_ai_run_changes_is_written_down_and_can_be_taken_back() {
-        let dir = std::env::temp_dir().join(format!("n2-journal-{}", now_ms()));
+        let dir = std::env::temp_dir().join(format!("rune-journal-{}", now_ms()));
         std::fs::create_dir_all(&dir).unwrap();
         let journal = dir.join("run.jsonl");
         // Before the run: one page with a line, and one event.
@@ -2310,7 +2310,7 @@ mod tests {
 
     #[test]
     fn a_new_name_taken_back_leaves_what_the_person_changed_since() {
-        let dir = std::env::temp_dir().join(format!("n2-page-back-{}", now_ms()));
+        let dir = std::env::temp_dir().join(format!("rune-page-back-{}", now_ms()));
         std::fs::create_dir_all(&dir).unwrap();
         let journal = dir.join("run.jsonl");
         let mut s = server();
@@ -2342,7 +2342,7 @@ mod tests {
 
     #[test]
     fn the_page_before_a_run_is_known_and_a_line_typed_meanwhile_is_seen() {
-        let dir = std::env::temp_dir().join(format!("n2-before-run-{}", now_ms()));
+        let dir = std::env::temp_dir().join(format!("rune-before-run-{}", now_ms()));
         std::fs::create_dir_all(&dir).unwrap();
         let journal = dir.join("run.jsonl");
         let mut s = server();
@@ -2578,19 +2578,19 @@ mod tests {
 
     #[test]
     fn connector_snippets_are_well_formed() {
-        let program = "/Applications/Rune.app/Contents/MacOS/notion2";
-        assert_eq!(connect::command(program), "'/Applications/Rune.app/Contents/MacOS/notion2' --mcp");
+        let program = "/Applications/Rune.app/Contents/MacOS/Rune";
+        assert_eq!(connect::command(program), "'/Applications/Rune.app/Contents/MacOS/Rune' --mcp");
         assert_eq!(
             connect::claude_code(program),
-            "claude mcp add --scope user rune -- '/Applications/Rune.app/Contents/MacOS/notion2' --mcp"
+            "claude mcp add --scope user rune -- '/Applications/Rune.app/Contents/MacOS/Rune' --mcp"
         );
         let parsed: Value = serde_json::from_str(&connect::json(program)).unwrap();
         assert_eq!(parsed["mcpServers"]["rune"]["command"], program);
         assert_eq!(parsed["mcpServers"]["rune"]["args"], json!(["--mcp"]));
         let toml = connect::codex(program);
-        assert!(toml.starts_with("[mcp_servers.rune]\ncommand = \"/Applications/Rune.app/Contents/MacOS/notion2\"\nargs = [\"--mcp\"]"), "{toml}");
+        assert!(toml.starts_with("[mcp_servers.rune]\ncommand = \"/Applications/Rune.app/Contents/MacOS/Rune\"\nargs = [\"--mcp\"]"), "{toml}");
         // A quote in the path cannot end the quoting early.
-        assert_eq!(connect::command("/tmp/it's/notion2"), "'/tmp/it'\\''s/notion2' --mcp");
+        assert_eq!(connect::command("/tmp/it's/rune"), "'/tmp/it'\\''s/rune' --mcp");
     }
 
     #[test]

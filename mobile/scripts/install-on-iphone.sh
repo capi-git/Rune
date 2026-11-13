@@ -21,6 +21,8 @@
 # renew it or to install a newer build. The notes on the iPhone stay.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# The app id keeps the app's first name ("notion2"): iOS and Apple know the
+# app, its notes and its iCloud folder by it.
 BUNDLE_ID="com.jackhagan.notion2.mobile"
 NO_ICLOUD=""
 if [ "${1:-}" = "--no-icloud" ]; then
@@ -120,10 +122,10 @@ if [ -n "$NO_ICLOUD" ]; then
 else
   SIGNING=(-allowProvisioningUpdates)
 fi
-APP="build/Build/Products/Release-iphoneos/Notion2.app"
+APP="build/Build/Products/Release-iphoneos/Rune.app"
 rm -rf "$APP"
 echo "Building for $NAME…"
-xcodebuild -project Notion2.xcodeproj -scheme Notion2 -configuration Release \
+xcodebuild -project Rune.xcodeproj -scheme Rune -configuration Release \
   -destination "id=$UDID" -derivedDataPath build "${SIGNING[@]}" build >"$LIST" 2>&1 || true
 grep -E "error:|warning: .*provision|BUILD" "$LIST" || true
 if [ ! -d "$APP" ]; then
@@ -132,7 +134,7 @@ if [ ! -d "$APP" ]; then
     echo "Sign in at https://developer.apple.com/account and accept it, then run this again." >&2
     echo "Or run this with --no-icloud: the app is then installed now, without sync through iCloud Drive." >&2
   else
-    echo "The build did not make the app. Keep the iPhone unlocked and run this again, or open mobile/Notion2.xcodeproj in Xcode to see why." >&2
+    echo "The build did not make the app. Keep the iPhone unlocked and run this again, or open mobile/Rune.xcodeproj in Xcode to see why." >&2
   fi
   exit 1
 fi

@@ -1,6 +1,6 @@
 # Sync between devices: the files (format 1)
 
-How Notion 2.0 on the Mac and on the iPhone keep the same notes with no server
+How Rune on the Mac and on the iPhone keep the same notes with no server
 of ours. Decided on 2026-11-09 (see `docs/mobile-plan.md`, decision 2). Both
 apps must follow this file exactly.
 
@@ -9,7 +9,7 @@ The files of this document travel in two ways, each on its own or both at once
 describes, and straight between the Mac and the iPhone over the local network,
 which `docs/sync-wifi.md` describes. The files and the rules are the same.
 
-State on 2026-11-11: the iPhone reads (`mobile/Core/Sources/Notion2Core/Sync*.swift`,
+State on 2026-11-11: the iPhone reads (`mobile/Core/Sources/RuneCore/Sync*.swift`,
 tested). The Mac writes and reads (`src/devsync/engine.rs`, tested; on from
 Settings ▸ Sync, off until then); `mobile/scripts/make-sync-folder.py` is
 still a reference writer for tests. Covers, pictures and
@@ -40,7 +40,7 @@ cannot open it must not change it (the Mac's schema mark 7).
 
 The folder belongs to the iPhone app's iCloud container
 `iCloud.com.jackhagan.notion2`. The iPhone app makes it. The Mac app must not
-make it: if it is not there, sync is not available yet ("open Notion 2.0 on the
+make it: if it is not there, sync is not available yet ("open Rune on the
 iPhone once").
 
 | On | Path |
@@ -272,7 +272,7 @@ CREATE TABLE IF NOT EXISTS sync_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 - Every write to a page, its blocks, an event or a space gives that record a
   new version. On the Mac, triggers in the notes file note each written
   record in `sync_dirty` (kind, id), whichever program writes (the app,
-  `notion2 --mcp`, an older Rune); when the engine runs it gives each noted
+  `rune --mcp`, an older Rune); when the engine runs it gives each noted
   record one clock step and empties the list. While the engine applies
   another device's change it holds the row `applying` in `sync_meta` inside
   its transaction, and the triggers pass over those writes. A record made and

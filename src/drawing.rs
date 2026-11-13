@@ -1,6 +1,6 @@
 //! Drawing blocks: Excalidraw, running in a frame of its own inside the page.
 //!
-//! The frame's files are built into the app and served from the `n2draw://`
+//! The frame's files are built into the app and served from the `runedraw://`
 //! address, so drawing works offline. Each drawing's scene is Excalidraw's own
 //! JSON, kept in the block's `data` (never in its text, so search, AI context
 //! and Markdown export don't see it).
@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 /// The address the frames load from.
-pub const SCHEME: &str = "n2draw";
+pub const SCHEME: &str = "runedraw";
 
 macro_rules! file {
     ($path:literal) => {
@@ -44,7 +44,7 @@ static FILES: &[(&str, &[u8])] = &[
 
 /// The frame's address for one drawing.
 pub fn frame_url(block_id: &str) -> String {
-    let test = if std::env::var_os("NOTION2_SELFTEST").is_some() { "&test=1" } else { "" };
+    let test = if std::env::var_os("RUNE_SELFTEST").is_some() { "&test=1" } else { "" };
     format!("{SCHEME}://app/index.html?id={block_id}{test}")
 }
 
@@ -110,7 +110,7 @@ pub fn load_script(block_id: &str, data: &str) -> String {
     let id = serde_json::to_string(block_id).unwrap_or_default();
     let json = serde_json::to_string(data).unwrap_or_default();
     format!(
-        "window.__n2 ? window.__n2.drawingLoad({id}, {json}) : ((window.__n2_scenes = window.__n2_scenes || {{}})[{id}] = {json})"
+        "window.__rune ? window.__rune.drawingLoad({id}, {json}) : ((window.__rune_scenes = window.__rune_scenes || {{}})[{id}] = {json})"
     )
 }
 

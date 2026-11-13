@@ -204,7 +204,7 @@ new MutationObserver(look).observe(document.documentElement, { childList: true, 
 look();
 
 // For the self-test: what the notepad holds, and typing into it.
-window.__n2pad = {
+window.__runepad = {
   lines: () => (notes() ? linesOf(notes()) : []),
   type: (lines) => {
     const list = notes();

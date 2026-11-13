@@ -3,8 +3,12 @@
 This is the long form: a walk through, every part of the app, the AI, and how
 to build it. The short page is the [README](../README.md).
 
-(The app was called Notion 2.0 at first. The program, the notes folder and
-the page links keep that name inside: `notion2`.)
+(The app was called Notion 2.0 at first. A few identities inside keep that
+name: the bundle id `com.jackhagan.notion2`, by which macOS and the updater
+know the app, and the page links `notion2://page/…` of older notes, which are
+still read. So that what was set up before still works, the app keeps a link
+`Contents/MacOS/notion2` to its program, and the notes folder leaves a link
+`Notion 2.0` where it was.)
 
 A local-first workspace of notes and a calendar for macOS, written in Rust with
 [Dioxus](https://dioxuslabs.com) (desktop). Pages, nested sub-pages and a block
@@ -135,7 +139,7 @@ through the interface (menus, editing, undo, tabs, sidebar, spaces, settings),
 writes a report and quits. Always point it at a scratch database:
 
 ```bash
-NOTION2_DB=/tmp/notion2-test.db NOTION2_SELFTEST=/tmp/notion2-report.json cargo run
+RUNE_DB=/tmp/rune-test.db RUNE_SELFTEST=/tmp/rune-report.json cargo run
 ```
 
 ## What's in it
@@ -303,38 +307,38 @@ tool use Rune's tools on a throwaway workspace (build the app first):
 
 ## Use it from Aven, Claude Code or Codex (MCP)
 
-The app doubles as an MCP server: `notion2 --mcp` serves the workspace over
+The app doubles as an MCP server: `rune --mcp` serves the workspace over
 stdio, with no window. Agents can search, list, read, create, append to,
 replace, rename/move, trash and restore pages, and list, add, change and
 delete calendar events (times are local, like `2026-11-10T14:00`). Content goes
 in and out as Markdown, and sub-page links look like
 `[Title](rune://page/<id>)`. Pages are never deleted permanently. Build the app first (`scripts/bundle.sh`).
 
-- **Aven:** Settings → MCP → Add server. Name `notion2`, Type *Command on this
+- **Aven:** Settings → MCP → Add server. Name `rune`, Type *Command on this
   Mac*, Command
-  `/Applications/Rune.app/Contents/MacOS/notion2`,
+  `/Applications/Rune.app/Contents/MacOS/Rune`,
   Arguments `--mcp`. Pick Claude and/or Codex (for Claude, *All my projects*).
 - **Claude Code:**
   ```bash
-  claude mcp add --scope user rune -- "/Applications/Rune.app/Contents/MacOS/notion2" --mcp
+  claude mcp add --scope user rune -- "/Applications/Rune.app/Contents/MacOS/Rune" --mcp
   ```
 - **Codex:**
   ```bash
-  codex mcp add rune -- "/Applications/Rune.app/Contents/MacOS/notion2" --mcp
+  codex mcp add rune -- "/Applications/Rune.app/Contents/MacOS/Rune" --mcp
   ```
 - **Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
   ```json
   { "mcpServers": { "rune": {
-      "command": "/Applications/Rune.app/Contents/MacOS/notion2",
+      "command": "/Applications/Rune.app/Contents/MacOS/Rune",
       "args": ["--mcp"] } } }
   ```
 
-Set `NOTION2_DB=/some/test.db` to point the app or the server at a different
+Set `RUNE_DB=/some/test.db` to point the app or the server at a different
 database file.
 
 ## Data
 
-`~/Library/Application Support/Notion 2.0/workspace.db` (override with `NOTION2_DB`)
+`~/Library/Application Support/Rune/workspace.db` (override with `RUNE_DB`)
 
 ## Layout
 
@@ -347,7 +351,7 @@ database file.
 | `src/ai.rs` | Picks the AI and model, prompts, cleans replies |
 | `src/glass.rs` | The blur behind the window |
 | `src/ai/local.rs` | Finds and runs installed AI tools (Claude Code, Codex) |
-| `src/mcp.rs` | MCP server (`notion2 --mcp`) so agents can use the workspace |
+| `src/mcp.rs` | MCP server (`rune --mcp`) so agents can use the workspace |
 | `src/when.rs` | Dates and times for the calendar (local time) |
 | `src/ui/calendar.rs` | Calendar week/month views and the event editor |
 | `src/inline.rs` | Inline formatting: Markdown ↔ formatted runs ↔ editor HTML |

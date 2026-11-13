@@ -7,7 +7,7 @@
 //! a change made by the MCP server.
 //!
 //! Which records changed is noted by triggers in the notes file, so every
-//! program that writes the file is seen: the app, `notion2 --mcp`, an older
+//! program that writes the file is seen: the app, `rune --mcp`, an older
 //! copy of Rune. A trigger only adds (kind, id) to `sync_dirty`; the engine
 //! turns those into versions when it runs. While the engine applies another
 //! device's change it puts the row `applying` in `sync_meta`, and the

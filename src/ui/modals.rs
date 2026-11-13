@@ -1922,7 +1922,7 @@ pub fn VoiceModal() -> Element {
     let mut text = use_signal(String::new);
     let mut last_change = use_signal(crate::model::now_ms);
     let mut on_pause = use_signal(|| store::setting("voice_on_pause").as_deref() != Some("off"));
-    let testing = std::env::var_os("NOTION2_SELFTEST").is_some();
+    let testing = std::env::var_os("RUNE_SELFTEST").is_some();
     // What it was opened for: (heading, button, hint while it waits for a
     // pause, hint with the pause switch off, what to say).
     let what = use_hook(|| state.ui.peek().voice.clone());
@@ -1961,7 +1961,7 @@ pub fn VoiceModal() -> Element {
         let ears = ears.clone();
         move || {
             // The cursor goes in the box first.
-            document::eval("window.__n2 && window.__n2.focus('voice-text', -1)");
+            document::eval("window.__rune && window.__rune.focus('voice-text', -1)");
             if !own_ears {
                 // Ask macOS to start Dictation for it.
                 spawn(async move {

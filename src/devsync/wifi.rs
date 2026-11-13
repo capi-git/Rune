@@ -1,7 +1,7 @@
 //! Sync over Wi-Fi (docs/sync-wifi.md): the Mac serves its own sync folder
 //! to the iPhones that are paired with it, over HTTPS with a certificate of
 //! its own. mobile/scripts/wifi-mac.py does the same in Python and is the
-//! reference; the iPhone's side is mobile/Core/Sources/Notion2Core/Wifi*.swift.
+//! reference; the iPhone's side is mobile/Core/Sources/RuneCore/Wifi*.swift.
 //!
 //! What is kept, in `<state dir>/wifi/` (the folder and the secrets in it
 //! only the user can read): `cert.der` and `key.der` (made once; a new one
@@ -704,9 +704,11 @@ fn certificate(wifi: &Path) -> Result<(Vec<u8>, Vec<u8>), String> {
 
 // MARK: The link and the QR code
 
-/// `notion2://pair?v=1&host=…&port=…&cert=…&code=…&name=…`
+/// `rune://pair?v=1&host=…&port=…&cert=…&code=…&name=…` (A Mac before the
+/// name Rune gave `notion2://pair?…` with the same fields; the iPhone reads
+/// both.)
 fn pair_link(hosts: &[String], port: u16, fingerprint: &str, code: &str, name: &str) -> String {
-    let mut link = String::from("notion2://pair?v=1");
+    let mut link = String::from("rune://pair?v=1");
     for host in hosts {
         link.push_str(&format!("&host={}", http::percent_encode(host)));
     }

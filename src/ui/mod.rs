@@ -195,7 +195,7 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
     // The AI from anywhere: Control-Option-Space in any app brings this window
     // forward with the AI open (first window only; not in a test run, which
     // must not take the shortcut from the installed app).
-    if primary && std::env::var_os("NOTION2_SELFTEST").is_none() {
+    if primary && std::env::var_os("RUNE_SELFTEST").is_none() {
         let _ = dioxus::desktop::use_global_shortcut(crate::state::AI_SHORTCUT, move |key| {
             let on = crate::store::setting("voice_anywhere").as_deref() != Some("off");
             if on && key == dioxus::desktop::HotKeyState::Pressed && crate::ai::shown() {
@@ -217,7 +217,7 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
         // Opened straight from Downloads, macOS runs a copy from a place
         // that changes each time: updates and the AI connector need the real one.
         let moved = std::env::current_exe().is_ok_and(|p| p.to_string_lossy().contains("/AppTranslocation/"));
-        if moved && std::env::var_os("NOTION2_SELFTEST").is_none() {
+        if moved && std::env::var_os("RUNE_SELFTEST").is_none() {
             spawn(async move {
                 crate::ai::sleep_ms(1500).await;
                 state.notice("Rune runs from a temporary place. Quit it, move Rune into your Applications folder, and open it again. Your notes are safe.");
@@ -227,7 +227,7 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
     // Updates (first window only; never during a self-test): look for a
     // newer build soon after opening, then now and then.
     use_future(move || async move {
-        if !primary || std::env::var_os("NOTION2_SELFTEST").is_some() || crate::update::own_build().is_none() {
+        if !primary || std::env::var_os("RUNE_SELFTEST").is_some() || crate::update::own_build().is_none() {
             return;
         }
         // The window is open: this build runs. Keep it, and say so after an update.
@@ -246,7 +246,7 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
     // Meeting notes (first window only; never during a self-test): look every
     // few seconds for a Teams meeting starting or ending.
     use_future(move || async move {
-        if !primary || std::env::var_os("NOTION2_SELFTEST").is_some() {
+        if !primary || std::env::var_os("RUNE_SELFTEST").is_some() {
             return;
         }
         // A call can go on while the app is closed and opened again: the
@@ -339,7 +339,7 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
     // Daily backups (first window only; never during a self-test). The first
     // check waits a little so it never competes with opening the app.
     use_future(move || async move {
-        if !primary || std::env::var_os("NOTION2_SELFTEST").is_some() {
+        if !primary || std::env::var_os("RUNE_SELFTEST").is_some() {
             return;
         }
         crate::ai::sleep_ms(30_000).await;
@@ -350,14 +350,14 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
         }
     });
 
-    // Developer self-test: NOTION2_SELFTEST=<file> (always with a throwaway
-    // NOTION2_DB) clicks through the interface, writes a report and quits.
+    // Developer self-test: RUNE_SELFTEST=<file> (always with a throwaway
+    // RUNE_DB) clicks through the interface, writes a report and quits.
     use_future(move || async move {
-        let Some(path) = std::env::var_os("NOTION2_SELFTEST").filter(|_| primary) else { return };
+        let Some(path) = std::env::var_os("RUNE_SELFTEST").filter(|_| primary) else { return };
         // The test clicks and types through the whole app: never on the real
         // workspace, only on a throwaway one.
-        if std::env::var_os("NOTION2_DB").filter(|p| !p.is_empty()).is_none() {
-            eprintln!("The self-test needs NOTION2_DB=<a throwaway file>; it does not run on the real workspace.");
+        if std::env::var_os("RUNE_DB").filter(|p| !p.is_empty()).is_none() {
+            eprintln!("The self-test needs RUNE_DB=<a throwaway file>; it does not run on the real workspace.");
             std::process::exit(2);
         }
         // Keep the test window in view: macOS pauses drawing in a window
@@ -377,15 +377,15 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
         // No AI tool is asked during the test; this stands in for its reply.
         crate::ai::set_canned_reply(Some("# Shop and call list\n\nFor the weekend.\n\n## To do\n\n- [ ] Buy milk\n- [ ] Call Sam about Friday\n".to_string()));
         crate::ai::sleep_ms(1200).await;
-        // NOTION2_SELFTEST_ONLY=<part of a name>[,…] runs only those checks.
-        let only = std::env::var("NOTION2_SELFTEST_ONLY").unwrap_or_default();
-        let real = std::env::var_os("NOTION2_REAL_LISTENER").is_some();
-        let dictation = std::env::var_os("NOTION2_REAL_DICTATION").is_some();
-        let video = std::env::var_os("NOTION2_REAL_VIDEO").is_some();
-        let real_pad = std::env::var_os("NOTION2_REAL_PAD").is_some();
-        let pad_try = std::env::var_os("NOTION2_PAD_TRY").is_some();
+        // RUNE_SELFTEST_ONLY=<part of a name>[,…] runs only those checks.
+        let only = std::env::var("RUNE_SELFTEST_ONLY").unwrap_or_default();
+        let real = std::env::var_os("RUNE_REAL_LISTENER").is_some();
+        let dictation = std::env::var_os("RUNE_REAL_DICTATION").is_some();
+        let video = std::env::var_os("RUNE_REAL_VIDEO").is_some();
+        let real_pad = std::env::var_os("RUNE_REAL_PAD").is_some();
+        let pad_try = std::env::var_os("RUNE_PAD_TRY").is_some();
         let script = format!(
-            "window.__n2_only = {}; window.__n2_real_listener = {real}; window.__n2_real_dictation = {dictation}; window.__n2_real_video = {video}; window.__n2_real_pad = {real_pad}; window.__n2_pad_try = {pad_try};\n{SELFTEST_JS}",
+            "window.__rune_only = {}; window.__rune_real_listener = {real}; window.__rune_real_dictation = {dictation}; window.__rune_real_video = {video}; window.__rune_real_pad = {real_pad}; window.__rune_pad_try = {pad_try};\n{SELFTEST_JS}",
             serde_json::to_string(&only).unwrap_or_default()
         );
         let mut test = document::eval(&script);
@@ -435,10 +435,10 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
         std::process::exit(0);
     });
 
-    // Developer aid: NOTION2_DUMP_HTML=<file> saves the rendered window as HTML
+    // Developer aid: RUNE_DUMP_HTML=<file> saves the rendered window as HTML
     // and quits, so the layout can be checked in an ordinary browser.
     use_future(move || async move {
-        let Some(path) = std::env::var_os("NOTION2_DUMP_HTML").filter(|_| primary) else { return };
+        let Some(path) = std::env::var_os("RUNE_DUMP_HTML").filter(|_| primary) else { return };
         crate::ai::sleep_ms(2500).await;
         if let Ok(v) = document::eval("return document.documentElement.outerHTML").await {
             if let Some(html) = v.as_str() {

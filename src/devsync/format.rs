@@ -1,6 +1,6 @@
 //! The files of sync between devices (docs/sync-format.md, format 1): their
 //! names, and what is in them. The iPhone has the same rules in
-//! mobile/Core/Sources/Notion2Core/SyncFormat.swift.
+//! mobile/Core/Sources/RuneCore/SyncFormat.swift.
 
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;

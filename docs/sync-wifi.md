@@ -6,7 +6,7 @@ Decided on 2026-11-10 (the user wants both this and iCloud Drive; see
 `docs/mobile-plan.md`, decision 2). Both apps must follow this file exactly.
 
 State on 2026-11-11: the iPhone side is built and tested
-(`mobile/Core/Sources/Notion2Core/Wifi*.swift`, `mobile/Notion2/SyncCoordinator.swift`).
+(`mobile/Core/Sources/RuneCore/Wifi*.swift`, `mobile/Rune/SyncCoordinator.swift`).
 The Mac's side is `src/devsync/wifi.rs`, on from Settings ▸ Sync ▸ Over
 Wi-Fi. `mobile/scripts/wifi-mac.py` plays the Mac's part in tests. On 2026-11-10 it also worked on a real
 iPhone (iOS 27) against `wifi-mac.py --lan --qr`: the camera read the QR code
@@ -23,7 +23,7 @@ and opened the app, the app paired, and the first notes came.
   iCloud Drive.
 - The two are paired once: the Mac shows a QR code, the iPhone's camera reads
   it. After that no code is needed.
-- It works only while both are on the same network and Notion 2.0 is open on
+- It works only while both are on the same network and Rune is open on
   the Mac and in front on the iPhone. Away from the Mac the iPhone has its last
   state; with iCloud Drive also on, it goes on through that.
 - Both ways can be on at once. A device may get the same file by both: a file
@@ -35,7 +35,7 @@ and opened the app, the app paired, and the first notes came.
 Sync over Wi-Fi must work when the folder in iCloud Drive does not exist. So
 the Mac writes its files in a folder of its own, always:
 
-    ~/Library/Application Support/Notion 2.0/Sync/sync-v1/
+    ~/Library/Application Support/Rune/Sync/sync-v1/
 
 with the layout of `docs/sync-format.md` (`devices/`, `snapshots/`, `changes/`,
 `files/`). A live database is never in it.
@@ -67,7 +67,7 @@ The connection is HTTPS (TLS 1.2 or later). There is no certificate authority:
 
 The QR code holds one link:
 
-    notion2://pair?v=1&host=Jacks-MacBook-Pro.local&host=192.168.1.20&port=47815&cert=<64 hex>&code=<code>&name=MacBook%20Pro
+    rune://pair?v=1&host=Jacks-MacBook-Pro.local&host=192.168.1.20&port=47815&cert=<64 hex>&code=<code>&name=MacBook%20Pro
 
 | Part | Meaning |
 | --- | --- |
@@ -79,7 +79,9 @@ The QR code holds one link:
 | `name` | The Mac's name, for the question "Connect to MacBook Pro?". |
 
 - The iPhone's camera reads the code and opens the iPhone app with the link
-  (the app registers the scheme `notion2`). The app asks "Connect to …?".
+  (the app registers the schemes `rune` and `notion2`: a Mac before the name
+  Rune showed `notion2://pair?…` with the same parts, and the iPhone reads
+  both). The app asks "Connect to …?".
 - A new code is made each time the Mac shows the QR code. When it is used, or
   the window that shows it is closed, or 10 minutes passed, it is dead.
 - The iPhone first finds the address at which the Mac answers (any answer
@@ -208,8 +210,8 @@ does not keep a second set of the notes. Pictures stay (also after
 4. In Settings, under Sync: a switch "Sync over Wi-Fi", a button "Connect an
    iPhone…" that shows the QR code (and a new code each time), and the list of
    paired iPhones with a way to remove one. The iPhone app's texts say "show
-   the code for an iPhone in Notion 2.0 on your Mac": keep that findable.
-5. macOS may ask "Do you want Notion 2.0 to accept incoming network
+   the code for an iPhone in Rune on your Mac": keep that findable.
+5. macOS may ask "Do you want Rune to accept incoming network
    connections?" the first time. The app is signed, so the default firewall
    setting lets it through.
 6. The listener must not keep the Mac awake.

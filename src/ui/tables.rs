@@ -541,7 +541,7 @@ fn Grid(page_id: String, id: String, table: Table, order: Vec<usize>, picked: Ve
     let head_check = if all_picked { "all" } else if picked.is_empty() { "none" } else { "some" };
     // (Each time the table is drawn, also with no frozen column: what is
     // cut at its left edge while it is scrolled sideways is made again.)
-    document::eval(&format!("window.__n2 && window.__n2.freezeColumns && window.__n2.freezeColumns({})", serde_json::to_string(&id).unwrap_or_default()));
+    document::eval(&format!("window.__rune && window.__rune.freezeColumns && window.__rune.freezeColumns({})", serde_json::to_string(&id).unwrap_or_default()));
     let b_kinds = id.clone();
     let block_class = format!("table-block{}{}{}{}", if typed { " typed" } else { "" }, if any_menu { " menu-open" } else { "" }, if locked { " locked" } else { "" }, if table.view.sort.is_empty() { "" } else { " sorted" });
     rsx! {

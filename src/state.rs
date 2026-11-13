@@ -1549,7 +1549,7 @@ pub fn tables_put_back(target: &mut [Block], current: &[Block], elsewhere: impl 
 /// Put text on the Mac's clipboard. A test run keeps the person's clipboard
 /// as it is: the text goes where the test can read it instead.
 fn set_clipboard(text: String) -> Result<(), String> {
-    if std::env::var_os("NOTION2_SELFTEST").is_some() {
+    if std::env::var_os("RUNE_SELFTEST").is_some() {
         document::eval(&format!("document.body.dataset.copied = {};", serde_json::to_string(&text).unwrap_or_default()));
         return Ok(());
     }
@@ -2736,7 +2736,7 @@ impl AppState {
             if let Some(bs) = all.get_mut(page_id) {
                 for i in clashes {
                     if let Some(b) = bs.get_mut(i) {
-                        eprintln!("[notion2] line {} of page {page_id} had the id of another line: a new id", b.id);
+                        eprintln!("[rune] line {} of page {page_id} had the id of another line: a new id", b.id);
                         b.id = new_id();
                     }
                 }
@@ -3942,13 +3942,13 @@ impl AppState {
         };
         let title = self.page_title(page_id);
         let text = crate::aven::note_for_chat(&title, page_id, &self.page_markdown(page_id));
-        if std::env::var_os("NOTION2_SELFTEST").is_some() {
+        if std::env::var_os("RUNE_SELFTEST").is_some() {
             // For the self-test: what was given, without the clipboard.
             let first = text.lines().next().unwrap_or_default().to_string();
             document::eval(&format!("document.body.dataset.sentToAven = {}", serde_json::to_string(&first).unwrap_or_default()));
         }
         let copy = |text: String| {
-            if std::env::var_os("NOTION2_SELFTEST").is_some() {
+            if std::env::var_os("RUNE_SELFTEST").is_some() {
                 return Ok(());
             }
             arboard::Clipboard::new().and_then(|mut c| c.set_text(text)).map_err(|e| e.to_string())
@@ -4004,7 +4004,7 @@ impl AppState {
         if !text.contains('\n') && blocks.iter().any(|b| b.kind != BlockKind::Text) {
             text.push('\n');
         }
-        document::eval(&format!("window.__n2 && (window.__n2.keptCopy = {});", serde_json::to_string(&text).unwrap_or_default()));
+        document::eval(&format!("window.__rune && (window.__rune.keptCopy = {});", serde_json::to_string(&text).unwrap_or_default()));
         // (The pages of rows that are not in the Trash now: the cut puts
         // them there, and a paste of the table takes those out again, and
         // not one that the person put there by hand before.)
@@ -4049,12 +4049,12 @@ impl AppState {
     pub fn focus(&self, caret: Caret) {
         let pos: i64 = if caret.pos == usize::MAX { -1 } else { caret.pos as i64 };
         let target = serde_json::to_string(&format!("blk-{}", caret.id)).unwrap_or_default();
-        document::eval(&format!("window.__n2 && window.__n2.focus({target}, {pos})"));
+        document::eval(&format!("window.__rune && window.__rune.focus({target}, {pos})"));
     }
 
     pub fn focus_title(&self, page_id: &str) {
         let target = serde_json::to_string(&format!("title-{page_id}")).unwrap_or_default();
-        document::eval(&format!("window.__n2 && window.__n2.focus({target}, -1)"));
+        document::eval(&format!("window.__rune && window.__rune.focus({target}, -1)"));
     }
 
     /// Block editors are not re-rendered on every keystroke (so fast typing is
@@ -4072,7 +4072,7 @@ impl AppState {
             .map(|b| (format!("blk-{}", b.id), inline::to_html(b.kind, &b.text)))
             .collect();
         if let Ok(json) = serde_json::to_string(&map) {
-            document::eval(&format!("window.__n2 && window.__n2.setValues({json})"));
+            document::eval(&format!("window.__rune && window.__rune.setValues({json})"));
         }
     }
 
@@ -4522,7 +4522,7 @@ impl AppState {
 
     fn flash_tab(&self, id: &str) {
         let id = serde_json::to_string(id).unwrap_or_default();
-        document::eval(&format!("window.__n2 && window.__n2.landed({id})"));
+        document::eval(&format!("window.__rune && window.__rune.landed({id})"));
     }
 
     pub fn back(mut self) {
@@ -4684,7 +4684,7 @@ impl AppState {
             ui.zoom = (ui.zoom * 10.0).round() / 10.0;
         }
         self.save_ui();
-        document::eval("window.__n2 && window.__n2.sizeAll()");
+        document::eval("window.__rune && window.__rune.sizeAll()");
     }
 
     // ----- pages ---------------------------------------------------------
@@ -4828,7 +4828,7 @@ impl AppState {
             ui.focus_mode = !ui.focus_mode;
             ui.focus_mode
         };
-        document::eval(&format!("window.__n2 && window.__n2.focusMode({on})"));
+        document::eval(&format!("window.__rune && window.__rune.focusMode({on})"));
         if on {
             self.toast("Focus mode. Esc leaves it.");
         }
@@ -5194,7 +5194,7 @@ impl AppState {
             ai_on.set(on);
         }
         // Kept for the next time the app opens (only what it knows for certain).
-        if ai::local::installed_cached().is_some() && std::env::var_os("NOTION2_SELFTEST").is_none() {
+        if ai::local::installed_cached().is_some() && std::env::var_os("RUNE_SELFTEST").is_none() {
             let found = if on { "1" } else { "0" };
             if store::setting(ai::FOUND_SETTING).as_deref() != Some(found) {
                 store::set_setting(ai::FOUND_SETTING, found);
@@ -5210,7 +5210,7 @@ impl AppState {
     /// box or line that has the caret. `mark` says where, for the page script.
     fn dictate(self, mark: &str) {
         document::eval(&format!("document.body.dataset.dictating = {}", serde_json::to_string(mark).unwrap_or_default()));
-        if std::env::var_os("NOTION2_SELFTEST").is_none() {
+        if std::env::var_os("RUNE_SELFTEST").is_none() {
             crate::dictation::start();
         }
     }
@@ -5224,7 +5224,7 @@ impl AppState {
         if !crate::listen::own_ears() {
             if crate::dictation::allowed() {
                 let started = crate::dictation::start();
-                if std::env::var_os("NOTION2_SELFTEST").is_some() {
+                if std::env::var_os("RUNE_SELFTEST").is_some() {
                     document::eval(&format!("document.body.dataset.dictationAsked = '{started}'"));
                 }
             }
@@ -5238,18 +5238,18 @@ impl AppState {
         let (listener, mut heard) = match crate::listen::start(false) {
             Ok(started) => started,
             Err(message) => {
-                document::eval("window.__n2 && window.__n2.hearEnd()");
+                document::eval("window.__rune && window.__rune.hearEnd()");
                 return self.notice(message);
             }
         };
         BOX_EARS.with(|e| *e.borrow_mut() = Some(listener));
-        document::eval("window.__n2 && window.__n2.hearStart()");
+        document::eval("window.__rune && window.__rune.hearStart()");
         spawn_forever(async move {
             use crate::listen::Heard;
             use futures_util::future::{select, Either};
             let join = |said: &str, more: &str| if said.is_empty() { more.to_string() } else { format!("{said} {more}") };
             let show = |text: &str| {
-                document::eval(&format!("window.__n2 && window.__n2.hear({})", serde_json::to_string(text).unwrap_or_default()));
+                document::eval(&format!("window.__rune && window.__rune.hear({})", serde_json::to_string(text).unwrap_or_default()));
             };
             let mut said = String::new();
             let mut any = false;
@@ -5290,7 +5290,7 @@ impl AppState {
                 }
             }
             BOX_EARS.with(|e| *e.borrow_mut() = None);
-            document::eval("window.__n2 && window.__n2.hearEnd()");
+            document::eval("window.__rune && window.__rune.hearEnd()");
         });
     }
 
@@ -5978,7 +5978,7 @@ impl AppState {
             }
         }
         // In a test run nothing is spoken; a short wait stands in for it.
-        let child = if std::env::var_os("NOTION2_SELFTEST").is_some() {
+        let child = if std::env::var_os("RUNE_SELFTEST").is_some() {
             std::process::Command::new("/bin/sleep").arg("30").spawn()
         } else {
             std::process::Command::new("/usr/bin/say").stdin(std::process::Stdio::piped()).spawn().map(|mut child| {
@@ -8016,7 +8016,7 @@ impl AppState {
             }
         });
         self.player.set(Some(Playing { video, from: None, problem: None, ready: false }));
-        document::eval("requestAnimationFrame(()=>requestAnimationFrame(()=>window.__n2_player && window.__n2_player()))");
+        document::eval("requestAnimationFrame(()=>requestAnimationFrame(()=>window.__rune_player && window.__rune_player()))");
     }
 
     /// Play a video from its line in a page (the player remembers the line).
@@ -8187,7 +8187,7 @@ impl AppState {
         let Some(playing) = self.player.peek().clone().filter(|p| p.problem.is_none()) else { return };
         // A test run has the frame and no player (nothing is fetched): it
         // notes where the player was told to go, so a check can read it.
-        if std::env::var_os("NOTION2_SELFTEST").is_some() {
+        if std::env::var_os("RUNE_SELFTEST").is_some() {
             document::eval(&format!("document.body.dataset.playerAt = '{:.0},{:.0},{:.0},{:.0}'", place.x, place.y, place.w, place.h));
         }
         if crate::video::stand_in() || place.w < 40.0 {
@@ -8233,7 +8233,7 @@ impl AppState {
             store::set_setting("player_dock", &serde_json::to_string(&place).unwrap_or_default());
             self.player_dock.set(place);
         }
-        document::eval("requestAnimationFrame(()=>requestAnimationFrame(()=>window.__n2_player && window.__n2_player()))");
+        document::eval("requestAnimationFrame(()=>requestAnimationFrame(()=>window.__rune_player && window.__rune_player()))");
     }
 
     pub fn close_player(mut self) {
@@ -8927,7 +8927,7 @@ impl AppState {
             return;
         }
         // A test run opens nothing outside the app: it notes the address.
-        if std::env::var_os("NOTION2_SELFTEST").is_some() {
+        if std::env::var_os("RUNE_SELFTEST").is_some() {
             document::eval(&format!("document.body.dataset.opened = {}", serde_json::to_string(url).unwrap_or_default()));
             return;
         }
@@ -9053,7 +9053,7 @@ impl AppState {
                 if let Some(s) = self.slash.write().as_mut() {
                     s.selected = sel;
                 }
-                document::eval("window.__n2 && window.__n2.scrollSelected()");
+                document::eval("window.__rune && window.__rune.scrollSelected()");
             }
             "enter" if len > 0 && slash.pages => self.apply_mention(slash.selected),
             "enter" if len > 0 => self.apply_slash(slash.selected),
@@ -9464,7 +9464,7 @@ impl AppState {
         if !crate::files::valid_name(name) {
             return;
         }
-        if std::env::var_os("NOTION2_SELFTEST").is_some() {
+        if std::env::var_os("RUNE_SELFTEST").is_some() {
             document::eval(&format!("document.body.dataset.copied = {};", serde_json::to_string(&format!("picture:{name}")).unwrap_or_default()));
             return self.toast("Copied the picture");
         }
@@ -9494,7 +9494,7 @@ impl AppState {
                 })
                 .collect()
         };
-        document::eval(&format!("window.__n2 && window.__n2.pagesFound && window.__n2.pagesFound({n}, {})", serde_json::Value::Array(found)));
+        document::eval(&format!("window.__rune && window.__rune.pagesFound && window.__rune.pagesFound({n}, {})", serde_json::Value::Array(found)));
     }
 
     /// A page chosen with "@" in the Ask box: it goes with the question, as
@@ -10135,14 +10135,14 @@ impl AppState {
                 crate::ui::open_window(route);
             }
             "undo" => {
-                document::eval("window.__n2 && window.__n2.undo()");
+                document::eval("window.__rune && window.__rune.undo()");
             }
             "redo" => {
-                document::eval("window.__n2 && window.__n2.redo()");
+                document::eval("window.__rune && window.__rune.redo()");
             }
             "bold" | "italic" | "strike" | "code" | "link" => {
                 let kind = serde_json::to_string(name).unwrap_or_default();
-                document::eval(&format!("window.__n2 && window.__n2.format({kind})"));
+                document::eval(&format!("window.__rune && window.__rune.format({kind})"));
             }
             "send_to_aven" => match self.current_page() {
                 Some(id) => self.send_to_aven(&id),
@@ -10184,7 +10184,7 @@ impl AppState {
             }
             // For the self-test: as if no AI tool were installed, and back.
             "ai_off_for_test" | "ai_on_for_test" => {
-                if std::env::var_os("NOTION2_SELFTEST").is_some() {
+                if std::env::var_os("RUNE_SELFTEST").is_some() {
                     ai::pretend_no_ai(name == "ai_off_for_test");
                     self.show_ai_state();
                 }
@@ -10204,7 +10204,7 @@ impl AppState {
             "paste_clipboard" => {
                 if let Ok(text) = arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
                     let text = serde_json::to_string(&text).unwrap_or_default();
-                    document::eval(&format!("window.__n2 && window.__n2.pasteText({text})"));
+                    document::eval(&format!("window.__rune && window.__rune.pasteText({text})"));
                 }
             }
             "read_aloud" => {
@@ -10249,7 +10249,7 @@ impl AppState {
                 crate::pad::set_inline(false);
             }
             "pad_old" => self.change_pad(|p| p.since -= 10 * when::MINUTE),
-            // Only when the test asks for the pad's real window (NOTION2_REAL_PAD).
+            // Only when the test asks for the pad's real window (RUNE_REAL_PAD).
             // (For the try of the pad by hand: this window goes behind the
             // others and gives the keyboard back.)
             "step_back" => crate::glass::step_back(&dioxus::desktop::window().window),
@@ -10276,13 +10276,13 @@ impl AppState {
             "quick_find" => self.set_modal(Some(Modal::QuickFind)),
             // Find in the page in front (drawn and run by bridge.js).
             "find" => {
-                document::eval("window.__n2 && window.__n2.find()");
+                document::eval("window.__rune && window.__rune.find()");
             }
             "find_next" => {
-                document::eval("window.__n2 && window.__n2.findStep(1)");
+                document::eval("window.__rune && window.__rune.findStep(1)");
             }
             "find_prev" => {
-                document::eval("window.__n2 && window.__n2.findStep(-1)");
+                document::eval("window.__rune && window.__rune.findStep(-1)");
             }
             "calendar" => self.navigate(Route::Calendar),
             "graph" => self.navigate(Route::Graph),
@@ -10323,7 +10323,7 @@ impl AppState {
             // calendar, so that a check of a meeting with no event does not
             // hang on what the other checks left there at this hour.)
             "meetings_alone" | "meetings_alone_off" => {
-                if std::env::var_os("NOTION2_SELFTEST").is_some() {
+                if std::env::var_os("RUNE_SELFTEST").is_some() {
                     MEETING_ALONE.with(|m| m.set(name == "meetings_alone"));
                 }
             }
