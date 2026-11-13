@@ -538,6 +538,14 @@ button {
 .tab:active:not(:has(.tab-menu)) {
   transform: var(--press);
 }
+/* And no motion back from a press while the menu is open: the right press
+   that opens the menu presses the tab first, and for the 120 ms that the
+   tab took to grow back, the menu was placed against the tab and then
+   stood at the left edge of the window. */
+.tab:has(.tab-menu) {
+  transform: none;
+  transition: none;
+}
 @media (prefers-reduced-motion: reduce) {
   .tab-glider {
     transition: opacity 120ms ease;
@@ -6995,20 +7003,72 @@ button.due-chip:focus-visible {
 .outline-item:hover .outline-bar {
   opacity: 1;
 }
+/* Open (the pointer or the keyboard on it): the names as a quiet list with
+   no box, a thin line at its left, the parts brighter, the sections under
+   them set in, and a blue dot at the section in view. (It was a box of
+   right-aligned names with a dash after each: large and hard to read.) */
 .page-outline-list:hover,
 .page-outline-list:focus-within {
-  background: var(--popover);
-  border-color: var(--sep);
-  box-shadow: var(--shadow);
+  align-items: stretch;
+  gap: 0;
+  width: 210px;
+  padding: 6px 6px 6px 12px;
+  border-color: transparent;
+  border-left-color: var(--sep);
+  border-radius: 0;
+  background: var(--card);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
   overflow-y: auto;
+}
+.page-outline-list:hover .outline-item,
+.page-outline-list:focus-within .outline-item {
+  position: relative;
+  justify-content: flex-start;
+  max-width: none;
+  height: 21px;
+  font-size: 11.5px;
+  color: var(--text-3);
+  text-align: left;
+}
+.page-outline-list:hover .outline-item[data-level="1"],
+.page-outline-list:focus-within .outline-item[data-level="1"] {
+  color: var(--text-2);
+  font-weight: 500;
+}
+.page-outline-list:hover .outline-item[data-level="2"],
+.page-outline-list:focus-within .outline-item[data-level="2"] {
+  padding-left: 10px;
+}
+.page-outline-list:hover .outline-item[data-level="3"],
+.page-outline-list:focus-within .outline-item[data-level="3"] {
+  padding-left: 20px;
+}
+.page-outline-list:hover .outline-item.on,
+.page-outline-list:hover .outline-item:hover,
+.page-outline-list:focus-within .outline-item.on,
+.page-outline-list:focus-within .outline-item:hover {
+  color: var(--text);
+}
+.page-outline-list:hover .outline-item.on::before,
+.page-outline-list:focus-within .outline-item.on::before {
+  content: "";
+  position: absolute;
+  left: -9px;
+  top: 50%;
+  width: 5px;
+  height: 5px;
+  margin-top: -2.5px;
+  border-radius: 50%;
+  background: var(--accent);
 }
 .page-outline-list:hover .outline-name,
 .page-outline-list:focus-within .outline-name {
   display: block;
 }
-.page-outline-list:hover .outline-item,
-.page-outline-list:focus-within .outline-item {
-  height: 24px;
+.page-outline-list:hover .outline-bar,
+.page-outline-list:focus-within .outline-bar {
+  display: none;
 }
 .outline-item:focus-visible .outline-name {
   text-decoration: underline;
