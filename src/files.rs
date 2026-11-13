@@ -180,6 +180,8 @@ mod tests {
         assert_eq!(kind_of(b"GIF89a\x01\0"), Some("gif"));
         assert_eq!(kind_of(b"RIFF\x24\0\0\0WEBPVP8 "), Some("webp"));
         assert_eq!(kind_of(b"\0\0\0\x18ftypheic\0\0\0\0"), Some("heic"));
+        // (A file named .heif holds the same: the dialogs offer that ending too.)
+        assert_eq!(kind_of(b"\0\0\0\x18ftypmif1\0\0\0\0"), Some("heic"));
         assert_eq!(kind_of(b"<svg xmlns='http://www.w3.org/2000/svg'><script>"), None);
         assert_eq!(kind_of(b"#!/bin/sh\nrm -rf"), None);
         assert_eq!(kind_of(b""), None);

@@ -21,6 +21,7 @@ mod history;
 mod inline;
 mod layout;
 mod listen;
+mod lock;
 mod maccal;
 mod markdown;
 mod mcp;
@@ -228,6 +229,7 @@ fn build_menu() -> Menu {
             &item("close_tab", "Close Tab", Some("CmdOrCtrl+W")),
             &item("reopen_tab", "Reopen Last Closed Tab", Some("CmdOrCtrl+Shift+T")),
             &PredefinedMenuItem::separator(),
+            &item("lock_page", "Lock Page with Password…", None),
             &item("copy_markdown", "Copy Page as Markdown", None),
             &item("export_page", "Export Page as Markdown…", None),
             &item("export_all", "Export Workspace…", None),
@@ -285,6 +287,7 @@ fn build_menu() -> Menu {
         true,
         &[
             &item("toggle_sidebar", "Show/Hide Sidebar", Some("CmdOrCtrl+\\")),
+            &item("focus_mode", "Focus Mode", Some("CmdOrCtrl+.")),
             &item("calendar", "Calendar", Some("CmdOrCtrl+Shift+C")),
             &item("read_aloud", "Read Page Aloud / Stop", Some("CmdOrCtrl+Shift+R")),
             &item("close_split", "Close Pane", None),

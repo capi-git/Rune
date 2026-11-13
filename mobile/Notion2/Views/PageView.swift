@@ -135,7 +135,7 @@ struct PageView: View {
                                 .foregroundStyle(Theme.text)
                                 .accessibilityAddTraits(.isHeader)
                                 .onTapGesture {
-                                    guard model.canEdit else { return }
+                                    guard editable else { return }
                                     commitLine()
                                     titleDraft = page.title
                                     editingTitle = true
@@ -174,7 +174,7 @@ struct PageView: View {
                             }
                             .contentShape(Rectangle())
                             .onTapGesture {
-                                if model.canEdit, PageView.typesIn(row.block.kind), !row.block.text.contains("\n") {
+                                if editable, PageView.typesIn(row.block.kind), !row.block.text.contains("\n") {
                                     begin(row.block)
                                 }
                             }
@@ -183,7 +183,7 @@ struct PageView: View {
                     .padding(.top, row.spacing)
                 }
 
-                if model.canEdit && editing == nil && !editingTitle {
+                if editable && editing == nil && !editingTitle {
                     // Room below the last line: a tap writes a new one.
                     Color.clear
                         .frame(maxWidth: .infinity)
@@ -227,7 +227,7 @@ struct PageView: View {
         }
         .onAppear {
             // A new page: its name first.
-            if model.canEdit, page.title.isEmpty, blocks.allSatisfy({ $0.text.isEmpty }) {
+            if editable, page.title.isEmpty, blocks.allSatisfy({ $0.text.isEmpty }) {
                 titleDraft = ""
                 editingTitle = true
                 focus = .title
@@ -248,6 +248,9 @@ struct PageView: View {
 
     private var page: Page? { model.workspace.pages[pageID] }
     private var blocks: [Block] { model.workspace.blocks[pageID] ?? [] }
+    /// Lines can be changed here: the notes may be changed, and the page is
+    /// not locked (a locked page opens only on the Mac).
+    private var editable: Bool { model.canEdit && !isLocked(blocks) }
 
     private func begin(_ block: Block) {
         // (A Return that did not make a line must not hold the next one.)

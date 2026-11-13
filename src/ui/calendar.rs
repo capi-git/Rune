@@ -111,7 +111,8 @@ pub fn CalendarView() -> Element {
     let many_spaces = state.spaces.read().len() > 1;
     // The open to-dos that have a day: they show on that day.
     let due: Vec<OpenTodo> = state.open_todos_of(every_space).into_iter().filter(|t| t.due.is_some()).collect();
-    let mut events: Vec<Event> = repeat::expand(state.events.read().values().filter(|e| every_space || e.space_id == space), from, to);
+    // (Each repeat with the notes page that is its own.)
+    let mut events: Vec<Event> = repeat::expand(state.events.read().values().filter(|e| every_space || e.space_id == space), from, to).into_iter().map(|e| state.with_own_page(e)).collect();
     // With the events of the Mac's calendars, when the person has them on.
     events.extend(state.mac_events(&space, from, to));
     // Redraw once a minute so the "now" line keeps up.
@@ -154,7 +155,7 @@ pub fn CalendarView() -> Element {
     let selected = cal
         .selected
         .as_ref()
-        .and_then(|id| repeat::find(&state.events.read(), id).or_else(|| state.mac_event(id)))
+        .and_then(|id| repeat::find(&state.events.read(), id).map(|e| state.with_own_page(e)).or_else(|| state.mac_event(id)))
         .filter(|e| every_space || e.space_id == space);
     let view = cal.view;
     // The day view: the event whose notes show. The one that was clicked,
@@ -640,6 +641,12 @@ fn WeekGrid(days: Vec<NaiveDate>, events: Vec<Event>, selected: Option<String>, 
                             title: "Click to add an event, or drag for a longer one",
                             onmousedown: move |_| closing.set(panel_open || draft.peek().is_some()),
                             onclick: move |e| {
+                                // The time that was pressed, as the page script
+                                // measured it in the column. (Without it: from
+                                // the place inside what was pressed.) It is
+                                // taken by a click that only closes a panel
+                                // too: left there, the next click had it.
+                                let pressed = AppState::cal_press_minute();
                                 if *closing.peek() {
                                     if panel_open {
                                         state.close_event_panel();
@@ -647,11 +654,8 @@ fn WeekGrid(days: Vec<NaiveDate>, events: Vec<Event>, selected: Option<String>, 
                                     return;
                                 }
                                 let slots = 24 * 60 / SLOT_MINUTES;
-                                // The time that was pressed, as the page script
-                                // measured it in the column. (Without it: from
-                                // the place inside what was pressed.)
                                 let y = e.element_coordinates().y;
-                                let mins = AppState::cal_press_minute()
+                                let mins = pressed
                                     .unwrap_or_else(|| ((y / HOUR_PX * 60.0) / f64::from(SLOT_MINUTES)).floor().clamp(0.0, f64::from(slots - 1)) as u32 * SLOT_MINUTES);
                                 let start = when::at(d, NaiveTime::from_hms_opt(mins / 60, mins % 60, 0).unwrap_or(NaiveTime::MIN));
                                 draft.set(Some((start, start + i64::from(SLOT_MINUTES) * MINUTE)));

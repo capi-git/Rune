@@ -25,10 +25,18 @@ pub struct Version {
     pub blocks: Vec<Block>,
 }
 
+/// How long a read or a write waits for another program that holds the file.
+const BUSY_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// What the store says when plain lines would take the place of a locked
+/// page that is not open here.
+pub const REFUSED_LOCKED: &str = "The page is locked: it can be changed only in Rune, with its password.";
+
 /// The form of the notes file that this program writes. Make it one larger
 /// with each change that an older program would damage: a column it would
 /// write back empty, a kind of line it does not know.
-pub const SCHEMA: i64 = 6;
+/// 7: a page can be locked (a line of the kind "locked", see lock.rs).
+pub const SCHEMA: i64 = 7;
 
 impl Store {
     /// `~/Library/Application Support/Notion 2.0/workspace.db`, or the file named
@@ -49,9 +57,12 @@ impl Store {
         let conn = Connection::open(&path)?;
         // The app and the MCP server (`notion2 --mcp`) can both have the file
         // open; wait briefly for the other's write instead of failing.
-        conn.busy_timeout(std::time::Duration::from_secs(3))?;
+        conn.busy_timeout(BUSY_WAIT)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        // What is deleted is overwritten too: the plain lines of a page that
+        // was just locked do not stay in the free parts of the file.
+        conn.pragma_update(None, "secure_delete", "ON")?;
         let store = Store { conn, path: Some(path) };
         store.migrate()?;
         Ok(store)
@@ -68,6 +79,10 @@ impl Store {
     /// Keep a copy of a page as it was (title and blocks). Only the newest
     /// `VERSIONS_KEPT` copies of each page are kept.
     pub fn save_version(&self, page_id: &str, at: i64, title: &str, blocks: &[Block]) -> rusqlite::Result<()> {
+        // (A locked page keeps no history: it would hold its lines in plain.)
+        if crate::lock::is_open(page_id) || blocks.iter().any(|b| b.kind == BlockKind::Locked) || crate::lock::sealed(blocks).is_some() {
+            return Ok(());
+        }
         let json = serde_json::to_string(blocks).unwrap_or_else(|_| "[]".into());
         if self.latest_version(page_id)?.is_some_and(|(_, t, b)| t == title && b == json) {
             return Ok(());
@@ -81,6 +96,31 @@ impl Store {
         )?
         .execute(params![page_id, VERSIONS_KEPT as i64])?;
         tx.commit()
+    }
+
+    /// Lock a page: its lines written sealed (its key is held, see
+    /// `write_blocks`) and every kept copy of it removed, in one
+    /// transaction. Both or none: as two steps, a history that could not be
+    /// removed left the page sealed on disk while the window said that
+    /// nothing was changed, and what was typed then was not kept.
+    pub fn lock_page(&self, page_id: &str, blocks: &[Block], at: i64) -> rusqlite::Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        Self::write_blocks(&tx, page_id, blocks)?;
+        tx.prepare_cached("UPDATE pages SET updated_at=?2 WHERE id=?1")?.execute(params![page_id, at])?;
+        tx.execute("DELETE FROM page_versions WHERE page_id=?1", params![page_id])?;
+        tx.commit()
+    }
+
+    /// Write what the log of changes holds into the file itself and empty
+    /// the log (after a page was locked: the log held its plain lines).
+    /// False when another program reads the file at this moment (a sync
+    /// run, a backup, an AI tool), so that the log could not be emptied:
+    /// the caller tries again later. (It does not wait here.)
+    pub fn checkpoint(&self) -> bool {
+        let _ = self.conn.busy_timeout(std::time::Duration::ZERO);
+        let done = self.conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get::<_, i64>(0)).is_ok_and(|busy| busy == 0);
+        let _ = self.conn.busy_timeout(BUSY_WAIT);
+        done
     }
 
     /// The newest kept copy of a page: (time, title, blocks as saved).
@@ -257,13 +297,20 @@ impl Store {
     }
 
     #[cfg(test)]
+    pub fn run_for_test(&self, sql: &str) {
+        self.conn.execute_batch(sql).unwrap();
+    }
+
+    #[cfg(test)]
     pub fn set_file_schema(&self, v: i64) {
         self.conn.pragma_update(None, "user_version", v).unwrap();
     }
 
     /// Every workspace has at least one space, and every page belongs to one.
     /// Pages written without a space (older versions, an agent) join the
-    /// first space.
+    /// first space. So do the pages and events of a space that is gone (a
+    /// second window made them just after the space was deleted): a page in
+    /// no space shows in no sidebar and no search.
     fn ensure_space(&self) -> rusqlite::Result<()> {
         let first: Option<String> = self
             .conn
@@ -278,17 +325,21 @@ impl Store {
                 space.id
             }
         };
-        self.conn.execute("UPDATE pages SET space_id=?1 WHERE space_id=''", params![first])?;
-        self.conn.execute("UPDATE events SET space_id=?1 WHERE space_id=''", params![first])?;
+        self.conn.execute("UPDATE pages SET space_id=?1 WHERE space_id NOT IN (SELECT id FROM spaces)", params![first])?;
+        self.conn.execute("UPDATE events SET space_id=?1 WHERE space_id NOT IN (SELECT id FROM spaces)", params![first])?;
         Ok(())
     }
 
+    /// The ids of the spaces, the first space first.
+    fn space_ids(&self) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT id FROM spaces ORDER BY position, created_at")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect()
+    }
+
     pub fn load_events(&self) -> rusqlite::Result<Vec<Event>> {
-        let first: String = self
-            .conn
-            .query_row("SELECT id FROM spaces ORDER BY position, created_at LIMIT 1", [], |r| r.get(0))
-            .optional()?
-            .unwrap_or_default();
+        let spaces = self.space_ids()?;
+        let first = spaces.first().cloned().unwrap_or_default();
         let mut stmt = self.conn.prepare(
             "SELECT id, space_id, title, start_ms, end_ms, all_day, color, notes, page_id, created_at, updated_at, remind_min, repeat, join_url
              FROM events ORDER BY start_ms",
@@ -313,7 +364,8 @@ impl Store {
         })?;
         rows.map(|e| {
             e.map(|mut e| {
-                if e.space_id.is_empty() {
+                // (No space, or a space that is gone: see `ensure_space`.)
+                if !spaces.contains(&e.space_id) {
                     e.space_id = first.clone();
                 }
                 e
@@ -424,15 +476,13 @@ impl Store {
                 row_of: r.get::<_, Option<String>>(13)?.filter(|id| !id.is_empty()),
             })
         })?;
-        // A page an agent wrote without a space joins the first one.
-        let first_space: String = self
-            .conn
-            .query_row("SELECT id FROM spaces ORDER BY position, created_at LIMIT 1", [], |r| r.get(0))
-            .optional()?
-            .unwrap_or_default();
+        // A page an agent wrote without a space joins the first one, and so
+        // does a page of a space that is gone (see `ensure_space`).
+        let spaces = self.space_ids()?;
+        let first_space = spaces.first().cloned().unwrap_or_default();
         for page in rows {
             let mut page = page?;
-            if page.space_id.is_empty() {
+            if !spaces.contains(&page.space_id) {
                 page.space_id = first_space.clone();
             }
             pages.insert(page.id.clone(), page);
@@ -467,6 +517,11 @@ impl Store {
         for row in rows {
             let (page_id, block) = row?;
             blocks.entry(page_id).or_default().push(block);
+        }
+        for page_id in crate::lock::open_pages() {
+            if let Some(bs) = blocks.remove(&page_id) {
+                blocks.insert(page_id.clone(), crate::lock::for_store_read(&page_id, bs));
+            }
         }
         Ok((pages, blocks))
     }
@@ -523,7 +578,23 @@ impl Store {
                 tint: Block::tint_or_none(&r.get::<_, Option<String>>(13)?.unwrap_or_default()),
             })
         })?;
-        rows.collect()
+        let blocks: Vec<Block> = rows.collect::<rusqlite::Result<_>>()?;
+        Ok(crate::lock::for_store_read(page_id, blocks))
+    }
+
+    /// The page is locked on disk (its one line is the sealed block: see
+    /// `lock::sealed`, also for the line an older Rune saved as text).
+    fn sealed_on_disk(tx: &Connection, page_id: &str) -> rusqlite::Result<bool> {
+        tx.prepare_cached(
+            "SELECT COUNT(*) FROM blocks WHERE page_id=?1 AND (kind='locked'
+                 OR (kind='text' AND substr(data, 1, 12)='rune-lock-1:' AND (SELECT COUNT(*) FROM blocks WHERE page_id=?1)=1))",
+        )?
+        .query_row(params![page_id], |r| r.get::<_, i64>(0))
+        .map(|n| n > 0)
+    }
+
+    fn refuse_locked() -> rusqlite::Error {
+        rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_AUTH), Some(REFUSED_LOCKED.into()))
     }
 
     /// Add blocks after the last block of a page, and mark the page as
@@ -531,6 +602,20 @@ impl Store {
     /// again (so nothing another program typed into them meanwhile is lost);
     /// a page that holds only one empty line gets the new blocks in its place.
     pub fn append_blocks(&self, page_id: &str, blocks: &[Block], at: i64) -> rusqlite::Result<usize> {
+        // A locked page that is open here takes the lines into its sealed
+        // block; one that is not open takes none.
+        if crate::lock::is_open(page_id) {
+            let mut all = self.load_page_blocks(page_id)?;
+            if all.len() == 1 && all[0].kind == BlockKind::Text && all[0].text.trim().is_empty() {
+                all.clear();
+            }
+            all.extend_from_slice(blocks);
+            self.save_blocks_at(page_id, &all, at)?;
+            return Ok(all.len());
+        }
+        if Self::sealed_on_disk(&self.conn, page_id)? {
+            return Err(Self::refuse_locked());
+        }
         let tx = self.conn.unchecked_transaction()?;
         let (count, last, blank): (i64, Option<i64>, i64) = tx.query_row(
             "SELECT COUNT(*), MAX(position), COALESCE(SUM(kind = 'text' AND TRIM(text) = ''), 0) FROM blocks WHERE page_id=?1",
@@ -583,6 +668,20 @@ impl Store {
     }
 
     fn write_blocks(tx: &rusqlite::Transaction, page_id: &str, blocks: &[Block]) -> rusqlite::Result<()> {
+        // A locked page that is open here is written sealed; plain lines
+        // never take the place of a sealed page that is not open here (an
+        // AI tool, a meeting's notes), unless its password is being removed.
+        let sealed_now;
+        let blocks = match crate::lock::for_store_write(page_id, blocks) {
+            Some(block) => {
+                sealed_now = [block];
+                &sealed_now[..]
+            }
+            None => blocks,
+        };
+        if crate::lock::sealed(blocks).is_none() && !crate::lock::may_unseal(page_id) && Self::sealed_on_disk(tx, page_id)? {
+            return Err(Self::refuse_locked());
+        }
         tx.prepare_cached("DELETE FROM blocks WHERE page_id=?1")?.execute(params![page_id])?;
         {
             let mut stmt = tx.prepare_cached(
@@ -760,7 +859,11 @@ pub fn tell(message: &str) {
 /// A database error in words a person can act on.
 fn in_words(error: &str) -> String {
     let lower = error.to_lowercase();
-    if lower.contains("full") {
+    // (Before "locked": that word is also in what SQLite says of a file
+    // another program holds, and the notice blamed another program.)
+    if error.contains(REFUSED_LOCKED) {
+        "A change was not saved: the page is locked. Open it with its password first.".into()
+    } else if lower.contains("full") {
         "A change was not saved: the disk is full.".into()
     } else if lower.contains("locked") || lower.contains("busy") {
         "A change was not saved: another program holds the notes file.".into()
@@ -828,6 +931,36 @@ mod tests {
         // A page saved again by a program that leaves the row alone keeps it.
         store.save_page(&row).unwrap();
         assert!(store.load().unwrap().0.get(&row.id).is_some_and(|p| p.row_of.is_some()));
+    }
+
+    #[test]
+    fn pages_and_events_of_a_space_that_is_gone_join_the_first_space() {
+        let store = Store::open_in_memory().unwrap();
+        let first = store.load_spaces().unwrap()[0].id.clone();
+        let mut work = Space::new("Work", "green", 2.0);
+        work.id = "work".into();
+        store.save_space(&work).unwrap();
+        // A second window still showed a space that was deleted, and a page
+        // and an event were made there.
+        let mut lost = Page::new(None, 1.0);
+        lost.space_id = "gone".into();
+        let mut kept = Page::new(None, 1.0);
+        kept.space_id = "work".into();
+        store.save_page(&lost).unwrap();
+        store.save_page(&kept).unwrap();
+        let event = Event::new("gone", "Call", 0, 1, false);
+        store.save_event(&event).unwrap();
+        // What is read has them in the first space at once.
+        let (pages, _) = store.load().unwrap();
+        assert_eq!(pages[&lost.id].space_id, first);
+        assert_eq!(pages[&kept.id].space_id, "work");
+        assert_eq!(store.load_events().unwrap()[0].space_id, first);
+        // And the next start writes that into the file.
+        store.migrate().unwrap();
+        let in_file = |sql: &str| store.conn.query_row(sql, [], |r| r.get::<_, String>(0)).unwrap();
+        assert_eq!(in_file(&format!("SELECT space_id FROM pages WHERE id='{}'", lost.id)), first);
+        assert_eq!(in_file(&format!("SELECT space_id FROM pages WHERE id='{}'", kept.id)), "work");
+        assert_eq!(in_file("SELECT space_id FROM events"), first);
     }
 
     #[test]
@@ -907,6 +1040,26 @@ mod tests {
     }
 
     #[test]
+    fn the_log_is_not_emptied_while_another_program_reads_and_that_is_said() {
+        let dir = std::env::temp_dir().join(format!("notion2-checkpoint-{}", crate::model::new_id()));
+        let path = dir.join("workspace.db");
+        let store = Store::open(path.clone()).unwrap();
+        store.save_blocks("p", &[Block::text("one")]).unwrap();
+        // Another program is in the middle of a read (a sync run, a backup).
+        let reader = Connection::open(&path).unwrap();
+        reader.execute_batch("BEGIN; SELECT count(*) FROM blocks;").unwrap();
+        store.save_blocks("p", &[Block::text("two")]).unwrap();
+        let before = std::time::Instant::now();
+        assert!(!store.checkpoint(), "held up: the caller tries again");
+        assert!(before.elapsed() < std::time::Duration::from_secs(1), "and it does not wait");
+        reader.execute_batch("COMMIT;").unwrap();
+        assert!(store.checkpoint());
+        assert_eq!(std::fs::metadata(dir.join("workspace.db-wal")).map(|m| m.len()).unwrap_or(0), 0, "the log is empty");
+        drop((store, reader));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_failed_write_is_told_one_time() {
         install(Store::open_in_memory().unwrap());
         assert_eq!(trouble(), None);
@@ -918,6 +1071,8 @@ mod tests {
         assert_eq!(trouble(), None);
         assert_eq!(in_words("database or disk is full"), "A change was not saved: the disk is full.");
         assert_eq!(in_words("database is locked"), "A change was not saved: another program holds the notes file.");
+        // A refused write into a locked page is not the fault of another program.
+        assert_eq!(in_words(&Store::refuse_locked().to_string()), "A change was not saved: the page is locked. Open it with its password first.");
     }
 
     #[test]

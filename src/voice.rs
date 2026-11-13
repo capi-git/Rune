@@ -304,16 +304,32 @@ pub fn relevant_pages(question: &str, pages: &[(&Page, String)], limit: usize) -
 }
 
 /// The request sent for a question: the pages (each clipped so that all fit)
-/// and the question.
-pub fn ask_message(question: &str, notes: &[Note], budget_chars: usize) -> String {
+/// and the question. A page that was clipped says so under it, and with the
+/// tools of Rune (`tools`) how the rest of it can be read: told nothing, the
+/// AI said that the notes do not hold an answer that was lower in the page.
+pub fn ask_message(question: &str, notes: &[Note], budget_chars: usize, tools: bool) -> String {
     let each = budget_chars / notes.len().max(1);
     let mut out = String::new();
     for n in notes {
         let text: String = n.text.chars().take(each).collect();
-        out.push_str(&format!("<page title=\"{}\">\n{}\n</page>\n\n", n.title.replace('"', "'"), text.trim()));
+        out.push_str(&format!("<page title=\"{}\">\n{}\n</page>\n", n.title.replace('"', "'"), text.trim()));
+        if n.text.chars().nth(each).is_some() {
+            out.push_str("(Only the first part of this page is here: the page is long.");
+            if tools {
+                out.push_str(&format!(" When the answer may be further down in it, read the whole page first: read_page, its id is {}.", n.id));
+            }
+            out.push_str(")\n");
+        }
+        out.push('\n');
     }
     out.push_str(&format!("Question: {}", question.trim()));
     out
+}
+
+/// The names of the pages that `ask_message` gives only in part.
+pub fn cut_for_ask(notes: &[Note], budget_chars: usize) -> Vec<String> {
+    let each = budget_chars / notes.len().max(1);
+    notes.iter().filter(|n| n.text.chars().nth(each).is_some()).map(|n| n.title.clone()).collect()
 }
 
 /// An answer split into its text and the pages it names as sources (matched
@@ -491,9 +507,19 @@ mod tests {
         let none = relevant_pages("zebra", &pages, 5);
         assert_eq!(none.iter().map(|n| n.title.as_str()).collect::<Vec<_>>(), vec!["Budget", "Trip to Rome"], "nothing found: the newest pages");
 
-        let message = ask_message("How much?", &found, 40);
+        let message = ask_message("How much?", &found, 40, false);
         assert!(message.contains("<page title=\"Trip to Rome\">\nFlights on 3 May. Ho\n</page>"), "{message}");
         assert!(message.ends_with("Question: How much?"));
+        // Each page was clipped: the request says so under each, and the names are known for the person.
+        assert_eq!(message.matches("</page>\n(Only the first part of this page is here: the page is long.)\n\n").count(), 2, "{message}");
+        assert_eq!(cut_for_ask(&found, 40), vec!["Trip to Rome", "Budget"]);
+        // With the tools of Rune, the AI is told how to read the rest of each.
+        let message = ask_message("How much?", &found, 40, true);
+        assert!(message.contains(&format!("read the whole page first: read_page, its id is {}.)", a.id)) && message.contains(&format!("its id is {}.)", b.id)), "{message}");
+        // Pages that fit are given whole, with no such line.
+        let message = ask_message("How much?", &found, 24_000, true);
+        assert!(message.contains("Hotel near the station.\n</page>\n\n<page title=\"Budget\">") && !message.contains("first part"), "{message}");
+        assert!(cut_for_ask(&found, 24_000).is_empty());
         let (answer, sources) = split_answer("The hotel costs 400.\n\nSources:\n- Budget\n- Not a page\n- budget", &found);
         assert_eq!(answer, "The hotel costs 400.");
         assert_eq!(sources.iter().map(|n| n.title.as_str()).collect::<Vec<_>>(), vec!["Budget"]);

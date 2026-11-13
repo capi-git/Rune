@@ -354,7 +354,7 @@ impl Table {
     /// lets every row pass.
     pub fn passes(&self, r: usize, rule: &Rule) -> bool {
         let kind = self.kind(rule.column);
-        let shown = self.shown(r, rule.column);
+        let shown = self.words(r, rule.column);
         let (text, want) = (shown.trim(), rule.text.trim());
         if rule.op.needs_text() && want.is_empty() {
             return true;
@@ -403,7 +403,7 @@ impl Table {
 
     fn key(&self, r: usize, c: usize) -> Key {
         let kind = self.kind(c);
-        let shown = self.shown(r, c);
+        let shown = self.words(r, c);
         let text = shown.trim();
         let words = || Key::Words(text.to_lowercase());
         match kind {
@@ -476,7 +476,10 @@ impl Table {
     /// stays (empty) when a filter takes its rows. The rows with nothing in
     /// the column are the last group, with "" for its value.
     pub fn groups(&self, rows: &[usize], c: usize) -> Vec<(String, Vec<usize>)> {
-        let value = |r: usize| self.shown(r, c).trim().to_string();
+        // (A box is ticked or not, however its cell says it: "x" and "yes"
+        // made two groups named "Ticked", and "no" a second "Not ticked".)
+        let ticks = self.kind(c) == Kind::Checkbox;
+        let value = |r: usize| if ticks { if checked(self.cell(r, c)) { "x" } else { "" }.to_string() } else { self.words(r, c).trim().to_string() };
         // A choice column has a group for each option, in their order.
         let mut out: Vec<(String, Vec<usize>)> = if matches!(self.kind(c), Kind::Choice | Kind::Status) { self.column(c).options.iter().map(|o| (o.name.clone(), Vec::new())).collect() } else { Vec::new() };
         for r in self.body() {
@@ -832,6 +835,43 @@ mod tests {
         // A file that names columns that are not there.
         let odd = Table::parse(r#"{"rows":[["a","b"]],"view":{"sort":[{"column":7},{"column":1},{"column":1,"down":true}],"hidden":[0,1,1,9],"frozen":5,"group":4}}"#);
         assert_eq!((odd.view.sort.len(), odd.view.hidden.clone(), odd.view.frozen, odd.view.group), (1, vec![1], 1, None));
+    }
+
+    #[test]
+    fn a_link_to_a_page_in_a_cell_counts_as_the_name_of_the_page() {
+        let md = [
+            "| Task | Notes | Says |",
+            "| --- | --- | --- |",
+            "| One | [Zeta](rune://page/ab12) |  |",
+            "| Two | apple |  |",
+            "| Three | see [Plan](rune://page/cd34) |  |",
+            "<!-- columns: text | text | formula = concat(Notes, \"!\") -->",
+        ];
+        let (mut t, _) = Table::from_markdown(&md).unwrap();
+        // The words of a cell: the names the links were written with.
+        assert_eq!((t.words(1, 1), t.words(2, 1), t.words(3, 1)), ("Zeta".to_string(), "apple".to_string(), "see Plan".to_string()));
+        // A sort by the names (the address sorted before every letter).
+        t.view.sort_by(1, false);
+        assert_eq!(t.order(), [2, 3, 1]);
+        // A filter finds the name, and not the letters of the address.
+        let rule = |op: Op, text: &str| Rule { column: 1, op, text: text.into(), color: String::new() };
+        assert!(t.passes(1, &rule(Op::Is, "zeta")) && !t.passes(1, &rule(Op::Has, "rune")) && t.passes(3, &rule(Op::Has, "plan")));
+        // The heading of a group, a card and a formula say the name.
+        assert_eq!(t.groups(&[1, 2, 3], 1).into_iter().map(|(name, _)| name).collect::<Vec<_>>(), ["Zeta", "apple", "see Plan"]);
+        assert_eq!(t.seen(1, 1, chrono::NaiveDate::from_ymd_opt(2026, 11, 12).unwrap()), "Zeta");
+        assert_eq!(t.shown(1, 2), "Zeta!");
+        // Search reads the names; the cell itself holds the link as it was written.
+        assert!(t.plain_text().contains("One Zeta") && !t.plain_text().contains("rune://"));
+        assert_eq!(t.cell(1, 1), "[Zeta](rune://page/ab12)");
+        // The page has another name now (the app gives the names): that
+        // name counts. A page in the Trash or gone has no name there, and
+        // goes by the one its link was written with.
+        t.names.insert("ab12".into(), "Alpha".into());
+        assert_eq!((t.words(1, 1), t.words(3, 1)), ("Alpha".to_string(), "see Plan".to_string()));
+        assert_eq!(t.order(), [1, 2, 3]);
+        assert!(t.passes(1, &rule(Op::Is, "Alpha")) && !t.passes(1, &rule(Op::Is, "Zeta")));
+        assert_eq!(t.shown(1, 2), "Alpha!");
+        assert_eq!(t.linked_pages(), ["ab12", "cd34"]);
     }
 
     #[test]

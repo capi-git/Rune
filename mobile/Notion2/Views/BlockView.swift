@@ -180,6 +180,8 @@ struct BlockView: View {
             }
         case .chart:
             ChartBlockView(pageID: pageID, block: block)
+        case .locked:
+            standIn("lock", "This page is locked", "It opens only in Rune on the Mac, with its password.")
         }
     }
 

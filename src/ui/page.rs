@@ -202,7 +202,7 @@ fn DueChip(page_id: String, id: String, due: Option<chrono::NaiveDate>, #[props(
                 "aria-label": "{said}",
                 "aria-haspopup": "menu",
                 "aria-expanded": if open { "true" } else { "false" },
-                onclick: move |_| state.set_popover((!open).then(|| Popover::Due { block_id: menu_id.clone() })),
+                onclick: move |_| state.set_popover((!open).then(|| Popover::Due { block_id: menu_id.clone(), was: due })),
                 if let Some(l) = label {
                     if remind.is_some() {
                         Icon { name: "bell", size: 12 }
@@ -580,6 +580,20 @@ pub fn PageView(page_id: String) -> Element {
         return rsx! { div { class: "empty", "This page no longer exists." } };
     };
     let blocks = state.blocks.read().get(&page_id).cloned().unwrap_or_default();
+    // A locked page that is not open: its name, and a field for its password.
+    if crate::lock::sealed(&blocks).is_some() {
+        return rsx! {
+            div { class: "page locked",
+                div { class: "page-header",
+                    if page.icon.is_some() {
+                        div { class: "page-icon", PageIcon { icon: page.icon.clone(), large: true } }
+                    }
+                    div { class: "title-input locked-name", "{page.display_title()}" }
+                }
+                super::lock::LockedPage { key: "{page_id}", page_id: page_id.clone() }
+            }
+        };
+    }
     let slash = state.slash.read().clone().filter(|s| s.page_id == page_id);
     let ui = state.ui.read();
     let block_menu = match &ui.popover {
@@ -587,7 +601,7 @@ pub fn PageView(page_id: String) -> Element {
         _ => None,
     };
     let due_menu = match &ui.popover {
-        Some(Popover::Due { block_id }) => Some(block_id.clone()),
+        Some(Popover::Due { block_id, .. }) => Some(block_id.clone()),
         _ => None,
     };
     let icon_picker = matches!(&ui.popover, Some(Popover::IconPicker { page_id: p }) if *p == page_id);
@@ -778,9 +792,12 @@ pub fn PageView(page_id: String) -> Element {
                     onkeydown: {
                         let pid = pid.clone();
                         move |e: KeyboardEvent| {
-                            if e.key() == Key::Enter || e.key() == Key::ArrowDown {
+                            if e.key() == Key::Enter {
                                 e.prevent_default();
                                 state.title_enter(&pid);
+                            } else if e.key() == Key::ArrowDown {
+                                e.prevent_default();
+                                state.title_down(&pid);
                             }
                         }
                     },
@@ -1689,8 +1706,11 @@ pub fn AiDock(route: Route, duplicate: bool) -> Element {
         (true, false) => "ai-dock open",
         _ => "ai-dock",
     };
-    // No AI tool is connected: nothing of the AI shows.
+    // No AI tool is connected: nothing of the AI shows. Nor on a locked page.
     if !*state.ai_on.read() && !open {
+        return rsx! {};
+    }
+    if !open && page.as_deref().is_some_and(|p| crate::lock::page_lock(&state, p).is_locked()) {
         return rsx! {};
     }
     // What the AI did here a moment ago (sub-pages made), with a way back.
@@ -1869,7 +1889,8 @@ fn AiPanel() -> Element {
         Some((_, query)) => {
             let pages = state.pages.read();
             let space = pages.get(&session.page_id).map(|p| p.space_id.clone()).unwrap_or_default();
-            crate::state::pages_to_link(&pages, &space, &session.page_id, query).into_iter().take(6).map(|p| (p.id.clone(), p.display_title().to_string())).collect()
+            // (A locked page is not given to the AI: it is not in the list.)
+            crate::state::pages_to_link(&pages, &space, &session.page_id, query).into_iter().filter(|p| !state.locked_lines(&p.id)).take(6).map(|p| (p.id.clone(), p.display_title().to_string())).collect()
         }
         None => Vec::new(),
     };
@@ -2076,6 +2097,11 @@ fn AiPanel() -> Element {
                 }
             } else {
                 div { class: "ai-caption", "{caption}" }
+                if session.cut {
+                    div { class: "ai-caption", id: "ai-cut", style: "padding-top: 2px;",
+                        if session.action == AiAction::Continue { "This page is long: the AI was given only its last part." } else { "This page is long: the AI was given only its first part." }
+                    }
+                }
             }
             if let Some((_, steps)) = &job {
                 div { class: "ai-plan", id: "ai-plan", role: "list", "aria-label": "What the AI will do",
@@ -2169,6 +2195,10 @@ fn AiPanel() -> Element {
                                 "Open Settings"
                             }
                             button { class: "ghost-btn", onclick: move |_| state.ai_run(), "Try again" }
+                            // (A run that failed after its tools changed things: they can be taken back here too.)
+                            if acted {
+                                button { class: "ghost-btn", id: "ai-undo-run", title: "Take back all that the AI did", onclick: move |_| state.ai_undo_run(), "Undo" }
+                            }
                             button { class: "ghost-btn", onclick: move |_| state.ai_discard(), "Discard" }
                         }
                     }

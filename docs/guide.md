@@ -85,8 +85,10 @@ not touched by an update.
    The dots at the bottom of the sidebar are your spaces: click one, or move
    two fingers sideways on the sidebar. Click the space name at the top to
    make a new one.
-10. **Find and settings.** ⌘K finds any page. Settings is the button at the
-    bottom left of the sidebar (⌘,).
+10. **Find and settings.** ⌘K finds any page. It also runs commands: type
+    "dark", "focus" or "lock", and Return runs the command. A name that no
+    page has gives "New page": `Work/Plan` makes the page Plan inside the
+    page Work. Settings is the button at the bottom left of the sidebar (⌘,).
 
 ## Connect your AI (optional)
 
@@ -140,8 +142,20 @@ NOTION2_DB=/tmp/notion2-test.db NOTION2_SELFTEST=/tmp/notion2-report.json cargo 
 
 - **Look:** Aven-style window. The top row and sidebar sit on see-through glass
   (blurred desktop) and the page sits on it in one rounded card. Light and dark
-  themes (⌘⇧L, the moon/sun button, or Settings). Original icon set and logo
+  themes (⌘⇧L, the moon/sun button, or Settings). Settings ▸ Appearance ▸
+  Accent gives links, checkboxes and switches another colour (blue, grey,
+  green, orange, pink or purple). Original icon set and logo
   (`assets/logo.svg`; `scripts/make-icon.sh` rebuilds the app icon).
+- **Focus mode:** ⌘. (or View → Focus Mode) shows only the page. The other
+  lines go pale, and the line you write stays near the middle of the window.
+  The tabs come back while the pointer is at the top. Escape or ⌘. ends it.
+- **Locked pages:** the page menu (⋯) → "Lock with password…" keeps the lines
+  of a page scrambled on disk, in sync, backups and search; the AI tools never
+  read them. The name of the page stays visible. Type the password on the page
+  to open it; it locks again when no tab shows it, when you quit, or with
+  "Lock now". "Remove password" makes it a plain page again. A lost password
+  cannot be got back, and the earlier versions of the page are removed when
+  you lock it. The iPhone app shows a locked page as locked (`src/lock.rs`).
 - **Sidebar:** resize by dragging its right edge (double-click resets). ⌘\
   unpins it; it then slides out as a floating card when the pointer rests on
   the window's left edge. Click that edge to pin it again.
@@ -328,6 +342,7 @@ database file.
 | --- | --- |
 | `src/model.rs` | Pages, blocks and the editing rules (Enter, Backspace, nesting, moving) |
 | `src/markdown.rs` | Typing shortcuts, Markdown → blocks for AI replies, page → Markdown |
+| `src/lock.rs` | Locked pages: the sealed block, the keys of open pages, lock and open |
 | `src/store.rs` | SQLite storage |
 | `src/ai.rs` | Picks the AI and model, prompts, cleans replies |
 | `src/glass.rs` | The blur behind the window |

@@ -63,6 +63,8 @@ A diagram is a code block of the language mermaid (Mermaid's own syntax), which 
 Use one when a picture helps more than words (a process, a flow with choices, who talks to whom, a timeline, a mind map, the parts of a plan); \
 keep labels short, put the details in the text under it, and give it no colours (no style or classDef lines: Rune colours it for the light and the dark look). Never draw a picture with characters (boxes, lines and arrows made of -, |, +, ^, v, > or of box-drawing signs) \
 in a code block or out of one: it breaks on a narrow page and looks broken. Levels or amounts go in a small table, and a rule or a formula in one line in bold. \
+A table holds at most 12 columns and 199 rows under its header. A tool refuses Markdown with a larger table and writes nothing: \
+write a long log as more than one table (one for each month or year, say), each with its header and its comment lines. \
 To add a row to a table (a log), use add_table_row; to change one, update_table_row; to tick a to-do or set its day, set_todo: none of them write the page again. \
 A chart is a code block of the language chart holding JSON, for example \
 ```chart {\"shape\": \"bars\", \"from\": \"Run log\", \"x\": \"Date\", \"by\": \"week\", \"y\": \"km\", \"add\": \"sum\", \"goal\": 20, \"title\": \"Distance per week\"} ``` \
@@ -123,8 +125,16 @@ pub const JOURNAL_ENV: &str = "NOTION2_AI_JOURNAL";
 pub enum Change {
     /// A page that was not there before.
     PageMade { id: Id, title: String },
-    /// A page as it was (its name, place, Trash state…) before the change.
-    PageWas { page: Page, title: String, what: String },
+    /// A page as it was (its name, place, Trash state…) before the change,
+    /// and (`left`) as the change left it: to take the change back, only
+    /// what it changed is put back.
+    PageWas {
+        page: Page,
+        title: String,
+        what: String,
+        #[serde(default)]
+        left: Option<Page>,
+    },
     /// What was on a page before the change, and (`left`) what the change
     /// left on it: to take the change back, only what it changed is put
     /// back, and what the person wrote on the page since stays.
@@ -173,7 +183,7 @@ fn changes_between(before: &Snap, after: &Snap) -> Vec<Change> {
             } else {
                 "changed"
             };
-            out.push(Change::PageWas { page: was.clone(), title: now.title.clone(), what: what.into() });
+            out.push(Change::PageWas { page: was.clone(), title: now.title.clone(), what: what.into(), left: Some(now.clone()) });
         }
         let empty = Vec::new();
         let (old, new) = (before.blocks.get(id).unwrap_or(&empty), after.blocks.get(id).unwrap_or(&empty));
@@ -228,7 +238,16 @@ pub fn undo_changes(store: &Store, changes: &[Change]) -> rusqlite::Result<()> {
                     store.save_page(&Page { trashed: true, ..page.clone() })?;
                 }
             }
-            Change::PageWas { page, .. } => store.save_page(page)?,
+            Change::PageWas { page, left, .. } => {
+                // (Only what the run changed: its name, its place. The whole
+                // page as it was, put back, also took away a favourite or
+                // an icon that the person gave the page after the run.)
+                let (pages, _) = store.load()?;
+                match (left, pages.get(&page.id)) {
+                    (Some(left), Some(now)) => store.save_page(&page_less_change(now, left, page))?,
+                    _ => store.save_page(page)?,
+                }
+            }
             Change::BlocksWere { id, blocks, left, .. } => {
                 // (The page as it is now, not as the run left it: lines
                 // written since are no part of the run, and stay. The whole
@@ -243,6 +262,54 @@ pub fn undo_changes(store: &Store, changes: &[Change]) -> rusqlite::Result<()> {
         }
     }
     Ok(())
+}
+
+/// A page as it is now, with one change taken back: each part of it that
+/// the change made other than it was (`was` to `left`) is as it was again,
+/// and every other part stays as it is now.
+fn page_less_change(now: &Page, left: &Page, was: &Page) -> Page {
+    let parts = |p: &Page| match serde_json::to_value(p) {
+        Ok(Value::Object(parts)) => parts,
+        _ => serde_json::Map::new(),
+    };
+    let (mut out, left, was) = (parts(now), parts(left), parts(was));
+    for (name, old) in was {
+        // (The time of the last change moves with every save.)
+        if name != "updated_at" && left.get(&name) != Some(&old) {
+            out.insert(name, old);
+        }
+    }
+    serde_json::from_value(Value::Object(out)).unwrap_or_else(|_| now.clone())
+}
+
+/// One page's lines as they were before a run's tools changed anything,
+/// worked out from the page as it is now: each change of the run is taken
+/// out again, the last first, in `pages` too (their names show in the links
+/// of a page). `None` when the page is not as a change of the tools left it:
+/// another hand wrote on it in between. (With this, "Replace" can tell the
+/// run's own changes of the page from lines the person typed meanwhile.)
+pub fn before_run(changes: &[Change], page_id: &str, pages: &mut HashMap<Id, Page>, mut blocks: Vec<Block>) -> Option<Vec<Block>> {
+    for change in changes.iter().rev() {
+        match change {
+            Change::PageMade { id, .. } => {
+                pages.remove(id);
+            }
+            Change::PageWas { page, .. } => {
+                pages.insert(page.id.clone(), page.clone());
+            }
+            Change::BlocksWere { id, blocks: was, left, .. } if id == page_id => {
+                // (Also when the tool left the page with no line: an empty
+                // page and one empty line are the same page here, and a
+                // line typed after that is a change like any other.)
+                if render_body(pages, &blocks) != render_body(pages, left) {
+                    return None;
+                }
+                blocks = was.clone();
+            }
+            _ => {}
+        }
+    }
+    Some(blocks)
 }
 
 /// What a run did, in plain words, short: a line for each thing, and one
@@ -288,7 +355,7 @@ pub fn describe_each(changes: &[Change]) -> Vec<String> {
             Change::BlocksWere { id, .. } if made.contains(&id) => continue,
             Change::PageWas { page, .. } if made.contains(&&page.id) => continue,
             Change::BlocksWere { title, .. } => format!("Changed the page “{}”", name(title)),
-            Change::PageWas { page, title, what } => match what.as_str() {
+            Change::PageWas { page, title, what, .. } => match what.as_str() {
                 "trashed" => format!("Moved “{}” to the Trash", name(title)),
                 "restored" => format!("Took “{}” out of the Trash", name(title)),
                 "moved" => format!("Moved the page “{}”", name(title)),
@@ -663,8 +730,12 @@ impl Server {
         let (pages, blocks) = self.load()?;
         if let Some(pid) = &parent {
             live_page(&pages, pid)?;
+            // (Before the page is made: its line in a locked parent is
+            // refused, and the new page stayed with no line to it.)
+            not_locked(&blocks, pid)?;
         }
         let markdown = strip_title_heading(arg_str(args, "markdown").unwrap_or(""), &title);
+        refuse_big_tables(&markdown, "No page was made.")?;
 
         let (spaces, open) = self.spaces()?;
         let asked = self.space_arg(args)?;
@@ -717,6 +788,7 @@ impl Server {
         let markdown = required_str(args, "markdown")?;
         let (pages, blocks) = self.load()?;
         live_page(&pages, &id)?;
+        refuse_big_tables(markdown, "Nothing was added to the page.")?;
         let added = parse_body(&pages, markdown);
         if added.is_empty() {
             return Err("Nothing to append: the markdown is empty.".into());
@@ -852,6 +924,9 @@ impl Server {
         let markdown = required_str(args, "markdown")?;
         let (pages, blocks) = self.load()?;
         let mut page = live_page(&pages, &id)?.clone();
+        // (Before the new name is saved: the new lines are refused after it.)
+        not_locked(&blocks, &id)?;
+        refuse_big_tables(markdown, "The page was not changed.")?;
         // Keep the page as it was, so the change can be undone in Page history.
         let old = blocks.get(&id).map(|b| b.as_slice()).unwrap_or_default();
         self.store.save_version(&id, now_ms(), &page.title, old).map_err(db_error)?;
@@ -905,8 +980,9 @@ impl Server {
 
     fn update_page(&self, args: &Value) -> ToolResult {
         let id = required_page_id(args, "page_id")?;
-        let (pages, _) = self.load()?;
+        let (pages, blocks) = self.load()?;
         let mut page = live_page(&pages, &id)?.clone();
+        not_locked(&blocks, &id)?;
         let mut changed = Vec::new();
         let mut new_space = None;
 
@@ -936,6 +1012,7 @@ impl Server {
             };
             if let Some(np) = &new_parent {
                 live_page(&pages, np)?;
+                not_locked(&blocks, np)?;
                 if descendants(&pages, &id).contains(np) {
                     return Err("A page can't be moved inside itself or one of its sub-pages.".into());
                 }
@@ -1013,11 +1090,12 @@ impl Server {
 
     fn trash_page(&self, args: &Value) -> ToolResult {
         let id = required_page_id(args, "page_id")?;
-        let (pages, _) = self.load()?;
+        let (pages, blocks) = self.load()?;
         let page = pages.get(&id).ok_or_else(|| not_found(&id))?;
         if page.trashed {
             return Ok(format!("\"{}\" is already in the Trash.", page.display_title()));
         }
+        not_locked(&blocks, &id)?;
         let ids = descendants(&pages, &id);
         let now = now_ms();
         let mut count = 0;
@@ -1579,6 +1657,18 @@ fn tool_definitions() -> Value {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// A locked page is changed only in Rune, with its password. A tool that
+/// would change it (its name, its place, the Trash, a page made or put
+/// inside it) refuses before it changes anything. Only the store refused
+/// before, and only the lines: the page then had its new name, or a
+/// sub-page with no line to it, and it could be moved and put in the Trash.
+fn not_locked(blocks: &HashMap<Id, Vec<Block>>, id: &str) -> Result<(), String> {
+    if blocks.get(id).is_some_and(|lines| crate::lock::hides(lines, id)) {
+        return Err(format!("{} Nothing was changed.", crate::store::REFUSED_LOCKED));
+    }
+    Ok(())
+}
+
 fn db_error(e: rusqlite::Error) -> String {
     format!("Workspace database error: {e}")
 }
@@ -1794,6 +1884,26 @@ pub(crate) fn keep_media(old: &[Block], new: Vec<Block>) -> Vec<Block> {
     out
 }
 
+/// Markdown with a table that is more than a table holds is refused, with
+/// the most a table holds and what to do. (Read all the same, the columns
+/// over the most were cut and their cells lost, and the tool said that it
+/// worked.) `nothing` says what was not done.
+fn refuse_big_tables(markdown: &str, nothing: &str) -> Result<(), String> {
+    let (most_columns, most_rows) = (crate::table::MOST_COLUMNS, crate::table::MOST_ROWS - 1);
+    let Some(&(columns, rows)) = markdown::tables_over_most(markdown).first() else { return Ok(()) };
+    let mut has = Vec::new();
+    let mut to_do = Vec::new();
+    if columns > most_columns {
+        has.push(format!("{columns} columns"));
+        to_do.push("Write it with fewer columns, or as two tables that both have the first column.");
+    }
+    if rows > most_rows {
+        has.push(format!("{rows} rows under its header"));
+        to_do.push("Write its rows as more than one table (one for each month or year, say), each with its header and its comment lines.");
+    }
+    Err(format!("A table holds at most {most_columns} columns and {most_rows} rows under its header, and a table of this Markdown has {}. {nothing} {}", has.join(" and "), to_do.join(" ")))
+}
+
 pub(crate) fn parse_body(pages: &HashMap<Id, Page>, markdown: &str) -> Vec<Block> {
     markdown::to_blocks(markdown)
         .into_iter()
@@ -1976,6 +2086,69 @@ mod tests {
     }
 
     #[test]
+    fn a_locked_page_is_refused_before_anything_of_it_is_changed() {
+        let mut s = server();
+        let (made, _) = call(&mut s, "create_page", json!({ "title": "Diary", "markdown": "The code is 4711" }));
+        let diary = json_of(&made)["id"].as_str().unwrap().to_string();
+        let (made, _) = call(&mut s, "create_page", json!({ "title": "Plan", "markdown": "Plain" }));
+        let plan = json_of(&made)["id"].as_str().unwrap().to_string();
+        // Locked in the app (the connector is another program: it holds no key).
+        let lines = s.store.load_page_blocks(&diary).unwrap();
+        s.store.save_blocks(&diary, &[crate::lock::seal_with(&crate::lock::test_key("pw-pw-pw"), &diary, &lines)]).unwrap();
+        let before = s.store.load().unwrap();
+        let refused = |out: (String, bool)| assert!(out.1 && out.0.contains("The page is locked") && out.0.contains("Nothing was changed"), "{}", out.0);
+        refused(call(&mut s, "replace_page_content", json!({ "page_id": diary, "title": "New name", "markdown": "New lines" })));
+        refused(call(&mut s, "update_page", json!({ "page_id": diary, "title": "New name" })));
+        refused(call(&mut s, "update_page", json!({ "page_id": diary, "parent_id": plan })));
+        refused(call(&mut s, "update_page", json!({ "page_id": plan, "parent_id": diary })));
+        refused(call(&mut s, "trash_page", json!({ "page_id": diary })));
+        refused(call(&mut s, "create_page", json!({ "title": "Inside", "parent_id": diary })));
+        assert!(call(&mut s, "append_to_page", json!({ "page_id": diary, "markdown": "More" })).1);
+        assert!(s.store.load().unwrap() == before, "no name, place, page or line changed");
+        // It is read as a locked page, with none of its words.
+        let (read, err) = call(&mut s, "read_page", json!({ "page_id": diary }));
+        assert!(!err && read.contains("Locked page") && !read.contains("4711"), "{read}");
+    }
+
+    #[test]
+    fn a_table_over_what_a_table_holds_is_refused_with_the_most_it_holds() {
+        let mut s = server();
+        let wide = |n: usize| {
+            let line = |word: &str| format!("| {} |", (1..=n).map(|i| format!("{word}{i}")).collect::<Vec<_>>().join(" | "));
+            format!("{}\n|{}\n{}", line("C"), " --- |".repeat(n), line("v"))
+        };
+        let long = |n: usize| {
+            let rows: Vec<String> = (1..=n).map(|i| format!("| r{i} | {i} |")).collect();
+            format!("| Name | Amount |\n| --- | --- |\n{}\n<!-- columns: text count | number sum -->\n<!-- table: Long | sort Amount down -->", rows.join("\n"))
+        };
+        // Too wide: no page is made, and the answer says the most and what to do.
+        let (said, err) = call(&mut s, "create_page", json!({ "title": "Wide", "markdown": wide(14) }));
+        assert!(err && said.contains("at most 12 columns") && said.contains("has 14 columns") && said.contains("No page was made"), "{said}");
+        let (list, _) = call(&mut s, "list_pages", json!({}));
+        assert!(!list.contains("Wide"), "{list}");
+        // Too long: the same, for the rows.
+        let (said, err) = call(&mut s, "create_page", json!({ "title": "Long", "markdown": long(260) }));
+        assert!(err && said.contains("199 rows under its header") && said.contains("has 260 rows") && said.contains("more than one table"), "{said}");
+        // What a table holds is taken whole: 12 columns, 199 rows, with their kinds and name.
+        let (made, err) = call(&mut s, "create_page", json!({ "title": "Fits", "markdown": format!("{}\n\n{}", wide(12), long(199)) }));
+        assert!(!err, "{made}");
+        let fits = json_of(&made)["id"].as_str().unwrap().to_string();
+        let (page, _) = call(&mut s, "read_page", json!({ "page_id": fits }));
+        assert!(page.contains("v12") && page.contains("| r199 | 199 |") && page.contains("<!-- table: Long | sort Amount down -->"), "{page}");
+        // The other tools that take Markdown refuse too, and leave the page as it is.
+        let (said, err) = call(&mut s, "append_to_page", json!({ "page_id": fits, "markdown": wide(13) }));
+        assert!(err && said.contains("Nothing was added"), "{said}");
+        let (said, err) = call(&mut s, "replace_page_content", json!({ "page_id": fits, "markdown": long(200) }));
+        assert!(err && said.contains("The page was not changed") && said.contains("has 200 rows"), "{said}");
+        let (after, _) = call(&mut s, "read_page", json!({ "page_id": fits }));
+        assert_eq!(after, page);
+        // Bars in a code block are no table.
+        let code = format!("```\n{}\n```", wide(14));
+        let (_, err) = call(&mut s, "append_to_page", json!({ "page_id": fits, "markdown": code }));
+        assert!(!err);
+    }
+
+    #[test]
     fn rows_of_a_log_and_to_dos_change_without_the_page_written_again() {
         let mut s = server();
         let md = "Runs of the week.\n\n| Date | km | Time | Pace |\n| --- | --- | --- | --- |\n| 2026-11-10 | 3 | 19:30 |  |\n<!-- columns: date | number km sum | time sum | pace average -->\n\n- [ ] Easy run, 4.5 km\n- [ ] Long run, 6 km";
@@ -2132,6 +2305,84 @@ mod tests {
         assert!(pages[&child].trashed, "a page that the run made goes to the Trash");
         let events: Vec<String> = s.store.load_events().unwrap().into_iter().map(|e| e.title).collect();
         assert_eq!(events, vec!["Run"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_name_taken_back_leaves_what_the_person_changed_since() {
+        let dir = std::env::temp_dir().join(format!("n2-page-back-{}", now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let journal = dir.join("run.jsonl");
+        let mut s = server();
+        let (made, _) = call(&mut s, "create_page", json!({ "title": "Plan" }));
+        let plan = json_of(&made)["id"].as_str().unwrap().to_string();
+        let (made, _) = call(&mut s, "create_page", json!({ "title": "Archive" }));
+        let archive = json_of(&made)["id"].as_str().unwrap().to_string();
+        // The run gives the page a new name and moves it into another page.
+        let mut s = Server::new(s.store).with_journal(journal.clone());
+        call(&mut s, "update_page", json!({ "page_id": plan, "title": "Workout Plan" }));
+        let (moved, failed) = call(&mut s, "update_page", json!({ "page_id": plan, "parent_id": archive }));
+        assert!(!failed, "{moved}");
+        let changes = read_journal(&journal);
+        // After the run the person makes it a favourite and gives it an icon.
+        let (pages, _) = s.store.load().unwrap();
+        assert_eq!((pages[&plan].title.as_str(), pages[&plan].parent_id.as_deref()), ("Workout Plan", Some(archive.as_str())));
+        s.store.save_page(&Page { favorite: true, icon: Some("star:yellow".into()), ..pages[&plan].clone() }).unwrap();
+        // Undo: the old name and the old place; the favourite and the icon stay.
+        undo_changes(&s.store, &changes).unwrap();
+        let (pages, _) = s.store.load().unwrap();
+        let page = &pages[&plan];
+        assert_eq!((page.title.as_str(), page.parent_id.as_deref()), ("Plan", None));
+        assert!(page.favorite && page.icon.as_deref() == Some("star:yellow"), "{page:?}");
+        // A record of a run from before this (no `left`) is read, and puts the whole page back as it did.
+        let old: Change = serde_json::from_str(&serde_json::to_string(&json!({ "kind": "page_was", "page": page, "title": "x", "what": "renamed" })).unwrap()).unwrap();
+        assert!(matches!(&old, Change::PageWas { left: None, .. }));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_page_before_a_run_is_known_and_a_line_typed_meanwhile_is_seen() {
+        let dir = std::env::temp_dir().join(format!("n2-before-run-{}", now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let journal = dir.join("run.jsonl");
+        let mut s = server();
+        let (made, _) = call(&mut s, "create_page", json!({ "title": "Plan", "markdown": "Old line" }));
+        let plan = json_of(&made)["id"].as_str().unwrap().to_string();
+        let (pages_then, blocks_then) = s.store.load().unwrap();
+        let sent = render_body(&pages_then, &blocks_then[&plan]);
+        // The run: a sub-page (its link is put on the page), a line added to
+        // the page, the sub-page named again, and an event.
+        let mut s = Server::new(s.store).with_journal(journal.clone());
+        let (made, _) = call(&mut s, "create_page", json!({ "title": "Week 1", "parent_id": plan }));
+        let child = json_of(&made)["id"].as_str().unwrap().to_string();
+        call(&mut s, "append_to_page", json!({ "page_id": plan, "markdown": "Added by the tool" }));
+        call(&mut s, "update_page", json!({ "page_id": child, "title": "First week" }));
+        call(&mut s, "create_event", json!({ "title": "Run", "start": "2026-11-12T07:00" }));
+        let changes = read_journal(&journal);
+        // Nothing but the tools wrote on the page: it is the page that was sent.
+        let (mut pages, blocks) = s.store.load().unwrap();
+        assert_ne!(render_body(&pages, &blocks[&plan]), sent);
+        let was = before_run(&changes, &plan, &mut pages, blocks[&plan].clone()).expect("only the tools changed the page");
+        assert_eq!(render_body(&pages, &was), sent);
+        // A run that changed other things only: the page is as it is.
+        let only_event: Vec<Change> = changes.iter().filter(|c| matches!(c, Change::EventMade { .. })).cloned().collect();
+        let (mut pages, _) = s.store.load().unwrap();
+        assert_eq!(before_run(&only_event, &plan, &mut pages, blocks_then[&plan].clone()), Some(blocks_then[&plan].clone()));
+        // The person types a line after the tools' last change: it is seen.
+        let (mut pages, mut blocks) = s.store.load().unwrap();
+        blocks.get_mut(&plan).unwrap().push(Block::text("Typed meanwhile"));
+        assert_eq!(before_run(&changes, &plan, &mut pages, blocks[&plan].clone()), None);
+        // …and a line typed while the run changed only other things is in the page that is compared.
+        let mut typed = blocks_then[&plan].clone();
+        typed.push(Block::text("Typed meanwhile"));
+        let (mut pages, _) = s.store.load().unwrap();
+        let was = before_run(&only_event, &plan, &mut pages, typed).unwrap();
+        assert_ne!(render_body(&pages, &was), sent);
+        // A tool that left the page with no line at all: the empty line the
+        // app shows there is that page; a line typed since is seen.
+        let emptied = vec![Change::BlocksWere { id: plan.clone(), title: "Plan".into(), blocks: blocks_then[&plan].clone(), left: Vec::new() }];
+        assert_eq!(before_run(&emptied, &plan, &mut pages, vec![Block::text("")]), Some(blocks_then[&plan].clone()));
+        assert_eq!(before_run(&emptied, &plan, &mut pages, vec![Block::text("Typed meanwhile")]), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

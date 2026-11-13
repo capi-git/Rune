@@ -69,6 +69,15 @@ pub fn shown_order(id: &str, table: &Table) -> Vec<usize> {
     HELD.peek().as_ref().filter(|h| h.block == id && h.rows == table.rows.len()).map(|h| h.order.clone()).unwrap_or_else(|| table.order())
 }
 
+/// `order` as the lines of the grid have it: in a grouped table, the rows of
+/// the first group, then those of the next (see `Grid`).
+fn by_lines(table: &Table, order: Vec<usize>) -> Vec<usize> {
+    match table.view.group {
+        Some(g) => table.groups(&order, g).into_iter().flat_map(|(_, rows)| rows).collect(),
+        None => order,
+    }
+}
+
 /// What a click does to what is picked. `order` is what the screen shows:
 /// a range takes what shows between its two ends, and no more.
 fn pick_in(mut picked: Vec<usize>, item: usize, how: Pick, order: &[usize]) -> Vec<usize> {
@@ -121,7 +130,10 @@ pub fn picked(id: &str, table: &Table) -> (Vec<usize>, Vec<usize>) {
 /// Pick a row of a table (see [`Pick`]), as the screen shows its rows.
 /// Picked columns are let go. Returns the rows picked now.
 pub fn pick_row(id: &str, table: &Table, row: usize, how: Pick) -> Vec<usize> {
-    let rows = pick_in(picked(id, table).0, row, how, &shown_order(id, table));
+    // (By the lines, not by the sort alone: in a grouped table a range took
+    // the rows of other groups that the sort has between its two ends, and
+    // Delete took them out.)
+    let rows = pick_in(picked(id, table).0, row, how, &by_lines(table, shown_order(id, table)));
     set_picked(id, table, rows.clone(), Vec::new());
     rows
 }
@@ -188,7 +200,8 @@ fn table_of(popover: &Popover) -> Option<&str> {
 #[component]
 pub fn TableView(page_id: String, id: String, data: String) -> Element {
     let state = use_context::<AppState>();
-    let table = Table::parse(&data);
+    let mut table = Table::parse(&data);
+    state.name_links(&mut table, true);
     let open = state.ui.read().popover.clone().filter(|p| table_of(p) == Some(id.as_str()));
     let (picked, picked_cols) = picked_of(&PICKED.read(), &id, &table);
     let order = HELD.read().as_ref().filter(|h| h.block == id && h.rows == table.rows.len()).map(|h| h.order.clone()).unwrap_or_else(|| table.order());
@@ -1413,5 +1426,20 @@ mod tests {
         assert_eq!(pick_in(Vec::new(), 3, Pick::Range, &order), [3]);
         // One that does not show (a filter) is no end of a range: it is picked alone.
         assert_eq!(pick_in(vec![2], 9, Pick::Range, &order), [2, 9]);
+    }
+
+    #[test]
+    fn a_range_in_a_grouped_table_is_what_shows_between_its_ends() {
+        let cell = |s: &str| s.to_string();
+        let mut table = Table::of(vec![vec![cell("Item"), cell("Category")], vec![cell("Rent"), cell("Home")], vec![cell("Groceries"), cell("Food")], vec![cell("Internet"), cell("Home")]]);
+        table.view.group = Some(1);
+        // The lines: Home (Rent, Internet), then Food (Groceries).
+        let lines = by_lines(&table, table.order());
+        assert_eq!(lines, [1, 3, 2]);
+        // Rent, then Internet with Shift: those two, and not Groceries.
+        assert_eq!(pick_in(vec![1], 3, Pick::Range, &lines), [1, 3]);
+        // With no group, the lines are the order as it is.
+        table.view.group = None;
+        assert_eq!(by_lines(&table, vec![3, 1, 2]), [3, 1, 2]);
     }
 }

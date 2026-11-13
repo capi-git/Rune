@@ -97,17 +97,25 @@ pub fn mention_query(text: &str) -> Option<(usize, bool, String)> {
 
 /// Convert Markdown (for example an AI reply) into blocks.
 pub fn to_blocks(md: &str) -> Vec<Block> {
-    read(md, false)
+    read(md, false, &mut Vec::new())
+}
+
+/// The tables of this Markdown that are more than a table holds: for each,
+/// its columns and its rows under the header (see `Table::over_most`).
+pub fn tables_over_most(md: &str) -> Vec<(usize, usize)> {
+    let mut over = Vec::new();
+    read(md, false, &mut over);
+    over
 }
 
 /// As `to_blocks`, for words that are pasted: each line is a line of the
 /// page. (In a Markdown file, lines one under the other are one paragraph;
 /// a list of names copied from another program is not.)
 pub fn to_blocks_by_line(md: &str) -> Vec<Block> {
-    read(md, true)
+    read(md, true, &mut Vec::new())
 }
 
-fn read(md: &str, each_line: bool) -> Vec<Block> {
+fn read<'a>(md: &'a str, each_line: bool, over: &mut Vec<(usize, usize)>) -> Vec<Block> {
     let mut out: Vec<Block> = Vec::new();
     let mut paragraph: Vec<String> = Vec::new();
     let mut quote: Vec<String> = Vec::new();
@@ -127,8 +135,11 @@ fn read(md: &str, each_line: bool) -> Vec<Block> {
         }
     }
 
-    let all: Vec<&str> = md.lines().collect();
+    let all: Vec<&'a str> = md.lines().collect();
     let mut skip = 0usize;
+    // The table read last had more rows than a table holds: the line its
+    // other rows start at, with its header and its line of dashes.
+    let mut more_rows: Option<(usize, &'a str, &'a str)> = None;
     for (at, raw) in all.iter().copied().enumerate() {
         if skip > 0 {
             skip -= 1;
@@ -136,13 +147,26 @@ fn read(md: &str, each_line: bool) -> Vec<Block> {
         }
         // A table: its header, the line of dashes, then its rows.
         if code.is_none() && raw.trim_start().starts_with('|') {
-            if let Some((table, taken)) = crate::table::Table::from_markdown(&all[at..]) {
+            // The rows over the most of the table above are a table of
+            // their own, under the same header. (They were one paragraph
+            // of bars and words.)
+            let rest: Option<Vec<&'a str>> = more_rows.filter(|(from, ..)| *from == at).map(|(_, head, rule)| [head, rule].into_iter().chain(all[at..].iter().copied()).collect());
+            let (lines, lead) = match &rest {
+                Some(lines) => (lines.as_slice(), 2),
+                None => (&all[at..], 0),
+            };
+            if lead == 0 {
+                over.extend(crate::table::Table::over_most(lines));
+            }
+            if let Some((table, taken)) = crate::table::Table::from_markdown(lines) {
                 flush(&mut out, &mut paragraph, &mut quote);
                 let mut block = Block::new(BlockKind::Table, table.plain_text());
                 block.data = table.to_data();
                 block.place.beside = table.beside;
                 out.push(block);
-                skip = taken - 1;
+                skip = taken - lead - 1;
+                let cut = taken == crate::table::MOST_ROWS + 1 && lines.get(taken).is_some_and(|l| l.trim_start().starts_with('|'));
+                more_rows = cut.then(|| (at + taken - lead, lines[0], lines[1]));
                 continue;
             }
         }
@@ -341,6 +365,8 @@ pub fn render(title: &str, blocks: &[Block], mut special: impl FnMut(&Block) -> 
             BlockKind::Table => table_markdown(b, &pad),
             BlockKind::Chart => crate::chart::Chart::parse(&b.data).to_markdown(),
             BlockKind::PageLink => "[Page]".to_string(),
+            // (What is in a locked page is kept from anything that reads it.)
+            BlockKind::Locked => "[Locked page: it opens only in Rune, with its password]".to_string(),
             }
         };
         out.push_str(&line);

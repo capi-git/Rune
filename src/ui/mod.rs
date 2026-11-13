@@ -5,6 +5,7 @@ mod calendar;
 mod charts;
 mod chrome;
 mod graph;
+mod lock;
 pub mod icons;
 mod modals;
 pub mod pad;
@@ -107,7 +108,13 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
             }
         }
     });
-    use_drop(move || sync::leave(state.win.key));
+    use_drop(move || {
+        // (The pages this window opened with their passwords lock again.)
+        crate::lock::window_closed(state.win.key);
+        sync::leave(state.win.key);
+        // (A window that goes while the app listens for it: see `window_gone`.)
+        crate::state::window_gone(state.win.key);
+    });
 
     // The calendars of this Mac, when the person has turned them on: read
     // when the window opens, and again every five minutes.
@@ -244,14 +251,12 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
         }
         // A call can go on while the app is closed and opened again: the
         // meeting that the last run wrote down is known again, and the
-        // watcher knows the program of one that was on.
-        let mut watch = match state.recall_meeting() {
-            Some(app) => {
-                crate::meeting::log(&format!("Opened during a meeting in {app}"));
-                crate::meeting::Watch::after(app)
-            }
-            None => crate::meeting::Watch::default(),
-        };
+        // watcher knows the programs of the calls that were on.
+        let were_on = state.recall_meeting();
+        if !were_on.is_empty() {
+            crate::meeting::log(&format!("Opened during a meeting in {}", were_on.join(", ")));
+        }
+        let mut watch = crate::meeting::Watch::after(&were_on);
         loop {
             crate::ai::sleep_ms(crate::meeting::POLL_MS).await;
             if !crate::meeting::enabled() {
@@ -274,15 +279,19 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
                 Some(crate::meeting::Change::Joined(app)) => state.meeting_joined(app),
                 Some(crate::meeting::Change::Back(app)) => {
                     if !state.meeting_back(app) {
-                        watch.not_back();
+                        watch.not_back(app);
                         crate::meeting::log("Not the meeting that ended");
                     }
                 }
+                // One program of the call went silent while another goes on.
+                Some(crate::meeting::Change::Left(app)) => state.meeting_left(app, &watch.apps(), crate::model::now_ms() - crate::meeting::END_LAG_MS),
                 Some(crate::meeting::Change::Ended) => state.meeting_ended(crate::model::now_ms() - crate::meeting::END_LAG_MS),
                 None => {}
             }
             if watch.in_meeting() {
-                state.meeting_seen();
+                state.meeting_seen(&watch.apps());
+            } else {
+                state.meeting_quiet();
             }
         }
     });
@@ -313,6 +322,7 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
             Some(mut view) => {
                 view.theme = theme_class(state.ui.read().theme).to_string();
                 view.glass = glass_vars(&state.look.read());
+                view.accent = state.look.read().accent.clone();
                 if crate::pad::show(view) {
                     pad::open_window();
                 }
@@ -456,6 +466,28 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
         dioxus::desktop::window().set_title(&format!("{} — Rune", window_title()));
     });
 
+    // A locked page that this window opened locks again when no tab shows it.
+    let shown_pages = use_memo(move || {
+        let ui = state.ui.read();
+        let mut ids: Vec<String> = ui
+            .tabs
+            .iter()
+            .chain(ui.parked.values().flat_map(|set| set.0.iter()))
+            .flat_map(|t| t.ordered())
+            .filter_map(|p| match p.route() {
+                Route::Page(id) => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    });
+    use_effect(move || {
+        let _ = shown_pages.read();
+        state.relock_unshown();
+    });
+
     // The sidebar shows the space of the page on screen.
     use_effect(move || {
         let _ = state.route();
@@ -487,16 +519,19 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
     let pinned = ui.sidebar_open;
     let width = ui.sidebar_width;
     let modal = ui.modal;
+    let focus_mode = ui.focus_mode;
     let tab = ui.tab().clone();
     let popover_open = ui.popover.is_some() || state.slash.read().is_some();
     drop(ui);
     let toast = state.toast_msg.read().clone().map(|t| (t.1, t.2));
     let glass = glass_vars(&state.look.read());
+    let accent = state.look.read().accent.clone();
 
     rsx! {
         div {
-            class: if pinned { "app {theme} pinned" } else { "app {theme}" },
+            class: format!("app {theme}{}{}", if pinned { " pinned" } else { "" }, if focus_mode { " focus-mode" } else { "" }),
             style: "--sidebar-w: {width}px; --zoom: {zoom}; {glass}",
+            "data-accent": "{accent}",
             chrome::TopRow {}
             div { class: if modal == Some(Modal::Settings) { "shell-body settings-open" } else { "shell-body" },
                 if !pinned {
@@ -541,6 +576,7 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
                 Some(Modal::Voice) => rsx! { modals::VoiceModal {} },
                 Some(Modal::AskNotes) => rsx! { modals::AskNotesModal {} },
                 Some(Modal::Todos) => rsx! { modals::TodosModal {} },
+                Some(Modal::LockPage) => rsx! { lock::LockPageModal {} },
                 Some(Modal::Settings) | None => rsx! {},
             }
             if let Some((message, leaving)) = toast {

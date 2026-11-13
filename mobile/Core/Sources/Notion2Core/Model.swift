@@ -34,6 +34,9 @@ public enum BlockKind: String, Sendable, CaseIterable, Hashable {
     /// A chart of the rows of a table; what it draws is in the block's
     /// `data` (see `Chart`).
     case chart
+    /// All the lines of a locked page, scrambled with its password (the
+    /// page's only block; see `src/lock.rs`). It opens only on the Mac.
+    case locked
 
     /// The kind a stored name means. Anything unknown is plain text, as on
     /// the desktop.
@@ -44,10 +47,15 @@ public enum BlockKind: String, Sendable, CaseIterable, Hashable {
     /// Blocks that hold text.
     public var hasText: Bool {
         switch self {
-        case .divider, .pageLink, .drawing, .image, .table, .chart: false
+        case .divider, .pageLink, .drawing, .image, .table, .chart, .locked: false
         default: true
         }
     }
+}
+
+/// A page whose only block is the sealed one: locked with a password.
+public func isLocked(_ blocks: [Block]) -> Bool {
+    blocks.count == 1 && blocks[0].kind == .locked
 }
 
 public struct Block: Identifiable, Hashable, Sendable {
@@ -129,7 +137,7 @@ public struct Block: Identifiable, Hashable, Sendable {
     public var searchText: String {
         switch kind {
         case .table: TableData.parse(data)?.plainText ?? ""
-        case .divider, .pageLink, .drawing, .image, .chart: ""
+        case .divider, .pageLink, .drawing, .image, .chart, .locked: ""
         default: plainText
         }
     }

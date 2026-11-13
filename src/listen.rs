@@ -614,9 +614,47 @@ pub fn transcript_so_far(page: &[Block]) -> (Option<Id>, usize) {
     (Some(page[at].id.clone()), lines)
 }
 
+/// What a page's "Transcript" toggle holds from its line `from` on, as the
+/// AI is given a transcript: a line "Me: words" for each turn.
+pub fn heard_before(page: &[Block], from: usize) -> String {
+    let Some(at) = page.iter().rposition(|b| b.kind == BlockKind::Toggle && b.indent == 0 && b.plain_text().trim().eq_ignore_ascii_case("Transcript")) else {
+        return String::new();
+    };
+    page[at + 1..]
+        .iter()
+        .take_while(|b| b.indent > 0)
+        .skip(from)
+        .filter_map(|b| {
+            let plain = b.plain_text();
+            let (who, rest) = plain.split_once(" · ")?;
+            let (_, said) = rest.split_once(" — ")?;
+            Some(format!("{}: {}", who.trim(), said.trim()))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The transcript for the notes of a meeting that was heard in two parts:
+/// what the page held before (`heard_before`), then what was heard now.
+pub fn all_heard(earlier: &str, now: &str) -> String {
+    if earlier.is_empty() { now.to_string() } else { format!("{earlier}\n{now}") }
+}
+
+/// The line of a page's "Transcript" toggle where the part that was heard
+/// last begins: the last line that says when the app listened again (0 for
+/// a transcript in one part).
+pub fn last_part(page: &[Block]) -> usize {
+    let Some(at) = page.iter().rposition(|b| b.kind == BlockKind::Toggle && b.indent == 0 && b.plain_text().trim().eq_ignore_ascii_case("Transcript")) else {
+        return 0;
+    };
+    page[at + 1..].iter().take_while(|b| b.indent > 0).enumerate().filter(|(_, b)| b.text.starts_with(AGAIN)).map(|(i, _)| i).last().unwrap_or(0)
+}
+
+const AGAIN: &str = "_Listening started again at ";
+
 /// The line between what was heard before and what is heard now.
 pub fn again_line(time: &str) -> Block {
-    Block::text(format!("_Listening started again at {time}_")).with_indent(1)
+    Block::text(format!("{AGAIN}{time}_")).with_indent(1)
 }
 
 /// Put the lines of a transcript in the page's "Transcript" toggle (made at
@@ -650,6 +688,29 @@ pub fn put_transcript(page: &mut Vec<Block>, toggle: &mut Option<Id>, kept: usiz
         new.id = old.id.clone();
     }
     page.splice(from..end, lines);
+}
+
+/// Before `put_transcript` while the app listens: a line that the person
+/// changed in the page (a word put right, a voice given a name) stays as they
+/// made it, for as long as the turn it shows has not changed. `written`: the
+/// lines as they were put there the last time. (Every write put the heard
+/// words back, so a change in the open toggle was undone within 20 seconds.)
+/// Only while the toggle has the lines that were written, one for one: with
+/// a line added or taken out by hand, the lines are written as before.
+pub fn keep_changes(page: &[Block], toggle: Option<&Id>, kept: usize, written: &mut Vec<String>, lines: &mut [Block]) {
+    let heard: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
+    if let Some(at) = toggle.and_then(|id| page.iter().position(|b| &b.id == id)) {
+        let end = page[at + 1..].iter().position(|b| b.indent == 0).map(|i| at + 1 + i).unwrap_or(page.len());
+        let from = (at + 1 + kept).min(end);
+        if end - from == written.len() {
+            for ((line, old), was) in lines.iter_mut().zip(&page[from..end]).zip(written.iter()) {
+                if line.text == *was && old.text != *was {
+                    line.text = old.text.clone();
+                }
+            }
+        }
+    }
+    *written = heard;
 }
 
 /// `notion2 --transcript-into <page id> <lines file> [--notes <markdown
@@ -1121,6 +1182,86 @@ mod tests {
         // The transcript of a video has a name of its own: it is not gone on from.
         let video = vec![Block::new(BlockKind::Toggle, "Transcript of the video"), Block::text("x").with_indent(1)];
         assert_eq!(transcript_so_far(&video), (None, 0));
+    }
+
+    #[test]
+    fn a_line_changed_in_the_page_stays_while_the_app_listens() {
+        use super::*;
+        let mut t = Transcript::default();
+        t.add(Who::Others, "The lunch moves to March.", 1.0);
+        t.add(Who::Me, "Good.", 5.0);
+        let mut page = vec![Block::text("Monday")];
+        let (mut toggle, mut written) = (None, Vec::new());
+        let write = |page: &mut Vec<Block>, toggle: &mut Option<Id>, written: &mut Vec<String>, t: &Transcript| {
+            let mut lines = t.blocks();
+            keep_changes(page, toggle.as_ref(), 0, written, &mut lines);
+            put_transcript(page, toggle, 0, lines);
+        };
+        write(&mut page, &mut toggle, &mut written, &t);
+        // The person puts a word right, and gives the voice a name.
+        page[2].text = page[2].text.replace("lunch", "launch");
+        assert_eq!(rename_voice(&mut page, "Others", "Sam"), 1);
+        let fixed = page[2].text.clone();
+        assert!(fixed.contains("**Sam**") && fixed.contains("launch"));
+        // More is heard: the line they changed stays, the new line comes.
+        t.add(Who::Others, "And the budget is agreed.", 70.0);
+        write(&mut page, &mut toggle, &mut written, &t);
+        assert_eq!(page[2].text, fixed);
+        assert!(page[3].text.contains("Good.") && page[4].text.contains("budget"));
+        // A turn that goes on is written again as heard (its words changed).
+        t.add(Who::Others, "Sam sends it.", 75.0);
+        page[4].text = "typed over".into();
+        write(&mut page, &mut toggle, &mut written, &t);
+        assert!(page[4].text.contains("And the budget is agreed. Sam sends it."));
+        assert_eq!(page[2].text, fixed);
+        // A line added by hand in the toggle: written as before, by place.
+        page.insert(3, Block::text("my own line").with_indent(1));
+        write(&mut page, &mut toggle, &mut written, &t);
+        assert_eq!(page.len(), 5);
+        assert!(page[2].text.contains("lunch") && page[3].text.contains("Good."));
+    }
+
+    #[test]
+    fn the_notes_of_a_meeting_heard_in_two_parts_are_written_from_both() {
+        use super::*;
+        // The app was closed while it listened: the first part is in the page.
+        let mut first = Transcript::default();
+        first.add(Who::Me, "So the budget is agreed.", 1.0);
+        first.add(Who::Others, "Yes, and Sam sends the numbers by Friday.", 3.0);
+        let mut page = vec![Block::text("Monday"), Block::new(BlockKind::Heading2, "Notes")];
+        let mut toggle = None;
+        put_transcript(&mut page, &mut toggle, 0, first.blocks());
+        let earlier = heard_before(&page, 0);
+        assert_eq!(earlier, "Me: So the budget is agreed.\nOthers: Yes, and Sam sends the numbers by Friday.");
+        // It listens again: the notes are written from both parts, in order.
+        let mut second = Transcript::default();
+        second.add(Who::Others, "The launch moves to March.", 2.0);
+        let (mut toggle, kept) = transcript_so_far(&page);
+        let mut lines = second.blocks();
+        lines.insert(0, again_line("3:20 PM"));
+        put_transcript(&mut page, &mut toggle, kept, lines);
+        assert_eq!(all_heard(&earlier, &second.text()), "Me: So the budget is agreed.\nOthers: Yes, and Sam sends the numbers by Friday.\nOthers: The launch moves to March.");
+        // (The line that says when it listened again is not a turn.)
+        assert_eq!(heard_before(&page, 0).lines().count(), 3);
+        // A first part that had its notes is not given again.
+        assert_eq!(all_heard("", &second.text()), "Others: The launch moves to March.");
+        assert_eq!(heard_before(&[Block::text("No transcript here")], 0), "");
+        // The first part had its notes (Stop), and the app was closed while
+        // it heard the second: the next notes take the second part, not the
+        // first one again.
+        assert_eq!(last_part(&page), 2);
+        assert_eq!(heard_before(&page, last_part(&page)), "Others: The launch moves to March.");
+        // A third part: the part that was heard last is the third.
+        let (mut toggle, kept) = transcript_so_far(&page);
+        let mut third = Transcript::default();
+        third.add(Who::Me, "Thanks, all.", 1.0);
+        let mut lines = third.blocks();
+        lines.insert(0, again_line("3:40 PM"));
+        put_transcript(&mut page, &mut toggle, kept, lines);
+        assert_eq!(heard_before(&page, last_part(&page)), "Me: Thanks, all.");
+        // Known from this run where the words with no notes begin: from there.
+        assert_eq!(heard_before(&page, 2).lines().count(), 2);
+        assert_eq!(last_part(&[Block::text("No transcript here")]), 0);
     }
 
     #[test]

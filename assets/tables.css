@@ -2498,8 +2498,12 @@ span.value-name {
 .linked-box:focus-within > .linked-text {
   display: none;
 }
-.linked-box:not(:focus-within) > textarea,
-.linked-box:not(:focus-within) > input {
+/* (Only a box with the names over it: every text cell after the first
+   column, and the notes of an event, is in such a box, and with no link in
+   it there is nothing over it. Its own words must show then: they did not,
+   until the box was typed in.) */
+.linked-box:not(:focus-within) > textarea:has(~ .linked-text),
+.linked-box:not(:focus-within) > input:has(~ .linked-text) {
   color: transparent;
 }
 .linked-page {
@@ -2532,6 +2536,22 @@ span.value-name {
   padding: 6px 9px;
   font-size: 14px;
   line-height: 1.45;
+}
+/* The box under the name holds the link as it is written, and took the
+   height that long line needs: a row of two or three lines for one short
+   name. While the box is not typed in, the name gives the height, and the
+   box lies over it (a press still goes to the box). */
+.table-block .linked-box:not(:focus-within) > .linked-text,
+.row-values .linked-box:not(:focus-within) > .linked-text {
+  position: relative;
+  min-height: 32px;
+}
+.table-block .linked-box:not(:focus-within) > .cell:has(~ .linked-text),
+.row-values .linked-box:not(:focus-within) > .cell:has(~ .linked-text) {
+  position: absolute;
+  inset: 0;
+  height: 100%;
+  min-height: 0;
 }
 /* (As the notes under it: see `.ed-notes`.) */
 .ed-notes-box {

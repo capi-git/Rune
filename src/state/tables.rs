@@ -3,7 +3,7 @@
 //! the view: filters, sorts, layout), or a chart is changed; and where a
 //! chart finds its table.
 
-use super::{remember, AppState, Pane, Popover, Route};
+use super::{descendants, remember, AppState, Pane, Popover, Route};
 use crate::chart::Chart;
 use crate::layout::Edge;
 use crate::model::{index_of, new_id, Block, BlockKind, Id, Page};
@@ -49,6 +49,12 @@ pub fn lost_row_pages(pages: &HashMap<Id, Page>, blocks: &HashMap<Id, Vec<Block>
     for p in pages.values().filter(|p| !p.trashed) {
         let Some(key) = p.row_of.as_deref() else { continue };
         let Some(lines) = p.parent_id.as_ref().and_then(|parent| blocks.get(parent)) else { continue };
+        // A locked page that is not open is one sealed line: its tables are
+        // inside the seal and cannot be looked at. (Taken as "no table",
+        // every start cut the pages of its rows off and deleted the empty ones.)
+        if crate::lock::sealed(lines).is_some() {
+            continue;
+        }
         let found = key.split_once('/').is_some_and(|(block, row)| {
             lines.iter().find(|b| b.id == block && b.kind == BlockKind::Table).is_some_and(|b| row == TEMPLATE || Table::parse(&b.data).row_with_id(row).is_some())
         });
@@ -65,6 +71,11 @@ pub fn lost_row_pages(pages: &HashMap<Id, Page>, blocks: &HashMap<Id, Vec<Block>
 /// table itself gone, that is all its rows, and its template.
 pub fn lost_rows(before: &[Block], after: &[Block]) -> Vec<(Id, Vec<String>)> {
     let mut out = Vec::new();
+    // (A page that is one sealed line now has its tables inside the seal:
+    // no row went.)
+    if crate::lock::sealed(after).is_some() {
+        return out;
+    }
     for was in before.iter().filter(|b| b.kind == BlockKind::Table) {
         let now = after.iter().find(|b| b.id == was.id && b.kind == BlockKind::Table);
         // (Most changes leave a table as it was, and most tables have no rows with names.)
@@ -147,7 +158,24 @@ impl AppState {
     pub fn table_at(&self, page: &str, id: &str) -> Option<Table> {
         let blocks = self.blocks.peek();
         let b = blocks.get(page)?.iter().find(|b| b.id == id && b.kind == BlockKind::Table)?;
-        Some(Table::parse(&b.data))
+        let mut table = Table::parse(&b.data);
+        self.name_links(&mut table, false);
+        Some(table)
+    }
+
+    /// Give a table the names that the pages linked in its cells have now
+    /// (see `Table::words`): its sort, its filters and its groups read a
+    /// link as that name. A page in the Trash, or gone, gets none. With
+    /// `watch` (for the screen), the table is drawn again when a page gets
+    /// another name. A table with no link is left as it is, and watches
+    /// nothing.
+    pub fn name_links(&self, table: &mut Table, watch: bool) {
+        let linked = table.linked_pages();
+        if linked.is_empty() {
+            return;
+        }
+        let pages = if watch { self.pages.read() } else { self.pages.peek() };
+        table.names = linked.into_iter().filter_map(|id| pages.get(&id).filter(|p| !p.trashed).map(|p| p.display_title().to_string()).map(|name| (id, name))).collect();
     }
 
     /// Change what a table is made of: its columns, their kinds, its name.
@@ -535,6 +563,8 @@ impl AppState {
             let fresh = |t: &mut crate::table::Table, at: usize, c: usize| {
                 t.add_row(at).map(|r| {
                     t.fill_for_filters(r, today);
+                    // (The new row is put after `at`: `at` is still that row.)
+                    t.fill_for_group(r, at);
                     (r, c)
                 })
             };
@@ -901,7 +931,53 @@ impl AppState {
     /// of the rows that went with the change go too.
     pub(super) fn drop_lost_row_pages(self, before: &[Block], after: &[Block]) {
         for (block, rows) in lost_rows(before, after) {
-            self.drop_row_pages(&block, rows);
+            // (A table that was cut here and pasted in another page is the
+            // same block there, see `bring_row_pages`. Undo and an older
+            // version give a table that comes back here a new id then
+            // (`tables_put_back`); should the one id be in two pages all
+            // the same, the pages of its rows stay with the table that is
+            // still there.)
+            let elsewhere = !after.iter().any(|b| b.id == block) && self.blocks.peek().values().any(|bs| bs.iter().any(|b| b.id == block && b.kind == BlockKind::Table));
+            if !elsewhere {
+                self.drop_row_pages(&block, rows);
+            }
+        }
+    }
+
+    /// A table that was cut came to `page` by a paste, as the block it was:
+    /// the pages of its rows come with it. The cut put those with something
+    /// written in them in the Trash, in the page the table was cut from:
+    /// they come into this page, and those of `restore` (the ones the cut
+    /// put in the Trash) out of the Trash. (The page of a row that is not
+    /// in the table any more stays where it is.)
+    pub(super) fn bring_row_pages(mut self, page: &str, block: &str, restore: &[Id]) {
+        let Some(table) = self.table_at(page, block) else { return };
+        let space = self.pages.peek().get(page).map(|p| p.space_id.clone()).unwrap_or_default();
+        for (row, pid) in self.row_pages(block) {
+            let there = if row == TEMPLATE { table.template.is_some() } else { table.row_with_id(&row).is_some() };
+            let inside = descendants(&self.pages.peek(), &pid);
+            // (Never into a page that is inside the row's own page.)
+            if !there || inside.iter().any(|p| p == page) {
+                continue;
+            }
+            let trashed = {
+                let mut pages = self.pages.write();
+                for p in &inside {
+                    if let Some(p) = pages.get_mut(p) {
+                        p.space_id = space.clone();
+                    }
+                }
+                let Some(p) = pages.get_mut(&pid) else { continue };
+                p.parent_id = Some(page.to_string());
+                p.trashed
+            };
+            if trashed && restore.contains(&pid) {
+                self.set_trashed(&pid, false);
+            } else {
+                for p in &inside {
+                    self.save_page(p);
+                }
+            }
         }
     }
 
@@ -909,7 +985,13 @@ impl AppState {
     /// that is not there any more, it is an ordinary page now (inside the
     /// page of the table), so that it is in the sidebar.
     pub(super) fn unrow_if_lost(mut self, page_id: &str) {
-        let lost = self.pages.peek().get(page_id).is_some_and(|p| p.row_of.is_some()) && self.row_ref(page_id).is_none();
+        // (The table of a locked page that is not open cannot be looked at:
+        // the page stays the page of its row.)
+        let parent_shut = {
+            let parent = self.pages.peek().get(page_id).and_then(|p| p.parent_id.clone());
+            parent.is_some_and(|parent| self.blocks.peek().get(&parent).is_some_and(|bs| crate::lock::sealed(bs).is_some()))
+        };
+        let lost = !parent_shut && self.pages.peek().get(page_id).is_some_and(|p| p.row_of.is_some()) && self.row_ref(page_id).is_none();
         if lost {
             if let Some(p) = self.pages.write().get_mut(page_id) {
                 p.row_of = None;
@@ -999,7 +1081,7 @@ impl AppState {
     pub fn pick_cell_picture(self, page: &str, id: &str, row: usize, column: usize) {
         let (page, id) = (page.to_string(), id.to_string());
         spawn_forever(async move {
-            let Some(file) = rfd::AsyncFileDialog::new().set_title("Choose a Picture").add_filter("Pictures", &["png", "jpg", "jpeg", "gif", "webp", "heic", "tiff", "bmp"]).pick_file().await else {
+            let Some(file) = rfd::AsyncFileDialog::new().set_title("Choose a Picture").add_filter("Pictures", &["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "tiff", "bmp"]).pick_file().await else {
                 return;
             };
             match crate::files::import(file.path()) {
@@ -1117,6 +1199,35 @@ mod tests {
         got.sort();
         assert_eq!(got, want);
         assert!(written_row_pages(&pages, &blocks, "another page").is_empty());
+    }
+
+    /// At a start the lines of a locked page are one sealed block: the
+    /// pages of the rows of its tables are not lost, written or empty.
+    #[test]
+    fn the_row_pages_of_a_locked_page_are_left_alone() {
+        let parent = Page::new(None, 0.0);
+        let mut written = Page::new(Some(parent.id.clone()), 0.0);
+        written.row_of = Some("t1/r1".into());
+        let mut empty = Page::new(Some(parent.id.clone()), 1.0);
+        empty.row_of = Some("t1/r2".into());
+        let mut template = Page::new(Some(parent.id.clone()), 2.0);
+        template.row_of = Some(format!("t1/{TEMPLATE}"));
+        let sealed = crate::lock::seal_with(&crate::lock::test_key("pw-pw-pw"), &parent.id, &[Block::text("a table is in here")]);
+        let mut blocks: HashMap<Id, Vec<Block>> = HashMap::new();
+        blocks.insert(parent.id.clone(), vec![sealed.clone()]);
+        blocks.insert(written.id.clone(), vec![Block::text("What I wrote about this row")]);
+        blocks.insert(empty.id.clone(), vec![Block::text("")]);
+        blocks.insert(template.id.clone(), vec![Block::text("")]);
+        let pages: HashMap<Id, Page> = [&parent, &written, &empty, &template].into_iter().map(|p| (p.id.clone(), p.clone())).collect();
+        assert_eq!(lost_row_pages(&pages, &blocks), (vec![], vec![]));
+        // The page is locked while its table is on it (the lines turn into
+        // the sealed block), or a sealed version is put back: no row went.
+        let mut table = Table::of(vec![vec!["Name".into()], vec!["Rent".into()]]);
+        table.name_rows();
+        let mut block = Block::new(BlockKind::Table, "");
+        block.data = table.to_data();
+        assert!(!lost_rows(std::slice::from_ref(&block), &[]).is_empty(), "a table that went takes its rows");
+        assert!(lost_rows(&[block], &[sealed]).is_empty());
     }
 
     #[test]

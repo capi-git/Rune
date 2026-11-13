@@ -463,6 +463,7 @@ public enum SyncFormat {
         case "image": "Image"
         case "table": "Table"
         case "chart": "Chart"
+        case "locked": "Locked"
         default: "Text"
         }
     }

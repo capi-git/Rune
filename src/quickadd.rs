@@ -254,6 +254,8 @@ pub fn parse(text: &str, now: i64) -> Option<Parsed> {
     // ----- the time, or a stretch of time -----
     let mut from: Option<Clock> = None;
     let mut to: Option<Clock> = None;
+    // (The end was written with its minutes, as "12:00".)
+    let mut to_with_minutes = false;
     let mut i = 0;
     while i < low.len() && from.is_none() {
         if used[i] {
@@ -306,6 +308,7 @@ pub fn parse(text: &str, now: i64) -> Option<Parsed> {
             };
             if let Some(end) = end {
                 to = Some(end);
+                to_with_minutes = w2.contains(':');
                 for k in next..next + 1 + width2 {
                     used[k] = true;
                 }
@@ -348,9 +351,14 @@ pub fn parse(text: &str, now: i64) -> Option<Parsed> {
     let start = at(day, from.minutes());
     let end = match (to, long) {
         (Some(mut end), _) => {
-            // An end with no "am" or "pm" is after the start ("9 to 10", "11 to 1").
-            if end.pm.is_none() && end.minutes() <= from.minutes() && end.hour < 12 {
-                end.pm = Some(true);
+            // An end with no "am" or "pm" is after the start ("9 to 10", "11 to 1"):
+            // in the afternoon when that is after the start, and else in the
+            // night that follows. ("9pm to 2" ends at 2 in the night. Taken
+            // as 2 in the afternoon of the next day, it was 17 hours long.)
+            // A bare 12 can be midnight in that way ("11pm to 12"); "12:00",
+            // written with its minutes, is noon as it says ("23:00 to 12:00").
+            if end.pm.is_none() && end.minutes() <= from.minutes() && (end.hour < 12 || (end.hour == 12 && !to_with_minutes)) {
+                end.pm = Some(Clock { pm: Some(true), ..end }.minutes() > from.minutes());
             }
             let minutes = end.minutes() - from.minutes();
             start + if minutes > 0 { minutes } else { minutes + 24 * 60 } * MINUTE
@@ -424,6 +432,24 @@ mod tests {
         assert_eq!(read("Run 6 am for 1.5h"), got("Run", day(11, 11), "6:00", 90));
         assert_eq!(read("Sync noon"), got("Sync", day(11, 10), "12:00", 60));
         assert_eq!(read("Budget next friday 2 pm to 3 pm"), got("Budget", day(11, 20), "14:00", 60));
+    }
+
+    #[test]
+    fn an_end_with_no_am_or_pm_is_the_next_such_hour_after_the_start() {
+        assert_eq!(read("Plan from 9 to 10 tomorrow"), got("Plan", day(11, 11), "9:00", 60));
+        assert_eq!(read("Workshop from 11 to 1"), got("Workshop", day(11, 10), "11:00", 120));
+        assert_eq!(read("Film 8pm to 10"), got("Film", day(11, 10), "20:00", 120));
+        // Into the night: 2 is 2 in the night, not 2 in the afternoon of the next day.
+        assert_eq!(read("Party 9pm to 2"), got("Party", day(11, 10), "21:00", 5 * 60));
+        assert_eq!(read("Shift 10pm-1"), got("Shift", day(11, 10), "22:00", 3 * 60));
+        assert_eq!(read("Watch 11pm to 12"), got("Watch", day(11, 10), "23:00", 60));
+        assert_eq!(read("Shift 22:00 to 2"), got("Shift", day(11, 10), "22:00", 4 * 60));
+        assert_eq!(read("Night 20:00 to 8:00"), got("Night", day(11, 10), "20:00", 12 * 60));
+        // An end written with its minutes is that time: "12:00" is noon, not midnight.
+        assert_eq!(read("Watch 23:00 to 12:00"), got("Watch", day(11, 10), "23:00", 13 * 60));
+        // The afternoon when that is after the start.
+        assert_eq!(read("Work from 8 to 5 tomorrow"), got("Work", day(11, 11), "8:00", 9 * 60));
+        assert_eq!(read("Market 9am to 2 tomorrow"), got("Market", day(11, 11), "9:00", 5 * 60));
     }
 
     #[test]

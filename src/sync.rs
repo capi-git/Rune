@@ -23,7 +23,7 @@ pub enum SyncMsg {
     EventRemoved(Id),
     /// Every event as it is on disk, after an outside change.
     Events(Vec<Event>),
-    Look { glass: u8, blur: u8, tint: String },
+    Look { glass: u8, blur: u8, tint: String, accent: String },
     /// Everything as it is on disk, after an outside change.
     Reload(Rc<Loaded>),
 }

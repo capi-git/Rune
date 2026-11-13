@@ -143,6 +143,24 @@ fn rewrite_page_urls(text: &str, href: impl Fn(&str) -> Option<String>) -> Strin
 /// An empty Excalidraw scene, for a drawing nobody has drawn in yet.
 const EMPTY_SCENE: &str = r#"{"type":"excalidraw","version":2,"source":"notion2","elements":[],"appState":{},"files":{}}"#;
 
+/// The kept pictures a page shows outside its lines: its cover, when it is
+/// the person's own picture, and the pictures in the cells of its tables.
+/// They go out beside the page with the pictures of its lines (they were
+/// left out: the names in the cells of an exported table named no file).
+fn other_pictures(page: &Page, body: &[Block]) -> Vec<String> {
+    let mut names: Vec<String> = page.cover_file().map(String::from).into_iter().collect();
+    for b in body.iter().filter(|b| b.kind == BlockKind::Table) {
+        let table = crate::table::Table::parse(&b.data);
+        for (c, _) in table.columns.iter().enumerate().filter(|(_, column)| column.kind == crate::table::Kind::File) {
+            for cell in table.rows.iter().skip(1).filter_map(|row| row.get(c)) {
+                names.extend(crate::table::parts(cell).into_iter().filter(|name| crate::files::valid_name(name)));
+            }
+        }
+    }
+    names.dedup();
+    names
+}
+
 /// Write every page (except those in the Trash) into `dir`, which must exist.
 /// Returns how many pages were written.
 pub fn export_all(
@@ -187,6 +205,7 @@ pub fn export_all(
             _ => None,
         });
         let md = rewrite_page_urls(&md, link);
+        pictures.extend(other_pictures(page, body));
 
         let mut file = dir.to_path_buf();
         for part in folder {
@@ -683,6 +702,23 @@ mod tests {
         assert!(inner.contains("[the list](../Projects.md)"), "{inner}");
         assert!(!dir.join("Old.md").exists(), "pages in the Trash are left out");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_cover_and_the_pictures_of_table_cells_go_out_with_a_page() {
+        let mut page = Page::new(None, 1.0);
+        page.cover = Some("file:cover1.jpg".into());
+        let mut table = crate::table::Table::parse("");
+        table.rows = vec![vec!["Name".into(), "Shots".into()], vec!["Monday".into(), "a1.png, b2.png".into()], vec!["Tuesday".into(), "not a picture".into()]];
+        table.columns = vec![crate::table::Column::default(), crate::table::Column { kind: crate::table::Kind::File, ..Default::default() }];
+        let mut block = Block::new(BlockKind::Table, "");
+        block.data = table.to_data();
+        assert_eq!(other_pictures(&page, &[Block::text("a1.png"), block.clone()]), ["cover1.jpg", "a1.png", "b2.png"]);
+        // One of the app's own covers is no file, and a plain table names none.
+        page.cover = Some("sea".into());
+        table.columns.clear();
+        block.data = table.to_data();
+        assert!(other_pictures(&page, &[block]).is_empty());
     }
 
     #[test]

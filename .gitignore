@@ -1,3 +1,6 @@
 target/
 .DS_Store
 .env
+# Other sessions keep their work trees here; only the skills are part of the repository.
+.claude/worktrees/
+.claude/launch.json

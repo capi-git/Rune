@@ -125,6 +125,10 @@
     const d = e.data;
     if (d.n2draw === 'load') load(typeof d.json === 'string' ? d.json : '');
     else if (d.n2draw === 'expanded') setExpandedState(!!d.on);
+    // (A press outside the drawing: see the page script.)
+    else if (d.n2draw === 'flush') {
+      if (timer) save();
+    }
     else if (testing && d.n2draw === 'probe') probe();
     else if (testing && d.n2draw === 'test-add') testAdd();
     else if (testing && d.n2draw === 'test-expand') document.querySelector('.n2-expand')?.click();

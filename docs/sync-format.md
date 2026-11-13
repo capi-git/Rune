@@ -19,6 +19,10 @@ schema mark 4). Since 2026-11-11 also the page of a table's row (`row_of`), a
 to-do's reminder (`remind`) and an event's call link (`join_url`): the Mac's
 schema mark 6 (Rune 0.1.3 and later). A table's column kinds, view and rows,
 and a chart, are in the block's `data` and pass through as they are.
+Since 2026-11-12 a page can be locked with a password: its whole block list
+is then one block of the kind `locked`, whose `data` holds the page's lines
+sealed (see `src/lock.rs`); it passes through as it is, and a device that
+cannot open it must not change it (the Mac's schema mark 7).
 
 ## The idea
 
@@ -143,7 +147,7 @@ Wall-clock time is never used to decide anything.
 - The names inside `page`, `event` and `space` are the column names of the
   database (`src/store.rs`); `blocks` is the page's whole block list in order
   (`kind` as stored: `text`, `heading1`, …, `page`, `drawing`, `image`, `table`,
-  `chart`).
+  `chart`, `locked`).
   Numbers that are 0 or 1 in the database are `true` / `false` here.
 - `cover` is the page's cover as stored (`null`, `preset:<name>` or
   `file:<name>`), `cover_y` the part of a cover picture that shows (0 to 100; 50
@@ -203,12 +207,28 @@ For each change, with L the version this device has for that record:
      history (`page_versions`), then take the change.
    - The change loses: for a page, save the change's page to the history, and
      keep what is here.
+   - A locked page against plain lines (the Mac, since 2026-11-12): when one of
+     the two pages is one `locked` block and the other is not, and neither is a
+     removal, the locked one wins whatever the versions say.
+     - The Mac has the plain lines and the change is the locked page: it saves
+       its plain lines to the history, then takes the change (as above).
+     - The Mac has the locked page and the change is the plain lines: it keeps
+       the locked page and does not save the plain lines to that page's
+       history. When the plain change is the newer version, the Mac gives its
+       locked page a new version, newer than the change's, and writes it
+       again with the `base` it had (not the change's version). The device
+       that has the plain lines then sees two changes at once (rule 4), the
+       locked page wins there as the newer version, and that device saves its
+       own lines to its history.
+     The files are as before.
 
 "Take the change" replaces the record's row (and all blocks of a page) and sets
 the record's version to the change's. Taking a removal deletes the rows and keeps
 the version, marked removed, so that an older change cannot bring the record
 back. Nothing is lost silently: a page that loses is in that page's history on
-every device that saw both.
+every device that saw both. One case is narrower: plain lines that lose to a
+locked page are in the history of the device that wrote them, and not in the
+history of a Mac that holds the locked page.
 
 ## Pictures
 

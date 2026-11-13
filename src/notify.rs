@@ -179,7 +179,7 @@ pub fn fire_time(e: &Event) -> Option<i64> {
     let minutes = e.remind?;
     if e.all_day {
         // All-day events: 9 AM on the day (minus any days before).
-        let day = when::add_days(when::date_of(e.start), -(minutes / (24 * 60)));
+        let day = when::add_days(when::whole_day(e.start), -(minutes / (24 * 60)));
         Some(when::at(day, chrono::NaiveTime::from_hms_opt(9, 0, 0)?))
     } else {
         Some(e.start - minutes * when::MINUTE)

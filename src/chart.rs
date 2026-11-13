@@ -278,7 +278,7 @@ impl Chart {
         let mut out: Vec<Slice> = column.options.iter().map(|o| Slice { label: o.name.clone(), value: 0.0, color: o.color }).collect();
         for r in t.body() {
             let Some(amount) = self.amount(t, r, y) else { continue };
-            for name in names_in(column.kind, &t.shown(r, c)) {
+            for name in names_in(column.kind, &t.words(r, c)) {
                 match out.iter_mut().find(|s| s.label.eq_ignore_ascii_case(&name)) {
                     Some(s) => s.value += amount,
                     None => out.push(Slice { label: name, value: amount, color: Color::Gray }),
@@ -311,7 +311,7 @@ impl Chart {
                     .enumerate()
                     .map(|(i, &r)| {
                         let label = match x {
-                            Some(c) => t.shown(r, c),
+                            Some(c) => t.words(r, c),
                             None => (i + 1).to_string(),
                         };
                         Point { label, value: self.amount(t, r, y).unwrap_or(0.0), current: i == last }
@@ -346,8 +346,20 @@ impl Chart {
                 // Up to the period of today, when that is not far after the last row.
                 let now = key(today);
                 let end = if now > last && (now - last).num_days() <= 62 { now } else { last };
+                // At most 400 periods, the newest: the walk starts that far
+                // before its end. (It started at the first row and stopped
+                // after 400: a log of more than 400 days showed its oldest
+                // days, and the newest were not drawn and not counted.)
+                let start = match by {
+                    By::Day | By::Row => end - Duration::days(399),
+                    By::Week => end - Duration::weeks(399),
+                    By::Month => {
+                        let months = end.year() * 12 + end.month0() as i32 - 399;
+                        NaiveDate::from_ymd_opt(months.div_euclid(12), months.rem_euclid(12) as u32 + 1, 1).unwrap_or(first)
+                    }
+                };
                 let mut out = Vec::new();
-                let mut k = first;
+                let mut k = first.max(start);
                 while k <= end && out.len() < 400 {
                     let values = groups.iter().find(|(g, _)| *g == k).map(|(_, v)| v.as_slice()).unwrap_or(&[]);
                     let label = match by {
@@ -479,6 +491,33 @@ mod tests {
             ]
         );
         assert_eq!(chart.format(&t, 12.4), "12.4");
+    }
+
+    #[test]
+    fn a_long_log_by_day_shows_its_newest_days() {
+        // A run every four days from 1 January 2025 to 10 November 2026.
+        let mut rows = vec![vec!["Date".to_string(), "km".to_string()]];
+        let mut day = d(2025, 1, 1);
+        while day <= d(2026, 11, 10) {
+            rows.push(vec![crate::table::full_day(day), "5".to_string()]);
+            day += Duration::days(4);
+        }
+        let last = day - Duration::days(4);
+        let mut t = Table::of(rows);
+        t.set_kind(0, Kind::Date);
+        t.set_kind(1, Kind::Number);
+        let today = d(2026, 11, 12);
+        let chart = Chart { by: By::Day, add: Add::Sum, ..Chart::default() };
+        let all = chart.all_points(&t, today);
+        // 400 days, up to today; the last run is among them.
+        assert_eq!(all.len(), 400);
+        assert!(all.last().unwrap().current);
+        assert_eq!(all[all.len() - 1 - (today - last).num_days() as usize].value, 5.0);
+        assert_eq!(chart.points(&t, today).last().map(|p| p.label.clone()), Some(today.format("%a %-d").to_string()));
+        // By month and by week nothing is cut, and a short log is as before.
+        let months = Chart { by: By::Month, add: Add::Count, ..Chart::default() }.all_points(&t, today);
+        assert_eq!((months.len(), months[0].label.as_str(), months.last().unwrap().label.as_str()), (23, "Jan", "Nov"));
+        assert_eq!(Chart { by: By::Week, add: Add::Count, ..Chart::default() }.all_points(&t, today).len(), 98);
     }
 
     #[test]

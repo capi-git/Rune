@@ -74,6 +74,137 @@ fn search_fit(typed: &str, name: &str, lines: &[String]) -> Option<(u8, Option<S
     Some((rank, shown))
 }
 
+/// A command that search can run: the name of `AppState::command`, what it
+/// says, its keys, and other words that find it.
+#[derive(Clone, PartialEq)]
+struct Cmd {
+    id: &'static str,
+    label: String,
+    keys: &'static str,
+    also: &'static str,
+}
+
+/// What search can run now: the commands of the menu bar that make sense
+/// here (a page's own only with a page open, the AI's only with an AI).
+fn commands_now(state: &AppState) -> Vec<Cmd> {
+    let page = state.current_page();
+    let locked = page.as_deref().map(|id| crate::lock::page_lock(state, id)).unwrap_or_default();
+    let mut v: Vec<Cmd> = Vec::new();
+    let mut add = |id: &'static str, label: &str, keys: &'static str, also: &'static str| v.push(Cmd { id, label: label.into(), keys, also });
+    add("new_page", "New page", "⌘N", "add create");
+    add("meeting_notes", "New meeting notes", "⌘⇧M", "call");
+    add("new_window", "New window", "⌘⇧N", "");
+    add("new_tab", "New tab", "⌘T", "");
+    add("reopen_tab", "Reopen closed tab", "⌘⇧T", "");
+    add("calendar", "Calendar", "⌘⇧C", "events plan");
+    add("graph", "Graph of pages", "", "links map");
+    add("toggle_sidebar", "Show or hide sidebar", "⌘\\", "");
+    add("focus_mode", if state.ui.read().focus_mode { "Leave focus mode" } else { "Focus mode" }, "⌘.", "zen write distraction");
+    let dark = match state.ui.read().theme {
+        Theme::Dark => true,
+        Theme::Light => false,
+        Theme::System => crate::ui::window_is_dark(),
+    };
+    add("dark_mode", if dark { "Light mode" } else { "Dark mode" }, "⌘⇧L", "dark light theme appearance");
+    add("settings", "Settings", "⌘,", "preferences options");
+    add("trash", "Trash", "", "deleted bin");
+    add("import", "Import…", "", "notion markdown");
+    add("export_all", "Export workspace…", "", "markdown backup");
+    add("zoom_in", "Zoom in", "⌘=", "bigger larger");
+    add("zoom_out", "Zoom out", "⌘-", "smaller");
+    add("zoom_reset", "Actual size", "⌘0", "zoom");
+    if state.spaces.read().len() > 1 {
+        add("space_next", "Next space", "", "");
+        add("space_prev", "Previous space", "", "");
+    }
+    let sync = crate::devsync::status();
+    if sync.icloud || sync.wifi {
+        add("sync_now", "Sync now", "", "iphone icloud");
+    }
+    if crate::ai::shown() {
+        add("ai", "Ask AI", "⌘J", "assistant claude codex");
+        add("ask_notes", "Ask your notes", "⌘⇧J", "assistant question");
+    }
+    if let Some(id) = page.as_deref() {
+        if !locked.is_locked() || locked.is_open() {
+            add("copy_link", "Copy link to page", "⌘L", "");
+            add("copy_name", "Copy page name", "⌥⌘L", "title");
+            add("copy_markdown", "Copy page as Markdown", "", "");
+            add("export_page", "Export page as Markdown…", "", "");
+            add("find", "Find in page", "⌘F", "search");
+            add("read_aloud", "Read page aloud", "⌘⇧R", "speak");
+            add("page_history", "Page history", "", "versions earlier restore");
+        }
+        let fav = state.pages.read().get(id).is_some_and(|p| p.favorite);
+        add("favorite", if fav { "Remove from favourites" } else { "Add to favourites" }, "", "star pin");
+        if locked.is_open() {
+            add("lock_now", "Lock page now", "", "password close");
+            add("unlock_page", "Remove page password", "", "unlock");
+        } else if !locked.is_locked() {
+            add("lock_page", "Lock page with a password…", "", "private secret encrypt");
+        }
+    }
+    v
+}
+
+/// How well a command fits what was typed (small letters): every word must
+/// start a word of its name or of its other words. 0: the name starts with
+/// what was typed; 1: any other fit.
+fn command_fit(typed: &str, cmd: &Cmd) -> Option<u8> {
+    let label = cmd.label.to_lowercase();
+    let words: Vec<&str> = label.split(|c: char| !c.is_alphanumeric()).chain(cmd.also.split(' ')).filter(|w| !w.is_empty()).collect();
+    let typed_words: Vec<&str> = typed.split_whitespace().collect();
+    if typed_words.is_empty() || !typed_words.iter().all(|t| words.iter().any(|w| w.starts_with(t))) {
+        return None;
+    }
+    Some(if label.starts_with(typed) { 0 } else { 1 })
+}
+
+/// One line of search: a page, a command, or a new page by the typed name.
+#[derive(Clone, PartialEq)]
+enum Found {
+    Page(Hit),
+    Command(Cmd),
+    Create { name: String, inside: Option<String> },
+}
+
+/// Whether a page is named by what was typed (both in small letters), by
+/// the rule a command fits by: every typed word starts a word of the name.
+/// "tab" names "Guitar tab book" and not "Database".
+fn named_by(typed: &str, name: &str) -> bool {
+    let words: Vec<&str> = name.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    let mut typed_words = typed.split_whitespace().peekable();
+    typed_words.peek().is_some() && typed_words.all(|t| words.iter().any(|w| w.starts_with(t)))
+}
+
+/// The order of the lines of search, each list given best fit first; a
+/// page comes with its fit and whether its name is named by what was typed
+/// (`named_by`). A command leads only when its own name starts with what
+/// was typed; otherwise the pages named by the typed words come before
+/// it, and all other pages come after it. ("notes" with Return opened no
+/// page named "Project notes": it made new meeting notes, because any word
+/// of a command's name put it above that page. Letters inside a longer
+/// word do not name a page: "tab" must not open "Database" in place of a
+/// new tab.)
+fn in_order(hits: Vec<(u8, bool, Hit)>, cmds: Vec<(u8, Cmd)>) -> Vec<Found> {
+    let page = |h: (u8, bool, Hit)| Found::Page(h.2);
+    let (first, hits): (Vec<_>, Vec<_>) = hits.into_iter().partition(|h| h.0 == 0);
+    let (named, rest): (Vec<_>, Vec<_>) = hits.into_iter().partition(|h| h.0 <= 2 && h.1);
+    let (own, other): (Vec<_>, Vec<_>) = cmds.into_iter().partition(|c| c.0 == 0);
+    let command = |c: (u8, Cmd)| Found::Command(c.1);
+    first.into_iter().map(page).chain(own.into_iter().map(command)).chain(named.into_iter().map(page)).chain(other.into_iter().map(command)).chain(rest.into_iter().map(page)).collect()
+}
+
+impl Found {
+    fn key(&self) -> String {
+        match self {
+            Found::Page(h) => h.id.clone(),
+            Found::Command(c) => format!("cmd-{}", c.id),
+            Found::Create { .. } => "create".into(),
+        }
+    }
+}
+
 #[component]
 pub fn QuickFind() -> Element {
     let state = use_context::<AppState>();
@@ -99,7 +230,12 @@ pub fn QuickFind() -> Element {
         }
     } else {
         for p in pages.values().filter(|p| !p.trashed && p.space_id == space) {
-            let lines: Vec<String> = blocks.get(&p.id).map(|bs| bs.iter().map(|b| b.plain_text()).collect()).unwrap_or_default();
+            // (A locked page is found by its name only, also while it is open.)
+            let lines: Vec<String> = blocks
+                .get(&p.id)
+                .filter(|bs| !crate::lock::hides(bs, &p.id))
+                .map(|bs| bs.iter().map(|b| b.plain_text()).collect())
+                .unwrap_or_default();
             if let Some((rank, snippet)) = search_fit(&q, &p.display_title().to_lowercase(), &lines) {
                 hits.push((rank, p.updated_at, Hit { id: p.id.clone(), icon: p.display_icon().into(), title: p.display_title().into(), snippet, path: path_of(p) }));
             }
@@ -108,15 +244,54 @@ pub fn QuickFind() -> Element {
         hits.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)).then(a.2.title.to_lowercase().cmp(&b.2.title.to_lowercase())));
         hits.truncate(30);
     }
+    if q.is_empty() {
+        drop(blocks);
+        drop(pages);
+        return (true, hits.into_iter().map(|h| Found::Page(h.2)).collect::<Vec<Found>>());
+    }
+    // Pages and the commands that fit (a few), see `in_order`, then a new
+    // page by that name.
+    let mut cmds: Vec<(u8, Cmd)> = commands_now(&state).into_iter().filter_map(|c| command_fit(&q, &c).map(|r| (r, c))).collect();
+    cmds.sort_by_key(|(r, _)| *r);
+    cmds.truncate(5);
+    let typed = query.read().trim().to_string();
+    let parts = crate::state::path_parts(&typed);
+    let create = match parts.split_last() {
+        Some((name, above)) => {
+            let (_, missing) = crate::state::find_path(&pages, &space, &parts);
+            (!missing.is_empty()).then(|| Found::Create { name: name.clone(), inside: above.last().cloned() })
+        }
+        None => None,
+    };
     drop(blocks);
     drop(pages);
-    let hits: Vec<Hit> = hits.into_iter().map(|h| h.2).collect();
-    (q.is_empty(), hits)
+    let mut out = in_order(hits.into_iter().map(|h| (h.0, named_by(&q, &h.2.title.to_lowercase()), h.2)).collect(), cmds);
+    out.extend(create);
+    (false, out)
     });
     let (no_query, hits) = found();
     let count = hits.len();
     let sel = (*selected.read()).min(count.saturating_sub(1));
     let hits_for_keys = hits.clone();
+    // Open a page, run a command or make the page.
+    let choose = move |found: &Found, new_tab: bool| match found {
+        Found::Page(hit) => {
+            if new_tab {
+                state.open_in_new_tab(Route::Page(hit.id.clone()))
+            } else {
+                state.open_page(&hit.id)
+            }
+        }
+        Found::Command(cmd) => {
+            state.set_modal(None);
+            state.command(cmd.id);
+        }
+        Found::Create { .. } => {
+            let typed = query.peek().trim().to_string();
+            state.set_modal(None);
+            state.new_page_at_path(&typed);
+        }
+    };
 
     rsx! {
         div { class: "modal-backdrop", onclick: move |_| state.set_modal(None),
@@ -125,7 +300,7 @@ pub fn QuickFind() -> Element {
                     span { class: "qf-glass", Icon { name: "search", size: 18 } }
                     input {
                         class: "qf-input",
-                        placeholder: "Search pages…",
+                        placeholder: "Search pages or commands…",
                         onmounted: move |e: MountedEvent| async move {
                             let _ = e.set_focus(true).await;
                         },
@@ -150,8 +325,8 @@ pub fn QuickFind() -> Element {
                                 }
                                 Key::Enter => {
                                     e.prevent_default();
-                                    if let Some(hit) = hits_for_keys.get(sel) {
-                                        if e.modifiers().meta() { state.open_in_new_tab(Route::Page(hit.id.clone())) } else { state.open_page(&hit.id) }
+                                    if let Some(found) = hits_for_keys.get(sel) {
+                                        choose(found, e.modifiers().meta());
                                     }
                                 }
                                 Key::Escape => state.set_modal(None),
@@ -166,26 +341,50 @@ pub fn QuickFind() -> Element {
                     } else if no_query {
                         div { class: "menu-section", "Recent pages" }
                     }
-                    for (i, hit) in hits.into_iter().enumerate() {
+                    for (i, found) in hits.into_iter().enumerate() {
                         div {
-                            key: "{hit.id}",
+                            key: "{found.key()}",
                             class: if i == sel { "qf-item selected" } else { "qf-item" },
                             onmouseenter: move |_| selected.set(i),
                             onclick: {
-                                let id = hit.id.clone();
-                                move |e: MouseEvent| {
-                                    if e.modifiers().meta() { state.open_in_new_tab(Route::Page(id.clone())) } else { state.open_page(&id) }
-                                }
+                                let found = found.clone();
+                                move |e: MouseEvent| choose(&found, e.modifiers().meta())
                             },
-                            span { class: "qf-icon", PageIcon { icon: Some(hit.icon.clone()), size: 18 } }
-                            div { class: "qf-text",
-                                div { class: "qf-title", "{hit.title}" }
-                                if let Some(s) = hit.snippet {
-                                    div { class: "qf-snippet", "{s}" }
-                                }
-                            }
-                            if !hit.path.is_empty() {
-                                span { class: "qf-path", "{hit.path}" }
+                            match &found {
+                                Found::Page(hit) => rsx! {
+                                    span { class: "qf-icon", PageIcon { icon: Some(hit.icon.clone()), size: 18 } }
+                                    div { class: "qf-text",
+                                        div { class: "qf-title", "{hit.title}" }
+                                        if let Some(s) = &hit.snippet {
+                                            div { class: "qf-snippet", "{s}" }
+                                        }
+                                    }
+                                    if !hit.path.is_empty() {
+                                        span { class: "qf-path", "{hit.path}" }
+                                    }
+                                },
+                                Found::Command(cmd) => rsx! {
+                                    span { class: "qf-icon qf-cmd-icon", Icon { name: "chevrons-right", size: 15 } }
+                                    div { class: "qf-text",
+                                        div { class: "qf-title qf-cmd", "{cmd.label}" }
+                                    }
+                                    if !cmd.keys.is_empty() {
+                                        span { class: "qf-keys", "{cmd.keys}" }
+                                    }
+                                },
+                                Found::Create { name, inside } => rsx! {
+                                    span { class: "qf-icon qf-cmd-icon", Icon { name: "plus", size: 16 } }
+                                    div { class: "qf-text",
+                                        div { class: "qf-title qf-cmd",
+                                            "New page "
+                                            span { class: "qf-new-name", "“{name}”" }
+                                            if let Some(inside) = inside {
+                                                " in "
+                                                span { class: "qf-new-name", "“{inside}”" }
+                                            }
+                                        }
+                                    }
+                                },
                             }
                         }
                     }
@@ -388,6 +587,23 @@ fn AppearanceSettings() -> Element {
                             class: if theme == value { "on" } else { "" },
                             onclick: move |_| state.set_theme(value),
                             "{label}"
+                        }
+                    }
+                }
+            }
+            Row { label: "Accent", note: "The colour of links, checkboxes and switches.",
+                div { class: "tints accents",
+                    for (label, id, swatch) in crate::state::ACCENTS {
+                        button {
+                            class: if look.accent == id { "tint on" } else { "tint" },
+                            title: "{label}",
+                            "aria-label": "{label}",
+                            "data-accent-pick": "{id}",
+                            style: "--c: {swatch}",
+                            onclick: {
+                                let look = look.clone();
+                                move |_| state.set_look(Look { accent: id.to_string(), ..look.clone() }, true)
+                            },
                         }
                     }
                 }
@@ -1448,7 +1664,7 @@ pub fn AskNotesModal() -> Element {
         plan_ok.set(None);
         // (With the files that were given with the question, as words.)
         let request = format!("{request}{}", crate::attach::for_request(&state.ask_given.peek()));
-        let messages = vec![ai::ChatMessage::system(system), ai::ChatMessage::user(crate::voice::ask_message(&request, &notes, 24_000))];
+        let messages = vec![ai::ChatMessage::system(system), ai::ChatMessage::user(crate::voice::ask_message(&request, &notes, ai::MAX_CONTEXT_CHARS, tools.is_some()))];
         let journal = tools.as_ref().map(|t| t.journal.clone());
         asked.set(q);
         offered.set(notes);
@@ -1521,6 +1737,11 @@ pub fn AskNotesModal() -> Element {
     let job_text = job_steps.iter().map(|s| format!("- {s}")).collect::<Vec<_>>().join("\n");
     let lines = crate::markdown::to_blocks(&answer);
     let read: Vec<String> = offered.read().iter().map(|n| n.title.clone()).collect();
+    // (A long page goes to the AI in part: the person is told which.)
+    let in_part = match crate::voice::cut_for_ask(&offered.read(), ai::MAX_CONTEXT_CHARS).as_slice() {
+        [] => String::new(),
+        names => format!(" Only the first part of: {}.", names.join(", ")),
+    };
     let (answer_kept, sources_kept) = (answer.clone(), sources.clone());
 
     rsx! {
@@ -1636,9 +1857,9 @@ pub fn AskNotesModal() -> Element {
                         } else if read.is_empty() {
                             "The AI reads only the pages of this space that match your question."
                         } else if done && with_tools && did_lines.is_empty() {
-                            "The AI read: {read.join(\", \")}. It changed nothing."
+                            "The AI read: {read.join(\", \")}. It changed nothing.{in_part}"
                         } else {
-                            "The AI read: {read.join(\", \")}."
+                            "The AI read: {read.join(\", \")}.{in_part}"
                         }
                     }
                     if !working && !done {
@@ -1911,6 +2132,24 @@ pub fn HistoryModal() -> Element {
     };
     let title = state.page_title(&page_id);
     let shown = versions.get(picked()).cloned();
+    // A locked page that is not open shows none of its earlier versions
+    // (see `open_history`), also when it locks while this box is open
+    // (another window opened it, and shows it no more).
+    let is_shut = {
+        let id = page_id.clone();
+        move || crate::lock::page_lock(&state, &id) == crate::lock::LockState::Shut
+    };
+    use_effect({
+        let is_shut = is_shut.clone();
+        move || {
+            if is_shut() {
+                state.set_modal(None);
+            }
+        }
+    });
+    if is_shut() {
+        return rsx! {};
+    }
 
     rsx! {
         div { class: "modal-backdrop soft", onclick: move |_| state.set_modal(None),
@@ -2067,6 +2306,61 @@ pub fn TrashModal() -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_command_fits_when_each_word_starts_one_of_its_words() {
+        let cmd = Cmd { id: "dark_mode", label: "Dark mode".into(), keys: "⌘⇧L", also: "theme appearance" };
+        assert_eq!(command_fit("dark", &cmd), Some(0));
+        assert_eq!(command_fit("mode", &cmd), Some(1));
+        assert_eq!(command_fit("the", &cmd), Some(1), "its other words count");
+        assert_eq!(command_fit("dar mo", &cmd), Some(1));
+        assert_eq!(command_fit("ark", &cmd), None, "the start of a word, not its middle");
+        assert_eq!(command_fit("dark zebra", &cmd), None, "every word must fit");
+        assert_eq!(command_fit("", &cmd), None);
+    }
+
+    #[test]
+    fn a_page_named_by_the_typed_word_comes_before_a_command_that_only_holds_it() {
+        let cmd = |label: &str, also: &'static str| Cmd { id: "x", label: label.into(), keys: "", also };
+        let page = |title: &str| Hit { id: title.into(), icon: String::new(), title: title.into(), snippet: None, path: String::new() };
+        // What search shows for `typed`, with these pages (name, a line of text).
+        let lines = |typed: &str, pages: &[(&str, &str)]| -> Vec<String> {
+            let mut hits: Vec<(u8, bool, Hit)> = pages
+                .iter()
+                .filter_map(|(name, text)| search_fit(typed, &name.to_lowercase(), &[text.to_string()]).map(|f| (f.0, named_by(typed, &name.to_lowercase()), page(name))))
+                .collect();
+            hits.sort_by_key(|h| h.0);
+            let mut cmds: Vec<(u8, Cmd)> = [cmd("New page", "add create"), cmd("New meeting notes", "call"), cmd("Dark mode", "dark light theme"), cmd("Lock page with a password…", "private"), cmd("New tab", ""), cmd("Next space", "")]
+                .into_iter()
+                .filter_map(|c| command_fit(typed, &c).map(|r| (r, c)))
+                .collect();
+            cmds.sort_by_key(|c| c.0);
+            in_order(hits, cmds)
+                .into_iter()
+                .map(|f| match f {
+                    Found::Page(h) => h.title,
+                    Found::Command(c) => format!("> {}", c.label),
+                    Found::Create { .. } => unreachable!(),
+                })
+                .collect()
+        };
+        let pages = [("Project notes", ""), ("Home page", ""), ("Sales call", ""), ("Clock repair", ""), ("Diary", "a dark page of notes, then a call")];
+        // A word of a page's name opens that page, not a command that makes something.
+        assert_eq!(lines("notes", &pages), ["Project notes", "> New meeting notes", "Diary"]);
+        assert_eq!(lines("page", &pages), ["Home page", "> New page", "> Lock page with a password…", "Diary"]);
+        assert_eq!(lines("call", &pages), ["Sales call", "> New meeting notes", "Diary"]);
+        // A command typed from the start of its name still leads…
+        assert_eq!(lines("dark", &pages), ["> Dark mode", "Diary"]);
+        assert_eq!(lines("lock", &pages), ["> Lock page with a password…", "Clock repair"]);
+        assert_eq!(lines("new", &pages)[..2], ["> New page", "> New meeting notes"]);
+        // …but not over a page whose name starts the same way.
+        assert_eq!(lines("dark", &[("Dark matter", ""), ("On dark skies", "")]), ["Dark matter", "> Dark mode", "On dark skies"]);
+        // Letters inside a longer word of a name are not that word: the command keeps its place.
+        assert_eq!(lines("tab", &[("Database", ""), ("Tab sizes", ""), ("Guitar tab book", "")]), ["Tab sizes", "Guitar tab book", "> New tab", "Database"]);
+        assert_eq!(lines("space", &[("Workspace plans", ""), ("Diary", "more space")]), ["> Next space", "Workspace plans", "Diary"]);
+        // The words in another order in a name are still the name.
+        assert_eq!(lines("notes meeting", &[("Meeting room notes", "")]), ["Meeting room notes", "> New meeting notes"]);
+    }
 
     #[test]
     fn search_takes_several_words_in_any_order() {

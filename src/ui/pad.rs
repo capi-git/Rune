@@ -461,7 +461,7 @@ pub fn PadCard(view: View, on: EventHandler<Command>, page: EventHandler<serde_j
         },
     };
     rsx! {
-        div { class: "padwin {view.theme}", style: "{view.glass}",
+        div { class: "padwin {view.theme}", style: "{view.glass}", "data-accent": "{view.accent}",
             div {
                 class: "pad-card is-{form.name()}",
                 id: "pad-card",

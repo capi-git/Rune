@@ -145,6 +145,19 @@ pub fn TopRow() -> Element {
                                             state.focus_pane(&pane);
                                         }
                                     },
+                                    // The middle button on one part closes
+                                    // that page only (the press went on to
+                                    // the tab and closed all its pages).
+                                    onauxclick: {
+                                        let index = t.index;
+                                        let pane = pane.clone();
+                                        move |e| {
+                                            if e.trigger_button() == Some(dioxus::html::input_data::MouseButton::Auxiliary) {
+                                                e.stop_propagation();
+                                                state.close_pane_of(index, Some(&pane));
+                                            }
+                                        }
+                                    },
                                     span { class: "tab-icon", PageIcon { icon, size: 14 } }
                                     span { class: "tab-title", "{title}" }
                                 }
@@ -202,10 +215,17 @@ fn TabMenu(index: usize, split: bool) -> Element {
                 class: "menu-item compact",
                 onclick: move |_| {
                     state.set_popover(None);
-                    let route = state.ui.peek().tabs.get(index).map(|t| t.route().clone());
-                    if let Some(route) = route {
+                    let tab = state.ui.peek().tabs.get(index).map(|t| (t.route().clone(), t.is_split()));
+                    if let Some((route, split)) = tab {
                         super::open_window(route);
-                        state.close_tab(index);
+                        // A tab of several pages gives the page in front
+                        // and keeps the others (the whole tab was closed,
+                        // and the new window showed only that one page).
+                        if split {
+                            state.close_pane_of(index, None);
+                        } else {
+                            state.close_tab(index);
+                        }
                     }
                 },
                 span { "Move to New Window" }
@@ -270,6 +290,7 @@ pub fn PageBar(route: Route, pane: String, multi: bool) -> Element {
         }
     }
     let crumb_count = crumbs.len();
+    let lock_state = page_id.as_deref().map(|id| crate::lock::page_lock(&state, id)).unwrap_or_default();
 
     rsx! {
         div {
@@ -435,14 +456,55 @@ pub fn PageBar(route: Route, pane: String, multi: bool) -> Element {
                                 span { class: "menu-icon", Icon { name: "folder", size: 16 } }
                                 span { "Move to…" }
                             }
-                            div {
-                                class: "menu-item compact",
-                                onclick: {
-                                    let id = id.clone();
-                                    move |_| state.open_history(&id)
-                                },
-                                span { class: "menu-icon", Icon { name: "history", size: 16 } }
-                                span { "Page history" }
+                            // A locked page: lock it now or take its password
+                            // away (it keeps no history); any other: lock it.
+                            if lock_state.is_open() {
+                                div {
+                                    class: "menu-item compact",
+                                    id: "lock-now",
+                                    onclick: {
+                                        let id = id.clone();
+                                        move |_| {
+                                            state.set_popover(None);
+                                            state.relock(&id);
+                                        }
+                                    },
+                                    span { class: "menu-icon", Icon { name: "lock", size: 16 } }
+                                    span { "Lock now" }
+                                }
+                                div {
+                                    class: "menu-item compact",
+                                    id: "remove-password",
+                                    onclick: {
+                                        let id = id.clone();
+                                        move |_| {
+                                            state.set_popover(None);
+                                            state.remove_password(&id);
+                                        }
+                                    },
+                                    span { class: "menu-icon", Icon { name: "lock", size: 16 } }
+                                    span { "Remove password" }
+                                }
+                            } else if !lock_state.is_locked() {
+                                div {
+                                    class: "menu-item compact",
+                                    id: "lock-page",
+                                    onclick: move |_| {
+                                        state.set_popover(None);
+                                        state.command("lock_page");
+                                    },
+                                    span { class: "menu-icon", Icon { name: "lock", size: 16 } }
+                                    span { "Lock with password…" }
+                                }
+                                div {
+                                    class: "menu-item compact",
+                                    onclick: {
+                                        let id = id.clone();
+                                        move |_| state.open_history(&id)
+                                    },
+                                    span { class: "menu-icon", Icon { name: "history", size: 16 } }
+                                    span { "Page history" }
+                                }
                             }
                             div {
                                 class: "menu-item compact danger",

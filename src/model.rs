@@ -51,6 +51,9 @@ pub enum BlockKind {
     Table,
     /// A chart of a table; what it draws is in `Block::data` (see chart.rs).
     Chart,
+    /// All the lines of a locked page, scrambled with its password: the
+    /// only block such a page has on disk (see lock.rs).
+    Locked,
 }
 
 impl BlockKind {
@@ -87,6 +90,7 @@ impl BlockKind {
             BlockKind::Image => "image",
             BlockKind::Table => "table",
             BlockKind::Chart => "chart",
+            BlockKind::Locked => "locked",
         }
     }
 
@@ -108,6 +112,7 @@ impl BlockKind {
             "table" => BlockKind::Table,
             "chart" => BlockKind::Chart,
             "page" => BlockKind::PageLink,
+            "locked" => BlockKind::Locked,
             _ => BlockKind::Text,
         }
     }
@@ -131,6 +136,7 @@ impl BlockKind {
             BlockKind::Image => "Image",
             BlockKind::Table => "Table",
             BlockKind::Chart => "Chart",
+            BlockKind::Locked => "Locked page",
         }
     }
 
@@ -154,6 +160,7 @@ impl BlockKind {
             BlockKind::Image => "image",
             BlockKind::Table => "table",
             BlockKind::Chart => "chart-bars",
+            BlockKind::Locked => "lock",
         }
     }
 
@@ -167,7 +174,10 @@ impl BlockKind {
 
     /// Blocks that hold editable text.
     pub fn is_editable(self) -> bool {
-        !matches!(self, BlockKind::Divider | BlockKind::PageLink | BlockKind::Drawing | BlockKind::Image | BlockKind::Table | BlockKind::Chart)
+        !matches!(
+            self,
+            BlockKind::Divider | BlockKind::PageLink | BlockKind::Drawing | BlockKind::Image | BlockKind::Table | BlockKind::Chart | BlockKind::Locked
+        )
     }
 
     pub fn placeholder(self) -> &'static str {
@@ -182,7 +192,7 @@ impl BlockKind {
             BlockKind::Quote => "Empty quote",
             BlockKind::Callout => "Type something…",
             BlockKind::Code => "Code",
-            BlockKind::Divider | BlockKind::PageLink | BlockKind::Drawing | BlockKind::Image | BlockKind::Table | BlockKind::Chart => "",
+            BlockKind::Divider | BlockKind::PageLink | BlockKind::Drawing | BlockKind::Image | BlockKind::Table | BlockKind::Chart | BlockKind::Locked => "",
         }
     }
 }
@@ -810,7 +820,9 @@ pub fn press_backspace_at_start(blocks: &mut Vec<Block>, idx: usize, value: &str
                 // (With no line of text above it, the caret has no place to
                 // go: the empty line stays. Taken out, it left the page with
                 // no caret at all.)
-                let target = (0..prev + 1).rev().find(|&i| blocks[i].kind.is_editable())?;
+                // (A line inside a closed toggle is not on the screen: the
+                // caret sent there was lost.)
+                let target = (0..prev + 1).rev().find(|&i| vis[i] && blocks[i].kind.is_editable())?;
                 let id = blocks[target].id.clone();
                 blocks.remove(idx);
                 ensure_not_empty(blocks);
@@ -825,6 +837,51 @@ pub fn press_backspace_at_start(blocks: &mut Vec<Block>, idx: usize, value: &str
             blocks.remove(idx);
             Some(Caret { id: blocks[prev].id.clone(), pos: join })
         }
+    }
+}
+
+/// Delete (forward) pressed with the caret at the very end of block `idx`:
+/// the next line joins this one, as Backspace at the start of that line
+/// joins them. Only a line that can be typed in, with nothing nested in it;
+/// before a table, a picture or a divider the key does nothing. In an
+/// empty line the key takes that line out, and the next line stays as it
+/// is. (Joined to the empty line, a heading became plain text, and a to-do
+/// lost its box, its tick, its day and its reminder.)
+pub fn press_delete_at_end(blocks: &mut Vec<Block>, idx: usize, value: &str) -> Option<Caret> {
+    blocks[idx].text = value.to_string();
+    let vis = visibility(blocks);
+    let next = (idx + 1..blocks.len()).find(|&i| vis[i] && !blocks[i].floats())?;
+    let (kind, other) = (blocks[idx].kind, blocks[next].kind);
+    if !other.is_editable() || kind == BlockKind::Code {
+        return None;
+    }
+    if blocks[idx].plain_text().is_empty() {
+        // (A line with lines nested in it stays: they would hang from nothing.)
+        if subtree_end(blocks, idx) != idx + 1 {
+            return None;
+        }
+        let id = blocks[next].id.clone();
+        blocks.remove(idx);
+        return Some(Caret::start(&id));
+    }
+    if other == BlockKind::Code || subtree_end(blocks, next) != next + 1 {
+        return None;
+    }
+    let join = crate::inline::len_for(kind, &blocks[idx].text);
+    blocks[idx].text = crate::inline::join_for(kind, &blocks[idx].text, other, &blocks[next].text);
+    blocks.remove(next);
+    Some(Caret { id: blocks[idx].id.clone(), pos: join })
+}
+
+/// The day of a to-do that gets a reminder at `time`: its own day, while
+/// the reminder is still to come on it; else today, or tomorrow when the
+/// time has passed today. (A to-do whose day was gone kept that day: the
+/// bell showed beside it, and no notification ever came.)
+pub fn day_for_reminder(due: Option<chrono::NaiveDate>, time: chrono::NaiveTime, today: chrono::NaiveDate, now: i64) -> chrono::NaiveDate {
+    match due {
+        Some(day) if crate::when::at(day, time) > now => day,
+        _ if crate::when::at(today, time) > now => today,
+        _ => crate::when::next_day(today),
     }
 }
 
@@ -1193,6 +1250,68 @@ mod tests {
         assert_eq!(b.text, "a*b");
         b.turn_into(BlockKind::Text);
         assert_eq!(b.text, "a\\*b");
+    }
+
+    #[test]
+    fn delete_at_the_end_of_a_line_joins_the_next_line() {
+        let mut blocks = vec![Block::text("one"), Block::new(BlockKind::Bulleted, "**two**"), Block::new(BlockKind::Divider, ""), Block::text("three")];
+        let first = blocks[0].id.clone();
+        let caret = press_delete_at_end(&mut blocks, 0, "one").unwrap();
+        assert_eq!((blocks.len(), blocks[0].text.as_str(), caret), (3, "one**two**", Caret { id: first, pos: 3 }));
+        // Before a divider (or a table, a picture) the key does nothing; so does the last line.
+        assert!(press_delete_at_end(&mut blocks, 0, "one**two**").is_none());
+        assert!(press_delete_at_end(&mut blocks, 2, "three").is_none());
+        assert_eq!(blocks.len(), 3);
+        // A line with lines nested in it stays where it is.
+        let mut nested = vec![Block::text("a"), Block::new(BlockKind::Bulleted, "b"), Block::new(BlockKind::Bulleted, "c").with_indent(1)];
+        assert!(press_delete_at_end(&mut nested, 0, "a").is_none());
+        assert_eq!(nested.len(), 3);
+        // In an empty line the key takes the line out: the to-do under it
+        // keeps its box, its tick, its day and its reminder, and a heading stays a heading.
+        let mut todo = Block::new(BlockKind::Todo, "Call Sam");
+        todo.checked = true;
+        todo.due = chrono::NaiveDate::from_ymd_opt(2026, 11, 20);
+        todo.remind = chrono::NaiveTime::from_hms_opt(9, 0, 0);
+        let mut blocks = vec![Block::text("x"), todo.clone(), Block::new(BlockKind::Heading1, "Plan")];
+        let caret = press_delete_at_end(&mut blocks, 0, "").unwrap();
+        assert_eq!((blocks.len(), &blocks[0], caret), (2, &todo, Caret::start(&todo.id)));
+        let mut blocks = vec![Block::text(""), Block::new(BlockKind::Heading1, "Plan")];
+        press_delete_at_end(&mut blocks, 0, "").unwrap();
+        assert_eq!((blocks.len(), blocks[0].kind, blocks[0].text.as_str()), (1, BlockKind::Heading1, "Plan"));
+        // An empty line above a table stays (the caret would have no place).
+        let mut blocks = vec![Block::text(""), Block::new(BlockKind::Table, "")];
+        assert!(press_delete_at_end(&mut blocks, 0, "").is_none());
+    }
+
+    #[test]
+    fn backspace_under_a_picture_does_not_send_the_caret_into_a_closed_toggle() {
+        let mut toggle = Block::new(BlockKind::Toggle, "More");
+        toggle.collapsed = true;
+        let mut blocks = vec![toggle, Block::text("inside").with_indent(1), Block::new(BlockKind::Image, ""), Block::text("")];
+        // The nearest line that shows is the toggle itself.
+        let caret = press_backspace_at_start(&mut blocks, 3, "").unwrap();
+        assert_eq!((blocks.len(), caret.id.as_str()), (3, blocks[0].id.as_str()));
+        // With no line that shows above the picture, the empty line stays.
+        let mut blocks = vec![Block::new(BlockKind::Image, ""), Block::text("")];
+        assert!(press_backspace_at_start(&mut blocks, 1, "").is_none());
+        assert_eq!(blocks.len(), 2);
+    }
+
+    #[test]
+    fn a_reminder_on_a_day_that_is_gone_moves_to_today_or_tomorrow() {
+        let day = |d: u32| chrono::NaiveDate::from_ymd_opt(2026, 11, d).unwrap();
+        let time = |h: u32| chrono::NaiveTime::from_hms_opt(h, 0, 0).unwrap();
+        let today = day(12);
+        let now = crate::when::at(today, time(12));
+        // No day, or a day gone by: today while the time is still to come, else tomorrow.
+        assert_eq!(day_for_reminder(None, time(15), today, now), today);
+        assert_eq!(day_for_reminder(Some(day(11)), time(15), today, now), today);
+        assert_eq!(day_for_reminder(Some(day(11)), time(9), today, now), day(13));
+        // Today at a time that has passed: tomorrow.
+        assert_eq!(day_for_reminder(Some(today), time(9), today, now), day(13));
+        // A day on which the reminder is still to come stays.
+        assert_eq!(day_for_reminder(Some(today), time(15), today, now), today);
+        assert_eq!(day_for_reminder(Some(day(20)), time(9), today, now), day(20));
     }
 
     #[test]

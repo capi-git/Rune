@@ -167,11 +167,13 @@ fn in_a_test() -> bool {
 }
 
 /// What a test run reads in place of the Mac's calendars: two calendars and
-/// three events (today at 3 PM, all day today, tomorrow at 10 AM).
+/// three events (today at 3 PM, all day today, tomorrow at 10 AM). Their ids
+/// are made as the helper makes them: the event's own id, then its start.
 fn stand_in() -> String {
     let today = crate::when::today();
     let at = |day, h: u32| crate::when::at(day, chrono::NaiveTime::from_hms_opt(h, 0, 0).unwrap_or_default());
     let tomorrow = crate::when::next_day(today);
+    let id = |own: &str, start: i64| format!("{own}@{}", start / 1000);
     serde_json::json!({
         "status": "allowed",
         "calendars": [
@@ -179,9 +181,9 @@ fn stand_in() -> String {
             { "id": "cal-home", "title": "Home", "color": "#6f8f8a", "source": "iCloud", "writable": true },
         ],
         "events": [
-            { "id": "ev-budget", "cal": "cal-work", "title": "Budget review", "start": at(today, 15), "end": at(today, 16), "allDay": false, "location": "Room 2", "join": "https://teams.microsoft.com/l/meetup-join/stand-in" },
-            { "id": "ev-leave", "cal": "cal-home", "title": "Sam on leave", "start": crate::when::midnight(today), "end": crate::when::midnight(tomorrow) - 1000, "allDay": true },
-            { "id": "ev-sync", "cal": "cal-home", "title": "Garden plan", "start": at(tomorrow, 10), "end": at(tomorrow, 11), "allDay": false },
+            { "id": id("ev-budget", at(today, 15)), "cal": "cal-work", "title": "Budget review", "start": at(today, 15), "end": at(today, 16), "allDay": false, "location": "Room 2", "join": "https://teams.microsoft.com/l/meetup-join/stand-in" },
+            { "id": id("ev-leave", crate::when::midnight(today)), "cal": "cal-home", "title": "Sam on leave", "start": crate::when::midnight(today), "end": crate::when::midnight(tomorrow) - 1000, "allDay": true },
+            { "id": id("ev-sync", at(tomorrow, 10)), "cal": "cal-home", "title": "Garden plan", "start": at(tomorrow, 10), "end": at(tomorrow, 11), "allDay": false },
         ],
     })
     .to_string()
@@ -240,6 +242,16 @@ pub async fn add_event(calendar: &str, title: &str, start: i64, end: i64, all_da
     change(vec!["add".into(), calendar.to_string(), (start / 1000).to_string(), (end / 1000).to_string(), u8::from(all_day).to_string(), title.to_string()]).await
 }
 
+/// The id an event of the Mac has after it moved to a new start: the helper
+/// makes the id from the event's own id and its start in seconds (a repeat
+/// has the id of its series, and the start says which one it is).
+pub fn moved_id(id: &str, start: i64) -> Id {
+    match id.rsplit_once('@') {
+        Some((key, _)) => format!("{key}@{}", start / 1000),
+        None => id.to_string(),
+    }
+}
+
 /// Whether this run is a test (it reads stand-in calendars, and writes none).
 pub fn stand_in_run() -> bool {
     in_a_test()
@@ -253,6 +265,14 @@ pub fn open_settings() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_moved_event_has_the_id_of_its_new_start() {
+        assert_eq!(moved_id("mac:ABC-1@1794000000", 1_794_003_600_000), "mac:ABC-1@1794003600");
+        // (An id of the event with an "@" in it: only the start at its end changes.)
+        assert_eq!(moved_id("mac:a@b.example@1794000000", 1_794_003_600_000), "mac:a@b.example@1794003600");
+        assert_eq!(moved_id("mac:new-1", 1_794_003_600_000), "mac:new-1");
+    }
 
     #[test]
     fn the_helper_s_line_is_read_and_made_safe() {

@@ -732,10 +732,15 @@ const END_GRACE: Duration = Duration::from_secs(3);
 enum Attempt {
     Done,
     Stopped,
-    /// The tool rejected a flag; retry without the optional ones.
+    /// The tool rejected a flag; retry without it when it is an optional one.
     UnknownFlag(String),
     Failed(String),
 }
+
+/// The flags that an older version of a tool may not know (see
+/// `claude_args` and `codex_args`): a run goes on without one that the tool
+/// refuses.
+const OPTIONAL_FLAGS: [&str; 4] = ["--include-partial-messages", "--no-session-persistence", "--safe-mode", "--ephemeral"];
 
 /// Run one request through an installed tool, streaming its reply into `tx`.
 pub async fn run(provider: Provider, model: &str, effort: &str, messages: &[ChatMessage], tools: Option<&Tools>, pictures: &[Picture], tx: &UnboundedSender<AiEvent>) -> Result<(), String> {
@@ -755,15 +760,23 @@ pub async fn run(provider: Provider, model: &str, effort: &str, messages: &[Chat
 
     let system = messages.iter().filter(|m| m.role == "system").map(|m| m.content.as_str()).collect::<Vec<_>>().join("\n\n");
     let user = messages.iter().filter(|m| m.role != "system").map(|m| m.content.as_str()).collect::<Vec<_>>().join("\n\n");
+    run_at(provider, &path, model, effort, &system, &user, tools, pictures, tx).await
+}
 
-    let mut optional = true;
+/// The tries of one request with the tool at `path`.
+async fn run_at(provider: Provider, path: &Path, model: &str, effort: &str, system: &str, user: &str, tools: Option<&Tools>, pictures: &[Picture], tx: &UnboundedSender<AiEvent>) -> Result<(), String> {
+    // The optional flags that the tool refused: only those are left out of
+    // the next try. (After one refused flag, all of them were left out: also
+    // the ones that keep the tool from saving the page's words in its own
+    // history, and from loading the person's own settings and hooks.)
+    let mut refused: Vec<String> = Vec::new();
     loop {
-        match attempt(provider, &path, model, effort, &system, &user, optional, tools, pictures, tx).await {
+        match attempt(provider, path, model, effort, system, user, &refused, tools, pictures, tx).await {
             Attempt::Done | Attempt::Stopped => return Ok(()),
             Attempt::Failed(e) => return Err(e),
             Attempt::UnknownFlag(flag) => {
-                if optional && flag != "--tools" {
-                    optional = false;
+                if OPTIONAL_FLAGS.contains(&flag.as_str()) && !refused.contains(&flag) {
+                    refused.push(flag);
                     continue;
                 }
                 return Err(format!(
@@ -786,7 +799,7 @@ async fn attempt(
     effort: &str,
     system: &str,
     user: &str,
-    optional: bool,
+    refused: &[String],
     tools: Option<&Tools>,
     pictures: &[Picture],
     tx: &UnboundedSender<AiEvent>,
@@ -805,7 +818,7 @@ async fn attempt(
     };
     let (args, input, mut parser) = match provider {
         Provider::ClaudeCode => {
-            let mut args = claude_args(system, model, effort, optional, tools);
+            let mut args = claude_args(system, model, effort, true, tools);
             // Claude Code takes pictures in a message, not in plain words.
             let input = if pictures.is_empty() {
                 user.to_string()
@@ -816,7 +829,7 @@ async fn attempt(
             (args, input, Parser::Claude(ClaudeParser::default()))
         }
         _ => {
-            let mut args = codex_args(&dir.0, model, effort, optional, tools);
+            let mut args = codex_args(&dir.0, model, effort, true, tools);
             // Codex takes pictures as files.
             let files = picture_files(&dir.0, pictures);
             let at = args.len().saturating_sub(1);
@@ -828,6 +841,8 @@ async fn attempt(
         }
     };
 
+    // (Each optional flag is a word of its own, with no value after it.)
+    let args: Vec<String> = args.into_iter().filter(|a| !refused.contains(a)).collect();
     let mut cmd = tokio::process::Command::new(path);
     cmd.args(&args)
         .current_dir(&dir.0)
@@ -943,10 +958,14 @@ async fn attempt(
     if hung {
         let _ = child.start_kill();
         let minutes = (SILENT_MOST.as_secs() / 60).max(1);
+        // (With the tools of Rune it may have changed things before it
+        // hung: the card lists them, with Undo. "Nothing was changed" was
+        // said over that list.)
         return Attempt::Failed(format!(
-            "{} gave no sign for {minutes} minute{}, so the run was stopped. Nothing was changed. Try again.",
+            "{} gave no sign for {minutes} minute{}, so the run was stopped.{} Try again.",
             provider.name(),
-            if minutes == 1 { "" } else { "s" }
+            if minutes == 1 { "" } else { "s" },
+            if tools.is_some() { "" } else { " Nothing was changed." }
         ));
     }
     // Its end, and what it said of a fault: not waited for without end either.
@@ -970,6 +989,13 @@ async fn attempt(
         return Attempt::Failed(friendly_error(provider, &e));
     }
     match status {
+        // Claude Code ends each answer with a line that says so. With no
+        // such line the answer was cut off (the tool was ended from outside,
+        // or lost its connection): shown as done, half a page stood there
+        // with "Replace" under it.
+        Some(s) if s.success() && provider == Provider::ClaudeCode && !finished => {
+            Attempt::Failed(format!("{} stopped before its answer was whole. Try again.", provider.name()))
+        }
         Some(s) if s.success() => Attempt::Done,
         Some(s) => {
             let tail = stderr_tail(&stderr);
@@ -1059,7 +1085,7 @@ mod tests {
         let run = |path: PathBuf| {
             let (tx, rx) = futures_channel::mpsc::unbounded();
             let started = Instant::now();
-            let how = super::super::runtime().block_on(async { attempt(Provider::ClaudeCode, &path, "", "", "", "Hello", true, None, &[], &tx).await });
+            let how = super::super::runtime().block_on(async { attempt(Provider::ClaudeCode, &path, "", "", "", "Hello", &[], None, &[], &tx).await });
             drop(tx);
             let events: Vec<AiEvent> = super::super::runtime().block_on(futures_util::StreamExt::collect(rx));
             (how, events, started.elapsed())
@@ -1079,6 +1105,42 @@ mod tests {
         let (how, _, took) = run(stand_in("ends", &[text, done], "exit 0"));
         assert_eq!(how, Attempt::Done);
         assert!(took < Duration::from_secs(5), "{took:?}");
+        // It ends with no line that says the answer is whole: not done.
+        let (how, _, _) = run(stand_in("cut", &[text], "exit 0"));
+        assert!(matches!(&how, Attempt::Failed(why) if why.contains("before its answer was whole")), "{how:?}");
+        // A run with no tools that hung changed nothing, and says so; one
+        // with the tools of Rune may have, and does not say that.
+        let (how, _, _) = run(stand_in("silent-plain", &[text], "sleep 60"));
+        assert!(matches!(&how, Attempt::Failed(why) if why.contains("Nothing was changed")), "{how:?}");
+        let tools = Tools { journal: std::env::temp_dir().join("n2-stand-in-none.jsonl") };
+        let path = stand_in("silent-tools", &[text], "sleep 60");
+        let (tx, _rx) = futures_channel::mpsc::unbounded();
+        let how = super::super::runtime().block_on(async { attempt(Provider::ClaudeCode, &path, "", "", "", "Hello", &[], Some(&tools), &[], &tx).await });
+        assert!(matches!(&how, Attempt::Failed(why) if why.contains("gave no sign") && !why.contains("Nothing was changed")), "{how:?}");
+    }
+
+    #[test]
+    fn a_refused_flag_is_left_out_and_the_others_stay() {
+        // A tool that does not know "--safe-mode", and says what it was started with.
+        let says = r#"case " $* " in *" --safe-mode "*) echo "error: unknown option '--safe-mode'" >&2; exit 1;; esac
+printf '{"type":"assistant","message":{"content":[{"type":"text","text":"%s"}]}}\n' "$*"
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"x"}'"#;
+        let path = stand_in("refuses", &[], says);
+        let (tx, rx) = futures_channel::mpsc::unbounded();
+        let how = super::super::runtime().block_on(async { run_at(Provider::ClaudeCode, &path, "", "", "", "Hello", None, &[], &tx).await });
+        drop(tx);
+        assert_eq!(how, Ok(()));
+        let events: Vec<AiEvent> = super::super::runtime().block_on(futures_util::StreamExt::collect(rx));
+        let started_with: String = events.iter().filter_map(|e| if let AiEvent::Delta(text) = e { Some(text.as_str()) } else { None }).collect();
+        assert!(!started_with.contains("--safe-mode"), "{started_with}");
+        // The flag that keeps the request out of the tool's own history is still given.
+        assert!(started_with.contains("--no-session-persistence") && started_with.contains("--include-partial-messages"), "{started_with}");
+        // A flag that is not an optional one is said to the person, with no second try.
+        let never = r#"echo "error: unknown option '--strict-mcp-config'" >&2; exit 1"#;
+        let path = stand_in("refuses-all", &[], never);
+        let (tx, _rx) = futures_channel::mpsc::unbounded();
+        let how = super::super::runtime().block_on(async { run_at(Provider::ClaudeCode, &path, "", "", "", "Hello", None, &[], &tx).await });
+        assert!(matches!(&how, Err(why) if why.contains("doesn't support `--strict-mcp-config`")), "{how:?}");
     }
 
     #[test]

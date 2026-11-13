@@ -36,7 +36,7 @@ pub mod view;
 pub use choice::{Choice, Color};
 pub use view::{Layout, Op, Rule, View};
 
-/// The most rows and columns a table may have.
+/// The most rows (the header is one of them) and columns a table may have.
 pub const MOST_ROWS: usize = 200;
 pub const MOST_COLUMNS: usize = 12;
 /// How deep a row can be nested under other rows.
@@ -413,6 +413,11 @@ pub struct Table {
     /// and from Markdown.
     #[serde(skip)]
     pub beside: bool,
+    /// The names that the pages linked in the cells have now, by page (see
+    /// `words`). They are not kept with the table: the app gives them when
+    /// it reads a table for the screen (`AppState::table_at`, `TableView`).
+    #[serde(skip)]
+    pub names: std::collections::HashMap<String, String>,
     #[serde(skip)]
     parsed: Parsed,
 }
@@ -427,7 +432,7 @@ impl Default for Table {
 impl Table {
     /// A plain table of these rows.
     pub fn of(rows: Vec<Vec<String>>) -> Table {
-        let mut table = Table { rows, columns: Vec::new(), name: String::new(), icon: String::new(), info: Vec::new(), view: View::default(), template: None, beside: false, parsed: Parsed::default() };
+        let mut table = Table { rows, columns: Vec::new(), name: String::new(), icon: String::new(), info: Vec::new(), view: View::default(), template: None, beside: false, names: Default::default(), parsed: Parsed::default() };
         table.square();
         table
     }
@@ -829,8 +834,13 @@ impl Table {
     }
 
     /// A new empty column at place `at`. False when the table is full.
+    ///
+    /// In a table whose rows have pages, no column goes before the first:
+    /// the first column is the names of the rows, and the page of each row
+    /// goes by it. (With an empty column before it, every such page lost
+    /// its name.)
     pub fn insert_column(&mut self, at: usize) -> bool {
-        if self.columns() >= MOST_COLUMNS {
+        if self.columns() >= MOST_COLUMNS || (at == 0 && self.has_ids()) {
             return false;
         }
         let at = at.min(self.columns());
@@ -850,9 +860,11 @@ impl Table {
         self.insert_column(column + 1);
     }
 
-    /// Take a column out. The last column stays.
+    /// Take a column out. The last column stays, and so does the first
+    /// column of a table whose rows have pages (see `insert_column`: the
+    /// pages took the words of the next column for their names).
     pub fn remove_column(&mut self, column: usize) {
-        if self.columns() > 1 && column < self.columns() {
+        if self.columns() > 1 && column < self.columns() && !(column == 0 && self.has_ids()) {
             for row in self.all_rows() {
                 if column < row.len() {
                     row.remove(column);
@@ -910,7 +922,8 @@ impl Table {
         if !self.name.is_empty() {
             out.push(self.name.clone());
         }
-        out.extend(self.rows.iter().map(|row| row.join(" ")));
+        // (A link to a page is found by the name it was written with, not by the letters of its address.)
+        out.extend(self.rows.iter().map(|row| row.iter().map(|cell| crate::inline::with_page_names(cell, |_| None)).collect::<Vec<_>>().join(" ")));
         out.join("\n")
     }
 
@@ -1174,7 +1187,7 @@ impl Table {
             Kind::Time => amount(seconds(text)),
             Kind::Pace => amount(self.pace(r)),
             _ if text.is_empty() => Value::Empty,
-            _ => Value::Text(text.to_string()),
+            _ => Value::Text(self.links_as_names(text)),
         }
     }
 
@@ -1244,8 +1257,37 @@ impl Table {
     pub fn seen(&self, r: usize, c: usize, today: NaiveDate) -> String {
         match self.kind(c) {
             Kind::Date if r > 0 => date::When::read(self.cell(r, c), today, true).map(|w| w.shown(today)).unwrap_or_else(|| self.cell(r, c).to_string()),
-            _ => self.shown(r, c),
+            _ => self.words(r, c),
         }
+    }
+
+    /// The words of a cell, for all that reads a cell as words (a sort, a
+    /// filter, the heading of a group, a card, a formula): what the cell
+    /// shows, with each link to a page as the name of the page. (They read
+    /// the link as it is written, "[Plan](rune://page/…)": every such cell
+    /// sorted before "apple", "is Plan" found nothing, and the heading of a
+    /// group and a card showed the address.) The name is the one the page
+    /// has now when the app gave the names (`names`); for a page in the
+    /// Trash or gone, and outside the app, the one the link was written with.
+    pub fn words(&self, r: usize, c: usize) -> String {
+        self.links_as_names(&self.shown(r, c))
+    }
+
+    fn links_as_names(&self, text: &str) -> String {
+        crate::inline::with_page_names(text, |id| self.names.get(id).cloned())
+    }
+
+    /// The pages that the cells link to.
+    pub fn linked_pages(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for cell in self.rows.iter().skip(1).flatten().filter(|cell| cell.contains("](rune://page/")) {
+            for part in crate::inline::page_parts(cell) {
+                if let crate::inline::Part::Page { id, .. } = part {
+                    out.push(id);
+                }
+            }
+        }
+        out
     }
 
     /// What a cell shows: its text, or what is worked out for it.
@@ -1449,8 +1491,15 @@ impl Table {
     /// where the cell is empty: a new row then stays in view.
     pub fn fill_for_filters(&mut self, r: usize, today: NaiveDate) {
         for rule in self.view.filter.clone() {
-            if rule.op == Op::Is && !rule.text.trim().is_empty() && self.cell(r, rule.column).is_empty() && !self.kind(rule.column).is_worked_out() {
-                self.put(r, rule.column, &rule.text, today);
+            // ("has Work" and "is ticked" ask something of the cell too:
+            // with those the new row went out of view when the caret left it.)
+            let asked = match rule.op {
+                Op::Is | Op::Has if !rule.text.trim().is_empty() => Some(rule.text.clone()),
+                Op::Ticked if self.kind(rule.column) == Kind::Checkbox => Some("x".to_string()),
+                _ => None,
+            };
+            if let Some(text) = asked.filter(|_| self.cell(r, rule.column).is_empty() && !self.kind(rule.column).is_worked_out()) {
+                self.put(r, rule.column, &text, today);
             }
         }
         // In the calendar a row shows on its day: a new row with no day was
@@ -1459,6 +1508,18 @@ impl Table {
             if let Some(c) = self.first_of(Kind::Date).filter(|&c| self.cell(r, c).is_empty()) {
                 self.set(r, c, &full_day(today));
             }
+        }
+    }
+
+    /// The new row `r` was added from the row `from` (its "+", or Return in
+    /// it): in a grouped table it gets what that row has in the column of
+    /// the groups, and so stands in the same group. (Empty there, it went
+    /// to the "No …" group at the foot of the table, far from the row.)
+    pub fn fill_for_group(&mut self, r: usize, from: usize) {
+        let Some(g) = self.view.group.filter(|&g| g < self.columns() && !self.kind(g).is_worked_out()) else { return };
+        if r != from && from >= 1 && from < self.rows.len() && r < self.rows.len() && self.cell(r, g).is_empty() {
+            let text = self.cell(from, g).to_string();
+            self.set(r, g, &text);
         }
     }
 
@@ -1569,12 +1630,14 @@ impl Table {
     /// Read a Markdown pipe table from the lines at the start of `lines`.
     /// Returns the table and how many lines it took, or `None` if those
     /// lines are no table (a table needs its header and the line of dashes).
+    ///
+    /// A table holds `MOST_ROWS` rows. Rows over that are not taken: the
+    /// reader of the page makes the next table of them, under the same
+    /// header (see `markdown::read`). The two comment lines under them are
+    /// read for this table all the same: left where they are, this table had
+    /// no kinds, no name and no view, and the lines showed as words.
     pub fn from_markdown(lines: &[&str]) -> Option<(Table, usize)> {
-        let cells = |line: &str| -> Option<Vec<String>> {
-            let line = line.trim();
-            let inner = line.strip_prefix('|')?;
-            Some(split_bars(inner.strip_suffix('|').unwrap_or(inner)))
-        };
+        let cells = pipe_cells;
         let header = cells(lines.first()?)?;
         let rule = cells(lines.get(1)?)?;
         let is_rule = rule.len() == header.len() && rule.iter().all(|c| c.len() >= 3 && c.trim_matches(':').chars().all(|ch| ch == '-') && c.contains('-'));
@@ -1591,6 +1654,9 @@ impl Table {
             taken += 1;
         }
         let mut table = Table::of(rows);
+        let over = lines[taken..].iter().take_while(|line| cells(line).is_some()).count();
+        let rows_end = taken;
+        taken += over;
         let comment = |at: usize, word: &str| -> Option<String> { Some(lines.get(at)?.trim().strip_prefix("<!--")?.strip_suffix("-->")?.trim().strip_prefix(word)?.to_string()) };
         if let Some(described) = comment(taken, "columns:") {
             table.columns = split_bars(&described).iter().map(|part| read_column(part)).collect();
@@ -1630,7 +1696,20 @@ impl Table {
                 table.tidy(r, c, today);
             }
         }
-        Some((table, taken))
+        Some((table, if over > 0 { rows_end } else { taken }))
+    }
+
+    /// The Markdown table at the start of `lines`, if it is more than a
+    /// table holds: the columns of its widest row, and its rows under the
+    /// header. (Read as a page, its columns over the most are cut, and its
+    /// rows over the most make a second table. The connector refuses such
+    /// a table with these numbers, so that an AI tool can write it again
+    /// in a way that fits.)
+    pub fn over_most(lines: &[&str]) -> Option<(usize, usize)> {
+        Table::from_markdown(lines)?;
+        let rows: Vec<Vec<String>> = lines[2..].iter().map_while(|line| pipe_cells(line)).collect();
+        let columns = rows.iter().map(Vec::len).chain(pipe_cells(lines[0]).map(|h| h.len())).max().unwrap_or(0);
+        (columns > MOST_COLUMNS || rows.len() > MOST_ROWS - 1).then_some((columns, rows.len()))
     }
 
     /// This table was read from Markdown, which was written from `old` and
@@ -1729,6 +1808,12 @@ impl Table {
         }
         self.square();
     }
+}
+
+/// The cells of a line of a Markdown table, or `None` for another line.
+fn pipe_cells(line: &str) -> Option<Vec<String>> {
+    let inner = line.trim().strip_prefix('|')?;
+    Some(split_bars(inner.strip_suffix('|').unwrap_or(inner)))
 }
 
 /// The parts of a line between its bars, with `\|` for a bar in a part.
@@ -2013,7 +2098,7 @@ pub fn checked(text: &str) -> bool {
 
 /// A day written in a cell: "2026-12-01", "Tue 1 Dec", "1 December",
 /// "Dec 1, 2026", "today", "yesterday". With no year: the nearest such day
-/// ("3 January" in December is next month).
+/// ("3 January" in December is next month), see `far` below.
 pub fn day(text: &str, today: NaiveDate) -> Option<NaiveDate> {
     // (The start of a date cell that says more: an end, a reminder; see date.rs.)
     let text = text.split([date::TO.chars().next().unwrap_or('→'), date::REMIND.chars().next().unwrap_or('⏰')]).next().unwrap_or("");
@@ -2060,12 +2145,15 @@ pub fn day(text: &str, today: NaiveDate) -> Option<NaiveDate> {
     }
     let (month, dom) = (month?, dom?);
     let year = year.or(short_year);
-    // The nearest such day; a day ahead counts as twice as far, since a
-    // log is mostly of days gone by.
+    // The nearest such day; a day ahead counts as a month further than it
+    // is, since a log is mostly of days gone by: of two days about as far,
+    // the one gone by is meant. (A day ahead counted as twice as far: then
+    // "15 Apr", typed in November for a day to come, was the April of seven
+    // months before, and the cell did not show the year.)
     let far = |d: &NaiveDate| {
         let days = (*d - today).num_days();
         if days > 0 {
-            days * 2
+            days + 30
         } else {
             -days
         }
@@ -2119,9 +2207,11 @@ pub fn full_day(d: NaiveDate) -> String {
 }
 
 /// A day as a date column shows it: "Tue 1 Dec", with the year when it is
-/// not this year's.
+/// not this year's, or when it is more than four months gone by. (A day
+/// typed with no year can be read as the one gone by where the one to come
+/// was meant, "15 May" in November: with the year in the cell, that shows.)
 pub fn format_day(d: NaiveDate, today: NaiveDate) -> String {
-    if d.year() == today.year() {
+    if d.year() == today.year() && (today - d).num_days() <= 120 {
         d.format("%a %-d %b").to_string()
     } else {
         d.format("%a %-d %b %Y").to_string()
@@ -2275,6 +2365,38 @@ mod tests {
     }
 
     #[test]
+    fn a_markdown_table_over_the_most_rows_keeps_its_comment_lines_and_its_rows() {
+        let mut md: Vec<String> = vec!["| Name | Amount |".into(), "| --- | --- |".into()];
+        md.extend((1..=260).map(|i| format!("| r{i} | {i} |")));
+        md.extend(["<!-- columns: text count | number sum -->".to_string(), "<!-- table: Long | sort Amount down -->".to_string(), "after".to_string()]);
+        let lines: Vec<&str> = md.iter().map(String::as_str).collect();
+        // The first table: the most rows, and the kinds, the name and the
+        // sort of the two comment lines that are under the rows it left.
+        let (t, taken) = Table::from_markdown(&lines).unwrap();
+        assert_eq!((t.rows.len(), taken), (MOST_ROWS, MOST_ROWS + 1));
+        assert_eq!((t.kind(1), t.name.as_str(), t.view.sort.len()), (Kind::Number, "Long", 1));
+        assert_eq!(Table::over_most(&lines), Some((2, 260)));
+        // Read as a page: the other rows are a second table with the same
+        // kinds, and no row and no comment line is left as words.
+        let blocks = crate::markdown::to_blocks(&md.join("\n"));
+        let tables: Vec<Table> = blocks.iter().filter(|b| b.kind == crate::model::BlockKind::Table).map(|b| Table::parse(&b.data)).collect();
+        assert_eq!(tables.iter().map(|t| t.rows.len() - 1).collect::<Vec<_>>(), [199, 61]);
+        assert!(tables.iter().all(|t| t.kind(1) == Kind::Number && t.name == "Long" && t.heading(0) == "Name"));
+        assert_eq!((tables[1].cell(1, 0), tables[1].cell(61, 0)), ("r200", "r260"));
+        assert_eq!(blocks.iter().filter(|b| b.kind != crate::model::BlockKind::Table).map(|b| b.text.as_str()).collect::<Vec<_>>(), ["after"]);
+        assert_eq!(crate::markdown::tables_over_most(&md.join("\n")), [(2, 260)]);
+        // A table that fits is as before, and a second table right under
+        // the comment lines of the first is a table of its own.
+        let two = "| a |\n| --- |\n| 1 |\n<!-- table: One -->\n| b |\n| --- |\n| 2 |";
+        let blocks = crate::markdown::to_blocks(two);
+        assert_eq!(blocks.iter().map(|b| Table::parse(&b.data).heading(0)).collect::<Vec<_>>(), ["a", "b"]);
+        assert!(crate::markdown::tables_over_most(two).is_empty());
+        // Too many columns: said, with the widest row.
+        let wide = ["| a | b |", "| --- | --- |", "| 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 |"];
+        assert_eq!(Table::over_most(&wide), Some((13, 1)));
+    }
+
+    #[test]
     fn markdown_there_and_back() {
         let t = table(&[&["Item", "Amount"], &["Salary", "$3,500"], &["A | B", ""]]);
         let md = t.to_markdown("");
@@ -2372,12 +2494,16 @@ mod tests {
         let mut old = log();
         old.keep_years(today);
         assert_eq!((old.cell(1, 0), old.cell(3, 0)), ("Tue 10 Nov 2026", "Sun 15 Nov 2026"));
-        // What a cell holds has its year; what it shows has not, this year.
+        // What a cell holds has its year; what it shows has not, for a day
+        // of this year that is not months gone by.
         let mut t = log();
-        t.put(1, 0, &full_day(d(2026, 1, 5)), today);
-        assert_eq!(t.cell(1, 0), "Mon 5 Jan 2026");
+        t.put(1, 0, &full_day(d(2026, 9, 5)), today);
+        assert_eq!(t.cell(1, 0), "Sat 5 Sep 2026");
         let when = date::When::read(t.cell(1, 0), today, true).unwrap();
-        assert_eq!((when.start, when.shown(today)), (d(2026, 1, 5), "Mon 5 Jan".to_string()));
+        assert_eq!((when.start, when.shown(today)), (d(2026, 9, 5), "Sat 5 Sep".to_string()));
+        t.put(1, 0, &full_day(d(2026, 1, 5)), today);
+        let when = date::When::read(t.cell(1, 0), today, true).unwrap();
+        assert_eq!((when.start, when.shown(today)), (d(2026, 1, 5), "Mon 5 Jan 2026".to_string()));
         // A day picked far ahead in this year is not a day of last year.
         t.put(1, 0, "Thu 3 Dec 2026", d(2026, 2, 1));
         assert_eq!(date::When::read(t.cell(1, 0), d(2026, 2, 1), true).unwrap().start, d(2026, 12, 3));
@@ -2422,6 +2548,21 @@ mod tests {
         assert_eq!(day("soon", today), None);
         assert_eq!(format_day(today, today), "Tue 1 Dec");
         assert_eq!(format_day(d(2027, 1, 3), today), "Sun 3 Jan 2027");
+    }
+
+    #[test]
+    fn a_day_typed_with_no_year_for_a_day_to_come_is_not_put_months_back() {
+        let today = d(2026, 11, 12);
+        // Five months ahead, seven months back: the day to come.
+        assert_eq!(day("15 Apr", today), Some(d(2027, 4, 15)));
+        assert_eq!(format_day(d(2027, 4, 15), today), "Thu 15 Apr 2027");
+        // About as far each way: the day gone by, as in a log. The cell
+        // shows its year, since it is not near.
+        assert_eq!(day("15 May", today), Some(d(2026, 5, 15)));
+        assert_eq!(format_day(d(2026, 5, 15), today), "Fri 15 May 2026");
+        // The days of a log of the last months show as before, and a day to come this year too.
+        assert_eq!((day("3 Aug", today), format_day(d(2026, 8, 3), today)), (Some(d(2026, 8, 3)), "Mon 3 Aug".to_string()));
+        assert_eq!((day("24 Dec", today), format_day(d(2026, 12, 24), today)), (Some(d(2026, 12, 24)), "Thu 24 Dec".to_string()));
     }
 
     #[test]
@@ -2738,6 +2879,59 @@ mod tests {
         assert_eq!(t.total(0).map(|(_, v)| v), Some("2.5".to_string()));
         t.set_total(0, Some(Total::Sum));
         assert_eq!(t.total(0).map(|(_, v)| v), Some("5".to_string()));
+    }
+
+    #[test]
+    fn a_new_row_stands_in_the_group_and_passes_the_filters_it_was_added_in() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 12).unwrap();
+        let mut t = table(&[&["Item", "Category", "Tags", "Paid"], &["Rent", "Home", "Work, Fixed", "x"], &["Groceries", "Food", "", ""]]);
+        t.set_kind(2, Kind::Multi);
+        t.set_kind(3, Kind::Checkbox);
+        t.view.group = Some(1);
+        // Added from Rent: in the group of Rent.
+        let r = t.add_row(1).unwrap();
+        t.fill_for_group(r, 1);
+        assert_eq!((r, t.cell(r, 1)), (2, "Home"));
+        assert_eq!(t.groups(&[1, 2, 3], 1), vec![("Home".to_string(), vec![1, 2]), ("Food".to_string(), vec![3])]);
+        // With no group, and for a row that has its value, nothing is written.
+        t.fill_for_group(3, 1);
+        assert_eq!(t.cell(3, 1), "Food");
+        t.view.group = None;
+        let r = t.add_row(1).unwrap();
+        t.fill_for_group(r, 1);
+        assert_eq!(t.cell(r, 1), "");
+        // Filters "has" and "is ticked" are filled as "is" is: the row stays in view.
+        t.view.filter = vec![Rule { column: 2, op: Op::Has, text: "Work".into(), color: String::new() }, Rule { column: 3, op: Op::Ticked, text: String::new(), color: String::new() }];
+        t.fill_for_filters(r, today);
+        assert_eq!((t.cell(r, 2), t.cell(r, 3)), ("Work", "x"));
+        assert!(t.view.filter.clone().iter().all(|rule| t.passes(r, rule)));
+    }
+
+    #[test]
+    fn the_first_column_of_a_table_whose_rows_have_pages_stays_first() {
+        let mut t = table(&[&["Item", "Amount"], &["Rent", "2000"]]);
+        // A plain table: a column can go before the first, and the first can go.
+        assert!(t.insert_column(0));
+        assert_eq!(t.cell(1, 1), "Rent");
+        t.remove_column(0);
+        assert_eq!((t.columns(), t.cell(1, 0)), (2, "Rent"));
+        // Its rows have pages (they go by names): the names stay the first column.
+        t.name_rows();
+        assert!(!t.insert_column(0));
+        t.remove_column(0);
+        t.remove_columns(&[0]);
+        assert_eq!((t.columns(), t.cell(1, 0)), (2, "Rent"));
+        // Other columns come and go as before.
+        assert!(t.insert_column(1));
+        t.remove_column(1);
+        assert_eq!((t.columns(), t.cell(1, 1)), (2, "2000"));
+    }
+
+    #[test]
+    fn a_ticked_box_is_one_group_however_it_is_written() {
+        let mut t = table(&[&["Task", "Done"], &["a", "x"], &["b", "yes"], &["c", ""], &["d", "no"]]);
+        t.set_kind(1, Kind::Checkbox);
+        assert_eq!(t.groups(&[1, 2, 3, 4], 1), vec![("x".to_string(), vec![1, 2]), (String::new(), vec![3, 4])]);
     }
 
     #[test]

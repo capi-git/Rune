@@ -591,6 +591,23 @@ pub fn page_parts(text: &str) -> Vec<Part> {
     out
 }
 
+/// `text` as its words, with each link to a page as the name of the page:
+/// the name `name_of` gives for it (the name the page has now), or else the
+/// name the link was written with. This is what a sort, a filter or a
+/// search reads of a plain text that can hold such links.
+pub fn with_page_names(text: &str, name_of: impl Fn(&str) -> Option<String>) -> String {
+    if !text.contains("](rune://page/") {
+        return text.to_string();
+    }
+    page_parts(text)
+        .into_iter()
+        .map(|part| match part {
+            Part::Words(words) => words,
+            Part::Page { name, id } => name_of(&id).unwrap_or(name),
+        })
+        .collect()
+}
+
 /// Whether a plain text holds a link to a page (see `page_parts`).
 pub fn has_page_link(text: &str) -> bool {
     text.contains("](rune://page/") && page_parts(text).iter().any(|p| matches!(p, Part::Page { .. }))

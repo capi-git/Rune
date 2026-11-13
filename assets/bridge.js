@@ -312,10 +312,14 @@ const initWithin = (root) => {
   else root.querySelectorAll('.blk').forEach(initBlock);
 };
 
-// Tell Rust the block's current text.
+// Tell Rust the block's current text, and where the caret is in it: what is
+// typed for the "/", "@" and "[[" lists ends at the caret, not at the end
+// of the line.
 const commit = (el) => {
   if (!el.textContent && el.querySelector('br') && !el.querySelector('br + *')) el.innerHTML = '';
-  send({ t: 'input', page: el.dataset.page, id: el.dataset.id, md: mdOf(el) });
+  // (Not in a code block: it has no such lists, and the caret is not free to measure.)
+  const s = isCode(el) ? null : selIn(el);
+  send({ t: 'input', page: el.dataset.page, id: el.dataset.id, md: mdOf(el), pos: s && s.start === s.end ? s.end : undefined });
 };
 
 const setRuns = (el, runs, start, end = start) => {
@@ -664,9 +668,65 @@ document.addEventListener('selectionchange', () => {
   });
 });
 
+// ----- focus mode ----------------------------------------------------------------
+// The line with the caret is marked (style.css makes the others pale), and
+// while keys are pressed the line stays near the middle of its pane. A press
+// of the mouse moves nothing: only typing and the arrows do.
+
+const focusOn = () => !!document.querySelector('.app.focus-mode');
+let focusKeyAt = 0;
+document.addEventListener('keydown', () => (focusKeyAt = performance.now()), true);
+
+const caretRect = () => {
+  const sel = getSelection();
+  if (!sel || !sel.rangeCount) return null;
+  const range = sel.getRangeAt(0).cloneRange();
+  range.collapse(false);
+  const rects = range.getClientRects();
+  if (rects.length) return rects[rects.length - 1];
+  const el = blockOf(sel.focusNode);
+  return el ? el.getBoundingClientRect() : null;
+};
+
+const markFocusLine = () => {
+  const sel = getSelection();
+  const blk = sel && sel.rangeCount ? blockOf(sel.focusNode) : null;
+  const row = blk && blk.closest('.block-row');
+  for (const old of document.querySelectorAll('.block-row.fm-here')) if (old !== row) old.classList.remove('fm-here');
+  if (row) row.classList.add('fm-here');
+  return row;
+};
+
+const centreFocusLine = (always) => {
+  const row = markFocusLine();
+  if (!row || (!always && performance.now() - focusKeyAt > 400)) return;
+  const scroller = row.closest('.scroller');
+  const r = caretRect();
+  if (!scroller || !r || (!r.height && !r.top)) return;
+  const box = scroller.getBoundingClientRect();
+  const delta = r.top + r.height / 2 - (box.top + box.height * 0.42);
+  if (Math.abs(delta) < 24) return;
+  // (The measures are in points of the window, the scroll in the page's own:
+  // on a zoomed page the line went past the middle at each key, and at 200%
+  // it never came to rest.)
+  scroller.scrollTo({ top: scroller.scrollTop + delta / zoomOf(scroller), behavior: Math.abs(delta) > 160 ? 'smooth' : 'instant' });
+};
+
+document.addEventListener('selectionchange', () => {
+  if (focusOn()) requestAnimationFrame(() => centreFocusLine(false));
+});
+
 // ----- API used from Rust -----------------------------------------------------
 
 window.__n2 = {
+  focusMode(on) {
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        if (on) centreFocusLine(true);
+        else for (const old of document.querySelectorAll('.block-row.fm-here')) old.classList.remove('fm-here');
+      }),
+    );
+  },
   focus(id, pos) {
     let tries = 0;
     const attempt = () => {
@@ -869,6 +929,13 @@ document.addEventListener(
       send({ t: 'shortcut', name: 'dictate_stop' });
       return;
     }
+    // In focus mode, Escape with nothing open leaves it (and picks no line).
+    // (Escape in the AI box shuts the box, as it does out of focus mode.)
+    if (e.key === 'Escape' && focusOn() && !(isBlock(t) && t.dataset.menu === '1') && !document.querySelector('.popover, .modal-backdrop, .slash-menu') && !peeking() && !ctxFor && !findOpen() && !(t && t.closest && t.closest('.ai-dock'))) {
+      e.preventDefault();
+      send({ t: 'shortcut', name: 'focus_mode' });
+      return;
+    }
     if (e.key === 'Escape' && !(isBlock(t) && t.dataset.menu === '1')) {
       // With nothing open, Escape in a line picks the line (then ⌘C copies
       // it, and Shift with an arrow picks the lines above or below).
@@ -951,7 +1018,7 @@ document.addEventListener(
 
     // Plain typing is handled by the input event; only these keys need the
     // caret position (which isn't free to measure).
-    if (!(e.key === 'Enter' || e.key === 'Backspace' || e.key === 'Tab' || e.key.startsWith('Arrow') || (cmd && key === 'd'))) return;
+    if (!(e.key === 'Enter' || e.key === 'Backspace' || e.key === 'Delete' || e.key === 'Tab' || e.key.startsWith('Arrow') || (cmd && key === 'd'))) return;
     const s = selIn(t) || { start: 0, end: 0 };
 
     if (cmd && e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
@@ -989,6 +1056,14 @@ document.addEventListener(
       send({ t: 'backspace', page, id, value: mdOf(t) });
       return;
     }
+    // Delete (forward) at the very end of a line joins the next line to it.
+    // (Each line is a box of its own, so the key did nothing there.)
+    if (e.key === 'Delete' && !code && s.start === s.end && s.end >= textLen(t) && !e.metaKey && !e.altKey && !e.ctrlKey && !e.shiftKey) {
+      e.preventDefault();
+      send({ t: 'delete', page, id, value: mdOf(t) });
+      return;
+    }
+    if (e.key === 'Delete') return;
     if (e.key === 'Tab') {
       e.preventDefault();
       if (code && !e.shiftKey) {
@@ -1212,7 +1287,11 @@ document.addEventListener(
       commit(t);
       return;
     }
-    if (isCode(t) || !text.includes('\n')) {
+    // One line that is just what the app keeps of the picked blocks copied
+    // last (see `copy_picked`) goes to the app, which puts that line in with
+    // its formats. (Typed in as words, its stars and backslashes showed.)
+    const kept = !text.includes('\n') && window.__n2 && window.__n2.keptCopy === text;
+    if (isCode(t) || (!text.includes('\n') && !kept)) {
       pasting = true;
       document.execCommand('insertText', false, text.replace(/\r\n?/g, '\n'));
       pasting = false;
@@ -1694,21 +1773,28 @@ const placeSlashMenu = (menu) => {
   const most = parseFloat(getComputedStyle(menu).maxHeight) * z || 380 * z;
   const h = Math.min(menu.scrollHeight * z, most);
   const w = menu.offsetWidth * z;
-  // The line the caret is on: the first line of the row.
-  const line = Math.min(a.height, 30 * z);
-  const below = innerHeight - (a.top + line) - 10;
-  const above = a.top - 10;
+  // The line the caret is on. (It was taken to be the first line of the
+  // row: at the end of a paragraph of several lines the list opened under
+  // the first line, over the line that is typed in.) With the caret in
+  // another place, the first line of the row.
+  const sel = getSelection();
+  const caret = sel && sel.rangeCount && row.contains(sel.focusNode) ? caretRect() : null;
+  const first = a.top + Math.min(a.height, 30 * z);
+  const foot = caret ? Math.min(a.bottom, Math.max(first, caret.bottom)) : first;
+  const head = caret && foot > first ? Math.max(a.top, Math.min(caret.top, foot - 14 * z)) : a.top;
+  const below = innerHeight - foot - 10;
+  const above = head - 10;
   const left = Math.max(8, Math.min(a.left + 26 * z, innerWidth - w - 8));
   menu.style.left = (left - cb.left) / z + 'px';
   menu.style.right = 'auto';
   if (h <= below || below >= above) {
-    menu.style.top = (a.top + line + 2 - cb.top) / z + 'px';
+    menu.style.top = (foot + 2 - cb.top) / z + 'px';
     menu.style.bottom = 'auto';
     menu.style.maxHeight = Math.min(most, below) / z + 'px';
   } else {
     // Over the line, its foot at the line: it shrinks upward as items go.
     menu.style.top = 'auto';
-    menu.style.bottom = (innerHeight - a.top + 2 - (cb.bottom !== undefined ? innerHeight - cb.bottom : 0)) / z + 'px';
+    menu.style.bottom = (innerHeight - head + 2 - (cb.bottom !== undefined ? innerHeight - cb.bottom : 0)) / z + 'px';
     menu.style.maxHeight = Math.min(most, above) / z + 'px';
   }
 };
@@ -2241,6 +2327,12 @@ document.addEventListener(
   (e) => {
     document.querySelectorAll('.drawing[data-active]').forEach((box) => {
       if (box.contains(e.target)) return;
+      // It saves now what it still holds (a new colour or label is saved a
+      // moment after the change). When this press leads to another page,
+      // the frame is gone by then: the save it sends as it goes comes from
+      // no window the page knows, and was dropped.
+      const frame = box.querySelector('iframe.drawing-frame');
+      if (frame && frame.contentWindow) frame.contentWindow.postMessage({ n2draw: 'flush' }, '*');
       if (box.dataset.expanded) setExpanded(box, false);
       delete box.dataset.active;
     });
@@ -2278,8 +2370,9 @@ const openCtx = (el, x, y, hasSelection) => {
   m.style.left = Math.max(8, Math.min(x, innerWidth - m.offsetWidth * mz - 8)) / mz + 'px';
   m.style.top = Math.max(8, Math.min(y, innerHeight - m.offsetHeight * mz - 8)) / mz + 'px';
 };
-// A right-click on a picture (in a page, in a cell of a table, or shown
-// large): the short menu with "Copy picture" alone. The picture is one the
+// A right-click on a picture (in a page, in a cell of a table, a cover, a
+// card of a gallery, or shown large): the short menu with "Copy picture"
+// alone. The picture is one the
 // app keeps: its name is the end of its address.
 const keptPicture = (img) => {
   const name = ((img && (img.currentSrc || img.src)) || '').split('/').pop().split('?')[0];
@@ -2314,7 +2407,7 @@ document.addEventListener(
     if (!t || !t.closest || t.closest('.tab[data-tab]')) return;
     e.preventDefault();
     closeCtx();
-    const picture = t.closest('.lightbox img, .cell-pic > img, .image-block > img');
+    const picture = t.closest('.lightbox img, .cell-pic > img, .image-block > img, .page-cover > img, img.gallery-pic');
     const kept = picture && keptPicture(picture);
     if (kept) {
       openPictureCtx(kept, e.clientX, e.clientY);
@@ -2378,10 +2471,20 @@ window.addEventListener('blur', closeCtx);
 // ----- pictures: pasted or dropped -------------------------------------------------
 const PICTURE_MOST = 30 * 1024 * 1024;
 // The picture a clipboard or a drop holds, if it holds no text to prefer.
+// Text wins over a picture: a copy from a spreadsheet or a web page carries
+// the words and a picture of them. But a picture file copied in the Finder
+// comes with its own name as the text: there the file is what is meant
+// (its name was typed into the line).
 function pictureIn(data) {
-  if (!data || data.getData('text/plain')) return null;
+  if (!data) return null;
+  const files = [...(data.files || [])].filter((f) => f.type.startsWith('image/'));
+  const text = data.getData('text/plain');
+  if (text) {
+    const names = text.split(/[\r\n]+/).map((line) => line.trim());
+    return files.find((f) => f.name && names.includes(f.name)) || null;
+  }
   const item = [...(data.items || [])].find((i) => i.kind === 'file' && i.type.startsWith('image/'));
-  return (item && item.getAsFile()) || [...(data.files || [])].find((f) => f.type.startsWith('image/')) || null;
+  return (item && item.getAsFile()) || files[0] || null;
 }
 // A picture cell of a table: a screenshot pasted with the cell chosen
 // (⌘V), or pictures dropped on it, go into that cell, not into the page.
@@ -2443,26 +2546,43 @@ document.addEventListener(
   true,
 );
 
-// Sends a picture file to the app; the answer is kept until it is sent.
+// Sends a picture file to the app; the answer is kept until it is sent,
+// and says whether anything was sent.
 function sendPicture(file, page, id) {
   return new Promise((done) => {
     if (!file || !page) return done();
     if (file.size > PICTURE_MOST) {
       send({ t: 'image_data', page, id, data: '' });
-      return done();
+      return done(true);
     }
     const reader = new FileReader();
     reader.onload = () => {
       send({ t: 'image_data', page, id, data: String(reader.result).split(',')[1] || '' });
-      done();
+      done(true);
     };
     reader.onerror = () => done();
     reader.readAsDataURL(file);
   });
 }
 // Picture files dropped on a page go in where they are let go: at the line
-// under the pointer, or at the end of that page.
+// under the pointer, or at the line of that page nearest by height (the
+// margin beside a line, the title and the cover are no line: a picture let
+// go there went to the end of the page, often out of view).
 const holdsFiles = (e) => e.dataTransfer && [...e.dataTransfer.types].includes('Files');
+const rowAtHeight = (pane, y) => {
+  let best = null;
+  let gap = Infinity;
+  for (const row of pane.querySelectorAll('.blocks > .block-row[data-id]')) {
+    const box = row.getBoundingClientRect();
+    if (!box.height) continue;
+    const away = y < box.top ? box.top - y : y > box.bottom ? y - box.bottom : 0;
+    if (away < gap) {
+      gap = away;
+      best = row;
+    }
+  }
+  return best;
+};
 document.addEventListener('dragover', (e) => {
   if (!holdsFiles(e)) return;
   e.preventDefault();
@@ -2479,18 +2599,28 @@ document.addEventListener('drop', (e) => {
   let id = holder && holder.dataset.imageEmpty;
   if (!id) {
     // The row it was let go on (a picture, a table or a divider too), else
-    // the last line of that page.
+    // the row at that height (above the first line: the first line).
     const row = under && under.closest('.blocks > .block-row[data-id]');
     const pane = under && under.closest('.pane');
-    const lastRow = pane && [...pane.querySelectorAll('.blocks > .block-row[data-id]')].pop();
-    const at = row || lastRow;
+    const at = row || (pane && rowAtHeight(pane, e.clientY));
     if (!at) return;
     page = at.dataset.page;
     id = at.dataset.id;
   }
-  // One after another, so they keep their order: the first at the row, each
-  // of the others after the picture put just before it ("last").
-  files.reduce((before, file, n) => before.then(() => sendPicture(file, page, n === 0 ? id : 'last')).then(() => new Promise((done) => setTimeout(done, 60))), Promise.resolve());
+  // One after another, so they keep their order: the first that is sent
+  // names the row, each of the others goes after the picture put just
+  // before it ("last"; the app keeps the row when the first cannot be kept).
+  let first = true;
+  files.reduce(
+    (before, file) =>
+      before
+        .then(() => sendPicture(file, page, first ? id : 'last'))
+        .then((sent) => {
+          if (sent) first = false;
+          return new Promise((done) => setTimeout(done, 60));
+        }),
+    Promise.resolve(),
+  );
 });
 
 // ----- tables ----------------------------------------------------------------------
@@ -3146,8 +3276,10 @@ document.addEventListener('mousemove', (e) => {
     coverDrag = null;
     return;
   }
-  // Dragging the picture down shows more of its top.
-  const moved = ((e.clientY - coverDrag.startY) / coverDrag.cover.clientHeight) * 60;
+  // Dragging the picture down shows more of its top. (The pointer is in
+  // points of the window, the height in the page's own: on a zoomed page
+  // the picture moved faster or slower than the pointer.)
+  const moved = ((e.clientY - coverDrag.startY) / zoomOf(coverDrag.cover) / coverDrag.cover.clientHeight) * 60;
   coverDrag.now = Math.min(100, Math.max(0, coverDrag.y - moved));
   coverDrag.img.style.objectPosition = `50% ${coverDrag.now}%`;
 });
@@ -3457,6 +3589,14 @@ window.addEventListener('keydown', (e) => {
   if (!large) return;
   if (e.key === 'Meta' || e.key === 'Control' || e.key === 'Shift' || e.key === 'Alt') return;
   if (e.metaKey || e.ctrlKey) {
+    // Copy is for the picture that is shown. (The view went away and the
+    // key copied what was picked on the page before.)
+    const kept = e.key.toLowerCase() === 'c' && !e.shiftKey && !e.altKey && keptPicture(large.big);
+    if (kept) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      send({ t: 'copy_picture', name: kept });
+    }
     hideLarge();
     return;
   }
@@ -3466,10 +3606,14 @@ window.addEventListener('keydown', (e) => {
   else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') stepLarge(-1);
   else if (e.key === 'Escape' || e.key === 'Enter' || e.key === ' ') hideLarge();
   else if (e.key === 'Backspace' || e.key === 'Delete') {
-    // Delete takes the picture that is shown out of its page (Undo brings it back).
+    // Delete takes the picture that is shown out of its page (Undo brings
+    // it back), or out of its cell of a table, by the cell's own button
+    // (there the view went away and nothing was taken out).
     const box = large.from.isConnected && large.from.closest('.image-block[data-image]');
+    const inCell = large.from.isConnected && large.from.closest('.cell-pic');
     hideLarge();
     if (box) send({ t: 'image_delete', page: box.dataset.page, id: box.dataset.image });
+    else if (inCell && inCell.querySelector('.pic-x')) inCell.querySelector('.pic-x').click();
   }
 }, true);
 
@@ -4755,6 +4899,13 @@ const startGraph = (el) => {
     (e) => {
       const d = g.drag;
       if (!d) return;
+      // (Let go where the page did not see it: the drag ends where it is,
+      // and the picture does not follow the pointer until the next press.)
+      if (!(e.buttons & 1)) {
+        g.drag = null;
+        canvas.style.cursor = g.hover >= 0 ? 'pointer' : 'grab';
+        return;
+      }
       const dx = e.clientX - d.x;
       const dy = e.clientY - d.y;
       if (!d.moved && Math.hypot(dx, dy) < 4) return; // a slip of the hand is a click
@@ -5015,15 +5166,19 @@ document.addEventListener(
       return;
     }
     const col = e.target.closest('.cal-col[data-day]');
-    if (!col || e.target.closest('.cal-event')) return;
-    evDraw = { col, y: e.clientY, moved: false, ghost: null, from: 0, to: 0 };
+    if (!col) return;
     // Where the press is in the day, for a click that makes an event there:
     // measured from the column itself, in its own units. (The app took the
     // place inside the element under the pointer, which is not always the
     // column, and on a zoomed page not in the column's units: the event
     // came at another time than the one that was pressed.)
+    // Said for a press on an event too: let go a little under a small
+    // event, its click is the column's, and took the minute of a press
+    // before it (a drag, a press that closed a panel).
     const quarter = Math.floor(((e.clientY - col.getBoundingClientRect().top) / (48 * zoomOf(col))) * 4) * 15;
     send({ t: 'cal_press', minute: Math.max(0, Math.min(24 * 60 - 15, quarter)) });
+    if (e.target.closest('.cal-event')) return;
+    evDraw = { col, y: e.clientY, moved: false, ghost: null, from: 0, to: 0 };
   },
   true,
 );

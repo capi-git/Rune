@@ -2391,6 +2391,23 @@ body[data-resizing="rows"] * {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* A command or a new page in search: a quiet grey sign, the words in the
+   weight of plain text, the keys at the right as the menu bar shows them. */
+.qf-cmd-icon {
+  color: var(--text-3);
+}
+.qf-title.qf-cmd {
+  font-weight: 400;
+}
+.qf-new-name {
+  font-weight: 500;
+}
+.qf-keys {
+  font-size: 12px;
+  color: var(--text-3);
+  white-space: nowrap;
+  letter-spacing: 0.04em;
+}
 .qf-footer {
   border-top: 1px solid var(--border);
   padding: 9px 16px;
@@ -4645,6 +4662,12 @@ body[data-dragging="seg"] .tab.seg-source {
   .cal-allday,
   .cal-hours {
     grid-template-columns: 44px repeat(var(--days, 7), minmax(0, 1fr));
+  }
+  /* (The lines of the hours begin where the days begin here too: begun at
+     the width of the wide column, the first day had none in its first 12
+     points.) */
+  .cal-hours {
+    background-position: 44px 0;
   }
   .cal-wday {
     flex-direction: column;
@@ -8590,4 +8613,142 @@ body.ev-dragging .cal-event {
 .tint-dot.on {
   border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent);
+}
+
+/* ---------- focus mode (⌘.) ----------
+   Only the page: no sidebar, no bars, no outline or links at its foot. The
+   tabs come back while the pointer is over the top of the window. The other
+   lines are pale while the caret is in one (bridge.js marks it), and the
+   end of the page leaves room for the last line to reach the middle. The
+   AI's round button at rest goes too, but not its open box: the box and an
+   answer that waits for Replace or Keep are inside the same element, and
+   hidden with it the AI shortcut seemed to do nothing. */
+.app.focus-mode .sidebar,
+.app.focus-mode .edge-strip,
+.app.focus-mode .pagebar,
+.app.focus-mode .place-bar,
+.app.focus-mode .page-outline,
+.app.focus-mode .backlinks,
+.app.focus-mode .page-meta,
+.app.focus-mode .ai-dock:not(.open) {
+  display: none !important;
+}
+.app.focus-mode .work-card {
+  margin-left: 6px;
+}
+.app.focus-mode .toprow > * {
+  opacity: 0;
+  transition: opacity 200ms ease;
+}
+.app.focus-mode .toprow:hover > *,
+.app.focus-mode .toprow:focus-within > * {
+  opacity: 1;
+}
+/* In a tab of several panes, only the pane in use. */
+.app.focus-mode .split-cell:not(:has(.pane.focused)),
+.app.focus-mode .sash {
+  display: none;
+}
+.app.focus-mode .split-cell:has(.pane.focused) {
+  flex: 1 1 0 !important;
+}
+.app.focus-mode .page-tail {
+  min-height: 55vh;
+}
+.app.focus-mode .block-row,
+.app.focus-mode .page-header {
+  transition: opacity 180ms ease;
+}
+.app.focus-mode .page:has(.block-row.fm-here) .block-row:not(.fm-here),
+.app.focus-mode .page:has(.block-row.fm-here) .page-header {
+  opacity: 0.3;
+}
+
+/* ---------- accent colour (Settings ▸ Appearance) ----------
+   The app's blue is the accent with no choice made. Each other choice has a
+   colour for light and one for dark, a little lighter so that it reads on
+   the grey of dark mode. The meeting pad is a window of its own with no
+   .app around it: it is named here too (it stayed blue). */
+:is(.app, .padwin)[data-accent='grey'] { --accent: #636a71; --accent-soft: rgba(99, 106, 113, 0.15); }
+:is(.app, .padwin)[data-accent='green'] { --accent: #2f8458; --accent-soft: rgba(47, 132, 88, 0.14); }
+:is(.app, .padwin)[data-accent='orange'] { --accent: #bf6328; --accent-soft: rgba(191, 99, 40, 0.14); }
+:is(.app, .padwin)[data-accent='pink'] { --accent: #b84b80; --accent-soft: rgba(184, 75, 128, 0.14); }
+:is(.app, .padwin)[data-accent='purple'] { --accent: #7056bf; --accent-soft: rgba(112, 86, 191, 0.14); }
+:is(.app, .padwin).theme-dark[data-accent='grey'] { --accent: #a4aab0; --accent-soft: rgba(164, 170, 176, 0.2); }
+:is(.app, .padwin).theme-dark[data-accent='green'] { --accent: #5cb486; --accent-soft: rgba(92, 180, 134, 0.2); }
+:is(.app, .padwin).theme-dark[data-accent='orange'] { --accent: #e38c55; --accent-soft: rgba(227, 140, 85, 0.2); }
+:is(.app, .padwin).theme-dark[data-accent='pink'] { --accent: #e07ca9; --accent-soft: rgba(224, 124, 169, 0.2); }
+:is(.app, .padwin).theme-dark[data-accent='purple'] { --accent: #a08ae4; --accent-soft: rgba(160, 138, 228, 0.2); }
+@media (prefers-color-scheme: dark) {
+  :is(.app, .padwin).theme-system[data-accent='grey'] { --accent: #a4aab0; --accent-soft: rgba(164, 170, 176, 0.2); }
+  :is(.app, .padwin).theme-system[data-accent='green'] { --accent: #5cb486; --accent-soft: rgba(92, 180, 134, 0.2); }
+  :is(.app, .padwin).theme-system[data-accent='orange'] { --accent: #e38c55; --accent-soft: rgba(227, 140, 85, 0.2); }
+  :is(.app, .padwin).theme-system[data-accent='pink'] { --accent: #e07ca9; --accent-soft: rgba(224, 124, 169, 0.2); }
+  :is(.app, .padwin).theme-system[data-accent='purple'] { --accent: #a08ae4; --accent-soft: rgba(160, 138, 228, 0.2); }
+}
+
+/* ---------- locked pages (lock.rs) ---------- */
+.modal.lock-modal {
+  width: min(440px, 92vw);
+}
+.lock-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 24px 16px;
+}
+.lock-problem {
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+.lock-warning {
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-3);
+}
+.lock-foot {
+  justify-content: flex-end;
+}
+.page.locked .locked-name {
+  cursor: default;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.locked-page {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 28px 2px 0;
+}
+.locked-icon {
+  display: inline-flex;
+  color: var(--text-3);
+}
+.locked-title {
+  font-size: 15px;
+  color: var(--text-2);
+}
+.locked-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.locked-row .text-input {
+  width: 240px;
+}
+.text-input.shake {
+  animation: lock-shake 320ms var(--ease-out);
+}
+@keyframes lock-shake {
+  20% { transform: translateX(-6px); }
+  45% { transform: translateX(5px); }
+  70% { transform: translateX(-3px); }
+  100% { transform: translateX(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .text-input.shake {
+    animation: none;
+  }
 }

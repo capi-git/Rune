@@ -798,12 +798,57 @@ fn clip(s: &str) -> &str {
     }
 }
 
+/// Whether a page is too long to go to the AI whole: it is then given cut
+/// (see `clip`), and the AI and the person are both told so. (Cut in
+/// silence, a summary left out the end of a long meeting with no word.)
+pub fn is_cut(page_md: &str) -> bool {
+    page_md.char_indices().nth(MAX_CONTEXT_CHARS).is_some()
+}
+
+/// The last part of a long page, from the start of a line: to write on from
+/// where a page ends, the AI needs its end. (Given the first part, it wrote
+/// on from the middle of the page.)
+fn clip_end(s: &str) -> &str {
+    let over = s.chars().count().saturating_sub(MAX_CONTEXT_CHARS);
+    if over == 0 {
+        return s;
+    }
+    let cut = s.char_indices().nth(over).map_or(0, |(i, _)| i);
+    // The first line from there that is not inside a code block and is no
+    // row of a table: a part that began in the middle of one gave the AI
+    // code as words, or rows with no headings.
+    let (mut at, mut in_code) = (0, false);
+    for line in s.split_inclusive('\n') {
+        let t = line.trim_start();
+        if at >= cut && !in_code && !t.starts_with('|') && !t.starts_with("<!--") && !s[at..].trim().is_empty() {
+            return &s[at..];
+        }
+        if t.starts_with("```") {
+            in_code = !in_code;
+        }
+        at += line.len();
+    }
+    // (The page ends in one long code block or table: from the start of a line of it.)
+    let tail = &s[cut..];
+    match tail.split_once('\n') {
+        Some((_, lines)) if !lines.trim().is_empty() => lines,
+        _ => tail,
+    }
+}
+
+/// Said to the AI under a page that was cut.
+const CUT_NOTE: &str = "\n\n(The page is too long to give whole: this is only its first part. What comes after it is not here.)";
+const CUT_NOTE_TOOLS: &str = "\n\n(The page is too long to give whole: this is only its first part. When the request needs what comes after it, read the whole page with the read_page tool first.)";
+const CUT_NOTE_END: &str = "\n\n(The page is too long to give whole: this is only its last part.)";
+
 /// A request on a page, for a run with the tools of Rune: the page with
 /// its name and id, the time now, the request, and how to reply.
 pub fn build_agent_messages(page_id: &str, title: &str, page_md: &str, prompt: &str, now: &str) -> Vec<ChatMessage> {
     let ChatMessage { content: plain, .. } = build_messages(&AiAction::Ask, page_md, "", prompt).pop().unwrap_or_else(|| ChatMessage::user(""));
     let (before, how) = plain.split_once("\n\nHow to reply.").unwrap_or((plain.as_str(), ""));
     let before = before.replacen("Here is the page I'm working on:", &format!("Here is the page I'm working on. Its name is \"{}\" and its id is {page_id}.", title.trim()), 1);
+    // (A page that was cut: with the tools, the rest of it can be read.)
+    let before = if is_cut(page_md) { before.replacen(&format!("\n</page>{CUT_NOTE}"), &format!("\n</page>{CUT_NOTE_TOOLS}"), 1) } else { before };
     let task = format!(
         "{before}\n\nHow to reply.{how} \
          That is for this page and its sub-pages only: do not use the tools to change this page. \
@@ -815,10 +860,16 @@ pub fn build_agent_messages(page_id: &str, title: &str, page_md: &str, prompt: &
 }
 
 pub fn build_messages(action: &AiAction, page_md: &str, block_text: &str, prompt: &str) -> Vec<ChatMessage> {
-    let page = clip(page_md);
+    let cut = is_cut(page_md);
+    let page = if cut && *action == AiAction::Continue { clip_end(page_md) } else { clip(page_md) };
+    let note = match (cut, action) {
+        (false, _) => "",
+        (true, AiAction::Continue) => CUT_NOTE_END,
+        (true, _) => CUT_NOTE,
+    };
     let task = match action {
         AiAction::Ask => format!(
-            "Here is the page I'm working on:\n\n<page>\n{page}\n</page>\n\nRequest: {}\n\n\
+            "Here is the page I'm working on:\n\n<page>\n{page}\n</page>{note}\n\nRequest: {}\n\n\
              How to reply. If the request asks to change what is already on the page (edit, rewrite, \
              shorten, extend, reorder, correct, update, or take out a part of it), reply with a first \
              line that is exactly `{REVISE_MARK}`, and after it the whole page as it must be after the \
@@ -841,13 +892,13 @@ pub fn build_messages(action: &AiAction, page_md: &str, block_text: &str, prompt
         ),
         AiAction::Continue => format!(
             "Continue writing this page naturally from where it ends, in the same voice. \
-             Return only the new text.\n\n<page>\n{page}\n</page>"
+             Return only the new text.\n\n<page>\n{page}\n</page>{note}"
         ),
         AiAction::Summarize => format!(
-            "Summarize this page: one short paragraph, then the key points as a bulleted list.\n\n<page>\n{page}\n</page>"
+            "Summarize this page: one short paragraph, then the key points as a bulleted list.\n\n<page>\n{page}\n</page>{note}"
         ),
         AiAction::ActionItems => format!(
-            "List the action items in this page as to-do items. If there are none, suggest sensible next steps as to-do items.\n\n<page>\n{page}\n</page>"
+            "List the action items in this page as to-do items. If there are none, suggest sensible next steps as to-do items.\n\n<page>\n{page}\n</page>{note}"
         ),
         AiAction::Improve => format!("Rewrite this text to improve clarity and flow while keeping its meaning. Return only the rewritten text.\n\n{block_text}"),
         AiAction::FixGrammar => format!("Fix spelling and grammar in this text. Change nothing else. Return only the corrected text.\n\n{block_text}"),
@@ -1020,6 +1071,56 @@ mod tests {
         assert!(msgs[1].content.contains("- Paris") && msgs[1].content.contains("What's missing?"));
         let msgs = build_messages(&AiAction::FixGrammar, "ignored", "teh cat", "");
         assert!(msgs[1].content.ends_with("teh cat"));
+    }
+
+    #[test]
+    fn a_page_that_is_cut_for_the_ai_says_so() {
+        // A long page: 3,000 lines, each with its number.
+        let long: String = (1..=3000).map(|i| format!("Line number {i}\n")).collect();
+        assert!(is_cut(&long) && !is_cut("# Trip\n\n- Paris"));
+        let said = |action: AiAction, page: &str| build_messages(&action, page, "", "what is the last line?").pop().unwrap().content;
+        // A page that fits is given whole, with no word about a cut.
+        for action in [AiAction::Ask, AiAction::Summarize, AiAction::ActionItems, AiAction::Continue] {
+            assert!(!said(action, "# Trip\n\n- Paris").contains("too long to give whole"));
+        }
+        // A question, a summary, the action items: the first part, and the AI is told that it is only that.
+        for action in [AiAction::Ask, AiAction::Summarize, AiAction::ActionItems] {
+            let task = said(action.clone(), &long);
+            assert!(task.contains("Line number 1\n") && !task.contains("Line number 3000"), "{action:?}");
+            assert!(task.contains("</page>\n\n(The page is too long to give whole: this is only its first part."), "{action:?}");
+        }
+        // "Continue writing" goes on from the end of the page: it gets the last part, from the start of a line.
+        let task = said(AiAction::Continue, &long);
+        assert!(task.contains("<page>\nLine number ") && task.contains("Line number 3000\n\n</page>") && !task.contains("Line number 1\n"), "{}", &task[..200]);
+        assert!(task.ends_with("(The page is too long to give whole: this is only its last part.)"));
+        // With the tools of Rune, the AI is told that it can read the rest.
+        let with_tools = build_agent_messages("abc", "Log", &long, "what is the last line? [[reply: ok]]", "2026-11-10 17:30, Tuesday").pop().unwrap().content;
+        assert!(with_tools.contains("read the whole page with the read_page tool") && !with_tools.contains("What comes after it is not here"), "{}", &with_tools[with_tools.len() - 400..]);
+        // (The stand-in AI of a test still finds the request after the page.)
+        assert_eq!(with_tools.split("\n\nHow to reply.").count(), 2);
+        let short = build_agent_messages("abc", "Log", "# Log", "x", "now").pop().unwrap().content;
+        assert!(!short.contains("too long to give whole"));
+    }
+
+    #[test]
+    fn the_last_part_of_a_long_page_does_not_begin_inside_a_code_block_or_a_table() {
+        let lines = |word: &str, n: usize| (1..=n).map(|i| format!("{word} line {i}\n")).collect::<String>();
+        let rows = |n: usize| (1..=n).map(|i| format!("| row {i} | value |\n")).collect::<String>();
+        // The place of the cut (24,000 characters from the end) is inside a code block.
+        let page = format!("{}```\n{}```\n{}", lines("Early", 600), lines("code", 1200), lines("Late", 1200));
+        let tail = clip_end(&page);
+        assert!(tail.starts_with("Late line 1\n") && !tail.contains("code line") && tail.ends_with("Late line 1200\n"), "{}", &tail[..60]);
+        // …and inside a table: the part begins under the table, not with rows that have no headings.
+        let page = format!("{}| Name | Value |\n| --- | --- |\n{}<!-- columns: text | text -->\n\n{}", lines("Early", 600), rows(1200), lines("Late", 1000));
+        let tail = clip_end(&page);
+        assert!(tail.trim_start().starts_with("Late line 1\n") && !tail.contains("| row"), "{}", &tail[..60]);
+        // In plain lines it begins at the start of a line, with all the room used.
+        let page = lines("Plain", 3000);
+        let tail = clip_end(&page);
+        assert!(tail.starts_with("Plain line ") && tail.chars().count() > MAX_CONTEXT_CHARS - 40 && tail.chars().count() <= MAX_CONTEXT_CHARS);
+        // A page that ends in one long code block still gives its end.
+        let page = format!("{}```\n{}", lines("Early", 600), lines("code", 3000));
+        assert!(clip_end(&page).starts_with("code line ") && clip_end(&page).ends_with("code line 3000\n"));
     }
 
     #[test]

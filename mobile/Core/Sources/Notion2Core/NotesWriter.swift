@@ -29,7 +29,7 @@ public enum NotesWriterError: Error, LocalizedError, Equatable {
 public enum NotesWriter {
     /// The form of the notes file this app writes (the Mac's `store::SCHEMA`
     /// it was built for). A file with a greater mark is only read.
-    public static let schema: Int64 = 6
+    public static let schema: Int64 = 7
 
     /// Whether the notes at `store` may be changed here.
     public static func canEdit(store: URL, deviceID: String) -> Bool {

@@ -297,6 +297,11 @@ pub struct SlashState {
     pub block_id: Id,
     /// Visible UTF-16 offset of the "/" (or of the "@" or "[[").
     pub slash_at: usize,
+    /// Where what was typed for the menu ends: the caret, not the end of
+    /// the line. What is after it stays in the line when a choice is made.
+    pub end: usize,
+    /// The line was made by the "+" beside a line, with its "/".
+    pub added: bool,
     pub query: String,
     pub selected: usize,
     /// The menu lists pages to link to (after "@" or "[["), not commands.
@@ -316,8 +321,9 @@ pub enum Popover {
     TabMenu { index: usize },
     SidebarMenu { page_id: Id },
     SpaceMenu,
-    /// The days to choose from for the due day of a to-do.
-    Due { block_id: Id },
+    /// The days to choose from for the due day of a to-do; `was` is the
+    /// day it had when the menu opened (see `set_reminder`).
+    Due { block_id: Id, was: Option<chrono::NaiveDate> },
     /// The menu of a table's column: its kind, its total, its unit.
     TableColumn { block_id: Id, column: usize },
     /// The menu of a table: its view, its columns, its filters.
@@ -354,6 +360,8 @@ pub enum Modal {
     AskNotes,
     /// Every open to-do of this space, by page.
     Todos,
+    /// A password for the page in front, to lock it (see lock.rs).
+    LockPage,
 }
 
 /// The keys that open the AI from any app (Settings ▸ AI ▸ Voice).
@@ -427,6 +435,41 @@ fn tab_space(tab: &Tab, pages: &HashMap<Id, Page>) -> Option<Id> {
     }
 }
 
+/// What a window keeps of its layout for the next start. The theme is one
+/// for all windows. The rest is the first window's alone: a second window
+/// read the folds of the sidebar, the recent pages and the zoom once, when
+/// it opened, and wrote that old copy back over the first window's at its
+/// next click on a tab.
+fn ui_settings(ui: &Ui, primary: bool) -> Vec<(&'static str, String)> {
+    let mut pairs = vec![("theme", ui.theme.as_str().to_string())];
+    if primary {
+        let json = |v: &dyn erased::Json| v.json();
+        pairs.extend([
+            ("expanded", json(&ui.expanded)),
+            ("recent", json(&ui.recent)),
+            ("sidebar_open", if ui.sidebar_open { "1".into() } else { "0".into() }),
+            ("sidebar_width", ui.sidebar_width.to_string()),
+            ("zoom", ui.zoom.to_string()),
+            ("tabs", serde_json::to_string(&(&ui.tabs, ui.active)).unwrap_or_default()),
+            ("space_tabs", serde_json::to_string(&ui.parked).unwrap_or_default()),
+        ]);
+    }
+    pairs
+}
+
+/// Spaces went: what was in them (pages in their Trash, events) is in
+/// `into` from now on, as the notes file has it (`Store::delete_space`).
+/// Without this a window kept the dead space on them and wrote it back at
+/// their next change: after a restart such a page was in no space at all.
+fn rehome(pages: &mut HashMap<Id, Page>, events: &mut HashMap<Id, Event>, gone: &[Id], into: &str) {
+    for p in pages.values_mut().filter(|p| gone.contains(&p.space_id)) {
+        p.space_id = into.to_string();
+    }
+    for e in events.values_mut().filter(|e| gone.contains(&e.space_id)) {
+        e.space_id = into.to_string();
+    }
+}
+
 /// Take pages that are gone out of saved tabs.
 fn forget_gone(tabs: &mut [Tab], pages: &HashMap<Id, Page>) {
     for pane in tabs.iter_mut().flat_map(|t| t.panes.iter_mut()) {
@@ -488,6 +531,9 @@ pub struct Ui {
     pub history: Option<Id>,
     /// What the voice box is open for.
     pub voice: VoiceFor,
+    /// Focus mode: only the page is shown, the lines around the caret are
+    /// pale, and the line being written stays near the middle. Not kept.
+    pub focus_mode: bool,
 }
 
 impl Ui {
@@ -501,6 +547,12 @@ impl Ui {
     /// Every open tab, also those of the spaces not in front.
     fn every_tab_mut(&mut self) -> impl Iterator<Item = &mut Tab> {
         self.tabs.iter_mut().chain(self.parked.values_mut().flat_map(|set| set.0.iter_mut()))
+    }
+    /// Whether a pane of any tab shows one of these pages or has one among
+    /// the pages Back and Forward step through.
+    fn remembers(&self, ids: &[Id]) -> bool {
+        let held = |r: &Route| matches!(r, Route::Page(id) if ids.contains(id));
+        self.tabs.iter().chain(self.parked.values().flat_map(|set| set.0.iter())).any(|t| t.panes.iter().any(|p| p.history.iter().any(held)))
     }
     /// Put the tabs in front away and bring up those of another space, as
     /// they were left. A space with no tabs gets one showing `first`; the
@@ -527,6 +579,28 @@ impl Ui {
         self.active = front.and_then(|id| kept.iter().position(|t| t.id == id)).unwrap_or(0);
         self.tabs = kept;
         fresh
+    }
+    /// Pages went (to the Trash, or for good): a tab that shows one goes
+    /// Home, and no pane keeps one in the pages Back and Forward step
+    /// through. (Back opened a page in the Trash again, to be typed in,
+    /// with no word that it was there.)
+    fn leave_pages(&mut self, ids: &[Id]) {
+        for tab in self.every_tab_mut() {
+            let gone: Vec<Id> =
+                tab.panes.iter().filter(|p| matches!(p.route(), Route::Page(id) if ids.contains(id))).map(|p| p.id.clone()).collect();
+            for pane in gone {
+                // The pane closes; a tab's only page goes Home instead.
+                if tab.take_pane(&pane).is_none() {
+                    if let Some(p) = tab.panes.iter_mut().find(|p| p.id == pane) {
+                        p.push(Route::Home);
+                    }
+                }
+            }
+            for pane in tab.panes.iter_mut() {
+                pane.forget(ids);
+            }
+        }
+        self.recent.retain(|r| !ids.contains(r));
     }
     /// The tab in front goes to another space, which comes to the front
     /// with that tab showing.
@@ -593,6 +667,35 @@ pub struct AiSession {
     pub part: Vec<Id>,
     /// A web address in the request that the person can ask the app to get.
     pub offer: Option<String>,
+    /// The page was too long to go to the AI whole (see `ai::is_cut`): the
+    /// card says so.
+    pub cut: bool,
+    /// The words of the line that a rewrite was asked for (Improve,
+    /// Shorter, Translate…): the reply takes the line's place only while
+    /// the line is still that.
+    pub line_sent: String,
+    /// After "Try again": how many of the changes in `did` are of the runs
+    /// before this one (they stay in the list, so that Undo takes them back too).
+    pub did_before: usize,
+}
+
+/// A page as the AI is given it (see `page_for_ai`), from these lines.
+fn page_as_given(pages: &HashMap<Id, Page>, page_id: &str, blocks: &[Block]) -> String {
+    let title = pages.get(page_id).map(|p| p.title.trim().to_string()).unwrap_or_default();
+    let body = crate::mcp::render_body(pages, blocks);
+    if title.is_empty() { body } else { format!("# {title}\n\n{body}") }
+}
+
+/// The picked part of a page as the AI is given it (see `part_for_ai`).
+fn part_as_given(pages: &HashMap<Id, Page>, blocks: &[Block], part: &[Id]) -> String {
+    let mut blocks: Vec<Block> = blocks.iter().filter(|b| part.contains(&b.id)).cloned().collect();
+    // (From the edge: the step in that the whole part has is put back
+    // when a reply takes its place, see `ai_revise`.)
+    let least = blocks.iter().map(|b| b.indent).min().unwrap_or(0);
+    for b in &mut blocks {
+        b.indent -= least;
+    }
+    crate::mcp::render_body(pages, &blocks)
 }
 
 // ---------------------------------------------------------------------------
@@ -695,10 +798,19 @@ pub fn filter_slash_for(query: &str, ai_on: bool) -> Vec<SlashItem> {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum Bridge {
-    /// The text of a block after typing (inline Markdown; raw for code).
-    Input { page: String, id: String, md: String },
+    /// The text of a block after typing (inline Markdown; raw for code),
+    /// and where the caret is in it (in the letters that show).
+    Input {
+        page: String,
+        id: String,
+        md: String,
+        #[serde(default)]
+        pos: Option<usize>,
+    },
     Enter { page: String, id: String, pos: usize, value: String },
     Backspace { page: String, id: String, value: String },
+    /// Delete (forward) with the caret at the very end of a block.
+    Delete { page: String, id: String, value: String },
     Paste { page: String, id: String, pos: usize, value: String, text: String },
     Undo,
     Redo,
@@ -881,6 +993,10 @@ pub struct AppState {
     pub player: Signal<Option<Playing>>,
     /// The calendars of this Mac, when the person has turned them on.
     pub mac_cal: Signal<MacCal>,
+    /// The notes page of each repeat of a repeating event, by the repeat's
+    /// id ("<event id>@<day>"), kept as the setting `REPEAT_PAGES` (see
+    /// `repeat::page_of`).
+    pub repeat_pages: Signal<HashMap<String, Id>>,
     /// The side the list of a space comes in from when the space changes:
     /// 1 from the right (a space after this one), -1 from the left, 0 none.
     pub space_slide: Signal<i8>,
@@ -1009,7 +1125,22 @@ pub struct Look {
     /// How much what's behind the window is blurred, in points (0 is sharp).
     pub blur: u8,
     pub tint: String,
+    /// The colour of links, rings and switches: "" for the app's blue, or
+    /// one of `ACCENTS`.
+    pub accent: String,
 }
+
+/// The accent colours a person can pick, besides the app's blue (""):
+/// (what it is called, its name in the settings and in style.css, the
+/// colour of its swatch). Soft and few, so the app stays calm.
+pub const ACCENTS: [(&str, &str, &str); 6] = [
+    ("Blue", "", "#2f7ae5"),
+    ("Grey", "grey", "#6b7279"),
+    ("Green", "green", "#3c8f62"),
+    ("Orange", "orange", "#c96d33"),
+    ("Pink", "pink", "#c2568a"),
+    ("Purple", "purple", "#7a5fc6"),
+];
 
 impl Look {
     pub fn load() -> Look {
@@ -1017,6 +1148,7 @@ impl Look {
             glass: store::setting("glass").and_then(|v| v.parse().ok()).map(|v: u8| v.min(100)).unwrap_or(glass::GLASS_DEFAULT),
             blur: blur_setting(store::setting("glass_radius").as_deref(), store::setting("glass_blur").as_deref()),
             tint: store::setting("glass_tint").filter(|t| valid_hex(t)).unwrap_or_default(),
+            accent: store::setting("accent").filter(|a| ACCENTS.iter().any(|(_, id, _)| id == a)).unwrap_or_default(),
         }
     }
 }
@@ -1067,6 +1199,38 @@ fn remember(ui: &mut Ui, pages: &HashMap<Id, Page>, route: &Route) {
             }
         }
     }
+}
+
+/// The names in a path typed in search ("Work / Plan" → Work, Plan); empty
+/// parts are left out.
+pub fn path_parts(typed: &str) -> Vec<String> {
+    typed.split('/').map(str::trim).filter(|p| !p.is_empty()).map(String::from).collect()
+}
+
+/// How far a path of page names goes in a space: the deepest page found,
+/// and the names after it that have no page yet. The first name may be a
+/// page anywhere in the space (one at the top first); each next name is a
+/// page inside the one before. Names are matched without regard to case.
+pub fn find_path(pages: &HashMap<Id, Page>, space: &str, names: &[String]) -> (Option<Id>, Vec<String>) {
+    let same = |p: &Page, name: &str| p.title.trim().to_lowercase() == name.to_lowercase();
+    let mut parent: Option<Id> = None;
+    for (i, name) in names.iter().enumerate() {
+        let found = if i == 0 {
+            roots_in(pages, space).into_iter().find(|p| same(p, name)).or_else(|| {
+                let mut any: Vec<&Page> =
+                    pages.values().filter(|p| !p.trashed && p.row_of.is_none() && p.space_id == space && same(p, name)).collect();
+                any.sort_by_key(|p| p.created_at);
+                any.first().map(|p| (*p).clone())
+            })
+        } else {
+            children_of(pages, parent.as_deref()).into_iter().find(|p| same(p, name))
+        };
+        match found {
+            Some(p) => parent = Some(p.id),
+            None => return (parent, names[i..].to_vec()),
+        }
+    }
+    (parent, Vec::new())
 }
 
 /// Top-level pages of a space, not trashed, in sidebar order.
@@ -1358,6 +1522,30 @@ pub fn snippet_of(blocks: &[Block], most: usize) -> String {
     out
 }
 
+/// The tables that a change of a page from `current` to `target` puts back
+/// (Undo, Redo, an older version of the page). A table that was cut here
+/// and pasted in another page is the same block there (see `paste`): when
+/// a table with its id is in another page (`elsewhere`), the one put back
+/// is a copy, and gets an id of its own. With one id in two pages, the two
+/// tables shared the pages of their rows. Returns the ids of the others,
+/// which come back as the blocks they were, and for each copy the id it
+/// had and the id it has now.
+pub fn tables_put_back(target: &mut [Block], current: &[Block], elsewhere: impl Fn(&str) -> bool) -> (Vec<Id>, Vec<(Id, Id)>) {
+    let (mut back, mut copies) = (Vec::new(), Vec::new());
+    for b in target.iter_mut().filter(|b| b.kind == BlockKind::Table) {
+        if current.iter().any(|c| c.id == b.id) {
+            continue;
+        }
+        if elsewhere(&b.id) {
+            let was = std::mem::replace(&mut b.id, new_id());
+            copies.push((was, b.id.clone()));
+        } else {
+            back.push(b.id.clone());
+        }
+    }
+    (back, copies)
+}
+
 /// Put text on the Mac's clipboard. A test run keeps the person's clipboard
 /// as it is: the text goes where the test can read it instead.
 fn set_clipboard(text: String) -> Result<(), String> {
@@ -1409,6 +1597,17 @@ pub fn pages_to_link(pages: &HashMap<Id, Page>, space: &str, here: &str, query: 
     found
 }
 
+/// For an export of every page: a locked page that is open (its lines are
+/// in plain in the window) goes out as one that is shut does, as the one
+/// line that says it is locked. Its file held its lines in plain before.
+pub fn shut_open_pages(blocks: &mut HashMap<Id, Vec<Block>>, open: &[Id]) {
+    for id in open {
+        if let Some(lines) = blocks.get_mut(id) {
+            *lines = vec![Block::new(BlockKind::Locked, "")];
+        }
+    }
+}
+
 /// The pages that link to a page: with a link in their text, or with a line
 /// that is a link to it. The page it is inside is left out when that page
 /// only lists it as one of its pages (its place is shown in the bar already).
@@ -1418,7 +1617,8 @@ pub fn linked_from(pages: &HashMap<Id, Page>, blocks: &HashMap<Id, Vec<Block>>, 
         .values()
         .filter(|p| !p.trashed && p.id != id)
         .filter(|p| {
-            blocks.get(&p.id).is_some_and(|bs| {
+            // (What a locked page holds is not told, also while it is open.)
+            blocks.get(&p.id).filter(|bs| !crate::lock::hides(bs, &p.id)).is_some_and(|bs| {
                 bs.iter().any(|b| match b.kind {
                     BlockKind::PageLink => b.target.as_deref() == Some(id) && parent.as_deref() != Some(p.id.as_str()),
                     BlockKind::Code => false,
@@ -1657,7 +1857,9 @@ pub fn page_graph(pages: &HashMap<Id, Page>, blocks: &HashMap<Id, Vec<Block>>, s
         if let Some(parent) = p.parent_id.as_deref().and_then(|id| at.get(id)).filter(|_| p.row_of.is_none()) {
             join(*parent, i, true);
         }
-        for b in blocks.get(&p.id).map(|b| b.as_slice()).unwrap_or_default() {
+        // (What a locked page links to is not shown, also while it is open:
+        // as in "Linked from".)
+        for b in blocks.get(&p.id).filter(|bs| !crate::lock::hides(bs, &p.id)).map(|b| b.as_slice()).unwrap_or_default() {
             match b.kind {
                 BlockKind::Code => {}
                 // The line a sub-page has in its parent is the nesting, not a link.
@@ -1757,8 +1959,10 @@ thread_local! {
 }
 thread_local! {
     /// The blocks last copied or cut as a whole, with the words that went
-    /// to the clipboard for them (see `copy_picked` and `paste`).
-    static COPIED_BLOCKS: std::cell::RefCell<Option<(String, Vec<Block>)>> = const { std::cell::RefCell::new(None) };
+    /// to the clipboard for them, whether they were cut, and the pages of
+    /// the rows of cut tables that the cut put in the Trash (see
+    /// `copy_picked` and `paste`).
+    static COPIED_BLOCKS: std::cell::RefCell<Option<(String, Vec<Block>, bool, Vec<Id>)>> = const { std::cell::RefCell::new(None) };
 }
 thread_local! {
     /// The picture put last: (page, block), for several dropped together.
@@ -1774,6 +1978,76 @@ thread_local! {
 thread_local! {
     /// The listener that is running, if the app is listening to a meeting.
     static LISTENER: std::cell::RefCell<Option<crate::listen::Listener>> = const { std::cell::RefCell::new(None) };
+    /// The window that the listener (`LISTENER`) writes for, and the page
+    /// it writes in (see `window_gone`).
+    static LISTENER_WINDOW: std::cell::RefCell<Option<(u64, Id)>> = const { std::cell::RefCell::new(None) };
+    /// The pages with words of a meeting that no notes were written from
+    /// (the app was closed while it listened, or the notes failed), each
+    /// with the line of its transcript where those words begin: the next
+    /// notes of such a page are written from them too. With no line (the
+    /// app was closed, or the window went): the part that was heard last.
+    /// (Kept by page alone, a part that had its notes was noted again.)
+    static HEARD_NOT_NOTED: std::cell::RefCell<Vec<(Id, Option<usize>)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Write down that a page has words with no notes, from this line of its
+/// transcript on (see `HEARD_NOT_NOTED`). What is known already stays.
+fn heard_not_noted(page: &str, from: Option<usize>) {
+    HEARD_NOT_NOTED.with(|h| {
+        let mut h = h.borrow_mut();
+        if !h.iter().any(|(p, _)| p == page) {
+            h.push((page.to_string(), from));
+        }
+    });
+}
+
+/// Whether the app listens, in any window (the listener is one for the app;
+/// each window knows only what it started itself).
+fn listener_runs() -> bool {
+    LISTENER.with(|l| l.borrow().is_some())
+}
+
+/// The window the app listens for and the page it listens in (a meeting,
+/// the notes of a video), if it listens. One for the app: a window's own
+/// `listening` says only what that window started.
+pub fn listening_in() -> Option<(u64, Id)> {
+    LISTENER_WINDOW.with(|w| w.borrow().clone())
+}
+
+#[cfg(test)]
+pub fn listen_for_test(at: Option<(u64, Id)>) {
+    LISTENER_WINDOW.with(|w| *w.borrow_mut() = at);
+}
+
+/// What a window makes of the list of spaces that another window sends: the
+/// list to show, and the spaces that are gone. The sender's list can be
+/// older than the notes file (a space came later from another device, and
+/// only a window opened after that knows it). A space counts as gone only
+/// when the notes file does not have it either, and a space that the file
+/// has stays in the list. Told by the sender's list alone, the pages of
+/// such a space were put in the first space, and the next save wrote that.
+/// (`in_file`: none when the file could not be read; nothing is gone then.)
+fn spaces_told(mine: &[Space], told: Vec<Space>, in_file: Option<Vec<Space>>) -> (Vec<Space>, Vec<Id>) {
+    let has = |list: &[Space], id: &str| list.iter().any(|s| s.id == id);
+    let kept: Vec<Space> = in_file.as_deref().unwrap_or(mine).iter().filter(|s| !has(&told, &s.id)).cloned().collect();
+    let mut list = told;
+    if !kept.is_empty() {
+        list.extend(kept);
+        list.sort_by(|a, b| a.position.total_cmp(&b.position));
+    }
+    let gone = mine.iter().filter(|s| !has(&list, &s.id)).map(|s| s.id.clone()).collect();
+    (list, gone)
+}
+
+/// A window goes. When the listener wrote for that window, it ends now: the
+/// tasks that read what it hears went with the window, and the microphone
+/// stayed on, unread, until the app quit. The words heard since the last
+/// write to the page (20 seconds at the most) and the notes are not
+/// written; the next notes of that page are written from all its transcript.
+pub fn window_gone(key: u64) {
+    let Some((_, page)) = LISTENER_WINDOW.with(|w| w.borrow_mut().take_if(|(of, _)| *of == key)) else { return };
+    LISTENER.with(|l| l.borrow_mut().take());
+    heard_not_noted(&page, None);
 }
 
 thread_local! {
@@ -1807,6 +2081,11 @@ struct MeetingNotes {
     /// A draft that is still empty goes when the person says no, or when
     /// the meeting ends: no page is kept for a call they did not want notes of.
     draft: bool,
+    /// Another program that this meeting is in (it passed there from a
+    /// browser, or its notes were made by hand and the call was noticed
+    /// then). The notes end when none of their programs is in the call
+    /// (see `meeting_left`). Not written down between runs.
+    also: Option<&'static str>,
 }
 
 /// The folder for the recorder of the sidebar swipe, and its two files: the
@@ -1876,21 +2155,43 @@ fn same_meeting(of: Option<&(Id, i64, i64)>, quiet_since: i64, now: i64, on_now:
 /// new page, came again and again.)
 fn still_declined(declined: Option<&Declined>, app: &str, now: i64, on_now: Option<&(Id, i64, i64)>) -> bool {
     declined.is_some_and(|d| {
+        // A refused call that was seen a moment ago only paused: it is not
+        // "the next meeting" when an event of the calendar starts about
+        // now. (Each pause of a voice channel that is on all day, near any
+        // event, asked again under the event's name.) A call that ended
+        // some minutes ago is over: a meeting of the calendar that starts
+        // in the same program then is the next one, and asks.
+        // A call that went on long after the no (that voice channel) can
+        // be silent for some minutes and still be the same call. (Silent
+        // for three minutes before an event, it asked again.)
+        let went_on = d.seen - d.said >= SAME_MEETING_MS;
+        let paused = d.app.as_deref() == Some(app) && now - d.seen < if went_on { LONG_PAUSE_MS } else { PAUSE_MS };
+        // The event of the no (the call was refused under its name) keeps
+        // the no only for the call that was refused: one that was still
+        // seen when the event had started, or that only paused. (A call
+        // refused ten minutes before an event, and over before it, kept the
+        // meeting of that event itself from asking, for the whole event.)
+        let of = d.of.as_ref().filter(|(_, start, _)| d.seen >= *start || paused);
         d.app.as_deref().map_or(true, |of| of == app)
             // (One no does not close a program for the day: calls that follow
             // each other closely each kept it alive, with no end.)
             && now - d.said < DECLINED_MOST_MS
             // Its own event is not "the next meeting": a meeting of the
             // calendar that was refused stays refused while its event is on.
-            && same_meeting(d.of.as_ref(), d.seen, now, on_now)
+            && same_meeting(of, d.seen, now, on_now.filter(|_| !paused))
     })
 }
 
 /// A no lasts this long at the most, however long its call goes on.
 const DECLINED_MOST_MS: i64 = 4 * when::HOUR;
+/// A refused call that comes back this soon after it was last seen only
+/// paused (a bad line, a quiet half minute), whatever the calendar says.
+const PAUSE_MS: i64 = 2 * when::MINUTE;
+/// The same, for a call that went on for twenty minutes or more after the no.
+const LONG_PAUSE_MS: i64 = 5 * when::MINUTE;
 
 /// The no to the notes of a call (see `MEETING_DECLINED`).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct Declined {
     /// The program of the call (none: notes made by hand).
     app: Option<String>,
@@ -1902,10 +2203,83 @@ struct Declined {
     of: Option<(Id, i64, i64)>,
 }
 
-/// Write down (or take away) the no to a call, for this run and the next.
-fn set_declined(declined: Option<Declined>) {
-    store::set_setting("meeting_declined", &declined.as_ref().and_then(|d| serde_json::to_string(d).ok()).unwrap_or_default());
-    MEETING_DECLINED.with(|d| *d.borrow_mut() = declined);
+/// The nos as the setting `meeting_declined` holds them: a list, one for
+/// each program. (It held one no: a meeting in a second program took the no
+/// to the first call away. That form is still read.)
+fn read_declined(text: &str) -> Vec<Declined> {
+    serde_json::from_str::<Vec<Declined>>(text).or_else(|_| serde_json::from_str::<Declined>(text).map(|d| vec![d])).unwrap_or_default()
+}
+
+/// The no to a call in this program, if there is one (a no to notes made
+/// by hand is for any program).
+fn no_for<'a>(nos: &'a [Declined], app: &str) -> Option<&'a Declined> {
+    nos.iter().find(|d| d.app.as_deref().map_or(true, |of| of == app))
+}
+
+/// The nos with this one: it takes the place of an earlier no to its
+/// program, and the nos to other programs stay (one for each program, so
+/// the list stays short).
+fn with_no(mut nos: Vec<Declined>, no: Declined) -> Vec<Declined> {
+    nos.retain(|d| d.app != no.app);
+    nos.push(no);
+    nos
+}
+
+/// The nos without the one to this program (and without one to notes made
+/// by hand): a new call in it asks again.
+fn without_no(mut nos: Vec<Declined>, app: &str) -> Vec<Declined> {
+    nos.retain(|d| d.app.as_deref().is_some_and(|of| of != app));
+    nos
+}
+
+/// Whether a call in this program was refused and seen a short time ago:
+/// that call can still be on, whether or not its no still holds.
+fn refused_lately(nos: &[Declined], app: &str, now: i64) -> bool {
+    nos.iter().any(|d| d.app.as_deref() == Some(app) && now - d.seen < SAME_MEETING_MS)
+}
+
+/// Whether a call that starts in `app` must leave the notes of the last
+/// meeting alone: they are of a meeting in another call program
+/// (`notes_app`), and the call in `app` is one the person refused a short
+/// time ago. (A refused voice call that came back after a pause took over
+/// the page of a meeting that had ended while its event was still on, and
+/// that meeting's program could not end those notes any more.)
+fn not_its_notes(nos: &[Declined], notes_app: Option<&str>, app: &str, now: i64) -> bool {
+    let browser = |a: &str| crate::meeting::call_app_named(a).is_some_and(|c| c.browser);
+    notes_app.is_some_and(|of| of != app && !browser(of) && !browser(app)) && refused_lately(nos, app, now)
+}
+
+/// The program that the notes of a meeting are bound to (besides the one
+/// they were made in) when a call in `app` carries them on: `app`, unless
+/// they are bound to another call program already. A browser gives way: its
+/// call passes to the call program. (Notes made from an event and bound to
+/// the meeting's program were bound anew to a voice call that took the
+/// microphone again: the meeting's end did not end them, and the app
+/// listened on into the voice call.)
+fn bound_to(also: Option<&'static str>, app: &'static str) -> &'static str {
+    let browser = |a: &str| crate::meeting::call_app_named(a).is_some_and(|c| c.browser);
+    also.filter(|of| !browser(of)).unwrap_or(app)
+}
+
+/// Whether the notes that are on are those of a call in another program
+/// than `app`: made for one (`notes_app`), or bound to one (`also`).
+fn notes_of_another(notes_app: Option<&str>, also: Option<&str>, app: &str) -> bool {
+    notes_app.is_some_and(|of| of != app) || also.is_some_and(|of| of != app)
+}
+
+fn declined() -> Vec<Declined> {
+    MEETING_DECLINED.with(|d| d.borrow().clone())
+}
+
+/// Write the nos down, for this run and the next.
+fn keep_declined(nos: Vec<Declined>) {
+    store::set_setting("meeting_declined", &if nos.is_empty() { String::new() } else { serde_json::to_string(&nos).unwrap_or_default() });
+    MEETING_DECLINED.with(|d| *d.borrow_mut() = nos);
+}
+
+/// Write down the no to a call.
+fn set_declined(no: Declined) {
+    keep_declined(with_no(declined(), no));
 }
 
 /// The meeting of the last notes, as it is written down between runs of the
@@ -1934,6 +2308,10 @@ thread_local! {
     /// The event copied with ⌘C in the calendar (see `paste_event`).
     static COPIED_EVENT: std::cell::RefCell<Option<Event>> = const { std::cell::RefCell::new(None) };
     static MEETING: std::cell::RefCell<Option<MeetingNotes>> = const { std::cell::RefCell::new(None) };
+    /// The "Meetings" heading that was put in a page of the person's own
+    /// for the line of a draft (the draft's page, the heading's block): it
+    /// goes with a draft that is refused.
+    static DRAFT_HEADING: std::cell::RefCell<Option<(Id, Id)>> = const { std::cell::RefCell::new(None) };
     /// The last press on empty time in the calendar: when, and the minute of
     /// the day under it, as the page script measured it.
     static CAL_PRESS: std::cell::Cell<Option<(i64, i64)>> = const { std::cell::Cell::new(None) };
@@ -1948,8 +2326,10 @@ thread_local! {
     /// notes made by hand), and when that call was last seen. It asks no more
     /// while that call is on, and not when it goes quiet for a while and
     /// comes back, or when the app is closed and opened during it (see
-    /// `still_declined`). Written down as the setting `meeting_declined`.
-    static MEETING_DECLINED: std::cell::RefCell<Option<Declined>> = const { std::cell::RefCell::new(None) };
+    /// `still_declined`). One no for each program: a meeting in a second
+    /// program does not end the no to the first call. Written down as the
+    /// setting `meeting_declined`.
+    static MEETING_DECLINED: std::cell::RefCell<Vec<Declined>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// The pages made as meeting notes (the newest few hundred), wherever they
@@ -1978,6 +2358,61 @@ fn remember_meeting_name(page: &str, name: &str) {
     names.push((page.to_string(), name.trim().to_string()));
     let from = names.len().saturating_sub(400);
     store::set_setting("meeting_names", &serde_json::to_string(&names[from..]).unwrap_or_default());
+}
+
+/// The setting with the notes page of each repeat of a repeating event (see
+/// `repeat::page_of`). The event's own record has one page for all its
+/// repeats, and is not changed for this: a Rune from before this setting
+/// does not read it, and makes its pages as it always did.
+const REPEAT_PAGES: &str = "repeat_event_pages";
+
+fn repeat_pages_kept() -> HashMap<String, Id> {
+    store::setting(REPEAT_PAGES).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
+/// Change the kept pages of repeats: the list is read again, changed and
+/// written, and given back as it is kept now. (Each window has a copy of
+/// the list to draw from. A window that wrote its copy took away what
+/// another window had put in the list since that copy was read: the page
+/// of a repeat was a page of no repeat after a drag in the other window.)
+fn change_repeat_pages_kept(change: impl FnOnce(&mut HashMap<String, Id>)) -> HashMap<String, Id> {
+    let was = repeat_pages_kept();
+    let mut now = was.clone();
+    change(&mut now);
+    if now != was {
+        store::set_setting(REPEAT_PAGES, &serde_json::to_string(&now).unwrap_or_default());
+    }
+    now
+}
+
+#[cfg(test)]
+mod repeat_pages_tests {
+    use super::*;
+
+    #[test]
+    fn a_change_of_the_pages_of_repeats_starts_from_the_list_as_it_is_kept() {
+        store::install(store::Store::open_in_memory().unwrap());
+        // Window 2 opens: its copy of the list has nothing.
+        let copy_of_window_2 = repeat_pages_kept();
+        assert!(copy_of_window_2.is_empty());
+        // In window 1 a page is made for a repeat of one event.
+        change_repeat_pages_kept(|own| {
+            own.insert("review@2026-11-10".into(), "page-1".into());
+        });
+        // In window 2 the repeats of another event move: its page goes to another day.
+        // (Window 2 wrote its own copy, changed: the entry of window 1 was gone.)
+        change_repeat_pages_kept(|own| {
+            own.insert("standup@2026-11-12".into(), "page-2".into());
+        });
+        let now = change_repeat_pages_kept(|own| {
+            if let Some(page) = own.remove("standup@2026-11-12") {
+                own.insert("standup@2026-11-13".into(), page);
+            }
+        });
+        assert_eq!(now.get("review@2026-11-10").map(String::as_str), Some("page-1"), "{now:?}");
+        assert_eq!(now.get("standup@2026-11-13").map(String::as_str), Some("page-2"));
+        assert_eq!(repeat_pages_kept(), now);
+    }
 }
 
 /// The page that the notes of the meetings of each name are kept in, as the
@@ -2159,6 +2594,7 @@ impl AppState {
             space,
             history: None,
             voice: VoiceFor::NewPage,
+            focus_mode: false,
         };
         AppState {
             pages: Signal::new(pages),
@@ -2191,6 +2627,7 @@ impl AppState {
             edited: Signal::new(HashMap::new()),
             player: Signal::new(None),
             mac_cal: Signal::new(MacCal::load()),
+            repeat_pages: Signal::new(repeat_pages_kept()),
             place_asks: Signal::new(store::setting("place_asks").and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()),
             place_now: Signal::new(None),
             cal_draft: Signal::new(None),
@@ -2336,27 +2773,17 @@ impl AppState {
                 one_home_tab(&mut set.0, &mut set.1);
             }
         }
-        let ui = self.ui.peek();
-        let json = |v: &dyn erased::Json| v.json();
-        let mut pairs: Vec<(&str, String)> = vec![
-            ("expanded", json(&ui.expanded)),
-            ("recent", json(&ui.recent)),
-            ("sidebar_open", if ui.sidebar_open { "1".into() } else { "0".into() }),
-            ("sidebar_width", ui.sidebar_width.to_string()),
-            ("zoom", ui.zoom.to_string()),
-            ("theme", ui.theme.as_str().to_string()),
-        ];
-        if self.win.primary {
-            pairs.push(("tabs", serde_json::to_string(&(&ui.tabs, ui.active)).unwrap_or_default()));
-            pairs.push(("space_tabs", serde_json::to_string(&ui.parked).unwrap_or_default()));
-        }
-        store::set_settings(&pairs);
+        store::set_settings(&ui_settings(&self.ui.peek(), self.win.primary));
     }
 
     /// Typing changed only this block's text: save just that.
     /// Save one table after a letter was typed in a cell: its cells and the
     /// words kept beside them, in one row.
     fn save_block_cells(&self, page_id: &str, block_id: &str) {
+        // (A locked page is sealed whole at each save.)
+        if crate::lock::is_open(page_id) {
+            return self.save_blocks(page_id);
+        }
         self.note_edit(page_id);
         let for_others = {
             let blocks = self.blocks.peek();
@@ -2372,6 +2799,9 @@ impl AppState {
     }
 
     fn save_block_text(&self, page_id: &str, block_id: &str) {
+        if crate::lock::is_open(page_id) {
+            return self.save_blocks(page_id);
+        }
         self.note_edit(page_id);
         let for_others = {
             let blocks = self.blocks.peek();
@@ -2399,8 +2829,9 @@ impl AppState {
                 ("glass", look.glass.to_string()),
                 ("glass_radius", look.blur.to_string()),
                 ("glass_tint", look.tint.clone()),
+                ("accent", look.accent.clone()),
             ]);
-            sync::others(self.win.key, SyncMsg::Look { glass: look.glass, blur: look.blur, tint: look.tint });
+            sync::others(self.win.key, SyncMsg::Look { glass: look.glass, blur: look.blur, tint: look.tint, accent: look.accent });
         }
     }
 
@@ -2671,8 +3102,28 @@ impl AppState {
         // The Mac ends an all-day event in its last day.
         let told_end = if was.all_day { end - 1000 } else { end };
         spawn_forever(async move {
-            match crate::maccal::move_event(&id, start, told_end).await {
-                // Its id holds its start, so the calendar is read again to have the new one.
+            let moved = crate::maccal::move_event(&id, start, told_end).await;
+            if moved.is_ok() {
+                // Its id holds its start: it has a new id now. Its notes
+                // page and its open panel go with it (left on the old id,
+                // the page was no more its page, and the panel shut).
+                let new = crate::maccal::moved_id(&id, start);
+                {
+                    let mut m = self.mac_cal.write();
+                    if let Some(e) = m.events.iter_mut().find(|e| e.id == id) {
+                        e.id = new.clone();
+                    }
+                    if let Some(page) = m.pages.remove(&id) {
+                        m.pages.insert(new.clone(), page);
+                        store::set_setting(MacCal::PAGES, &serde_json::to_string(&m.pages).unwrap_or_default());
+                    }
+                }
+                if self.cal.peek().selected.as_deref() == Some(id.as_str()) {
+                    self.cal.write().selected = Some(new);
+                }
+            }
+            match moved {
+                // (The calendar is read again: what the Mac made of the change is what shows.)
                 Ok(()) if !crate::maccal::stand_in_run() => self.read_mac_calendars(false),
                 Ok(()) => {}
                 Err(problem) => {
@@ -2719,7 +3170,28 @@ impl AppState {
 
     /// An event by its id: one of the app's own, or one of the Mac's.
     pub fn any_event(&self, id: &str) -> Option<Event> {
-        if id.starts_with(crate::maccal::PREFIX) { self.mac_event(id) } else { repeat::find(&self.events.peek(), id) }
+        if id.starts_with(crate::maccal::PREFIX) { self.mac_event(id) } else { repeat::find(&self.events.peek(), id).map(|e| self.with_own_page(e)) }
+    }
+
+    /// Change the pages of repeats (see `change_repeat_pages_kept`); this
+    /// window then draws from the list as it is kept.
+    fn change_repeat_pages(mut self, change: impl FnOnce(&mut HashMap<String, Id>)) {
+        let kept = change_repeat_pages_kept(change);
+        if *self.repeat_pages.peek() != kept {
+            self.repeat_pages.set(kept);
+        }
+    }
+
+    /// A repeat of a repeating event with the notes page that is its own
+    /// (see `repeat::page_of`); any other event as it is.
+    pub fn with_own_page(&self, mut e: Event) -> Event {
+        if let (series, Some(day)) = repeat::split_id(&e.id) {
+            if let Some(stored) = self.events.peek().get(series).filter(|s| s.repeat.is_some()) {
+                let pages = self.pages.peek();
+                e.page_id = repeat::page_of(stored, day, &self.repeat_pages.read(), |p| pages.get(p).filter(|p| !p.trashed).map(|p| when::date_of(p.created_at)));
+            }
+        }
+        e
     }
 
     pub fn select_event(mut self, id: Option<Id>) {
@@ -2762,6 +3234,15 @@ impl AppState {
     /// The page that holds an event's notes; it is made when there is none.
     fn event_page(mut self, id: &str) -> Option<Id> {
         let of_the_mac = id.starts_with(crate::maccal::PREFIX);
+        // A repeat has a page of its own, kept by the repeat's id. (Read
+        // again first: another window may have made its page a moment ago.)
+        let repeat_key = match repeat::split_id(id) {
+            (series, Some(day)) if !of_the_mac => self.events.peek().get(series).filter(|e| e.repeat.is_some()).map(|e| repeat::page_key(e, day)),
+            _ => None,
+        };
+        if repeat_key.is_some() {
+            self.change_repeat_pages(|_| {});
+        }
         let e = self.any_event(id)?;
         if let Some(pid) = e.page_id.as_ref().filter(|pid| self.pages.peek().get(*pid).is_some_and(|p| !p.trashed)) {
             return Some(pid.clone());
@@ -2798,6 +3279,14 @@ impl AppState {
             let mut m = self.mac_cal.write();
             m.pages.insert(id.to_string(), page.clone());
             store::set_setting(MacCal::PAGES, &serde_json::to_string(&m.pages).unwrap_or_default());
+        } else if let Some(key) = repeat_key {
+            self.change_repeat_pages(|own| {
+                own.insert(key, page.clone());
+            });
+            // (The other windows read the list again when an event comes to them.)
+            if let Some(series) = self.events.peek().get(repeat::split_id(id).0).cloned() {
+                sync::others(self.win.key, SyncMsg::Event(series));
+            }
         } else {
             self.update_event(id, |ev| ev.page_id = Some(page.clone()));
         }
@@ -2823,7 +3312,7 @@ impl AppState {
         // meeting watcher sees it start, it makes no second page.
         if MEETING.with(|m| m.borrow().as_ref().is_none_or(|n| n.page != page)) {
             let stamp = self.blocks.peek().get(&page).and_then(|b| b.first()).map(|b| b.id.clone()).unwrap_or_default();
-            MEETING.with(|m| *m.borrow_mut() = Some(MeetingNotes { page: page.clone(), stamp, started: now_ms(), ended: None, app: None, noticed: false, span: (!e.all_day).then_some((e.start, e.end)), event: (!e.all_day).then(|| e.id.clone()), padded: false, cut: false, draft: false }));
+            MEETING.with(|m| *m.borrow_mut() = Some(MeetingNotes { page: page.clone(), stamp, started: now_ms(), ended: None, app: None, noticed: false, span: (!e.all_day).then_some((e.start, e.end)), event: (!e.all_day).then(|| e.id.clone()), padded: false, cut: false, draft: false, also: None }));
             remember_meeting_page(&page);
             self.keep_meeting();
         }
@@ -2895,8 +3384,7 @@ impl AppState {
 
     /// "New event" button: the next hour today, for an hour.
     pub fn new_event_now(self) {
-        let now = now_ms();
-        let start = (now / when::HOUR + 1) * when::HOUR;
+        let start = when::next_hour(now_ms());
         self.new_event(start, start + when::HOUR, false);
     }
 
@@ -2912,7 +3400,7 @@ impl AppState {
         }
         let now = now_ms();
         let Some(read) = crate::quickadd::parse(text, now) else {
-            let start = (now / when::HOUR + 1) * when::HOUR;
+            let start = when::next_hour(now);
             let id = self.add_event(text, start, start + when::HOUR);
             let mut c = self.cal.write();
             c.anchor = when::date_of(start);
@@ -2941,9 +3429,14 @@ impl AppState {
         let (series, day) = repeat::split_id(id);
         let series = series.to_string();
         let mut follow = None;
+        // (A repeating event as it was: the notes pages of its repeats go with them.)
+        let mut repeated = None;
         {
             let mut events = self.events.write();
             let Some(e) = events.get_mut(&series) else { return };
+            if e.repeat.is_some() {
+                repeated = Some(e.clone());
+            }
             match day {
                 Some(d) if e.repeat.is_some() => {
                     let before = repeat::at(e, d);
@@ -2959,6 +3452,11 @@ impl AppState {
                     }
                 }
                 _ => {
+                    // (An all-day event that was made in another time zone:
+                    // the change is made to its days as they are read.)
+                    if e.all_day {
+                        *e = repeat::as_read(e);
+                    }
                     f(e);
                     keep_long_enough(e);
                 }
@@ -2970,7 +3468,24 @@ impl AppState {
                 self.cal.write().selected = Some(to);
             }
         }
+        if let Some(old) = repeated {
+            self.carry_repeat_pages(&old);
+        }
         self.save_event(&series);
+    }
+
+    /// A repeating event was changed (`old` is what it was): the notes
+    /// pages of its repeats go with their repeats (see `repeat::carry_pages`),
+    /// and when it repeats no more, the page of its first repeat is its page.
+    fn carry_repeat_pages(mut self, old: &Event) {
+        let Some(new) = self.events.peek().get(&old.id).cloned() else { return };
+        let mut of_the_first = None;
+        self.change_repeat_pages(|own| of_the_first = repeat::carry_pages(own, old, &new));
+        if let Some(page) = of_the_first.filter(|_| new.repeat.is_none()) {
+            if let Some(e) = self.events.write().get_mut(&old.id) {
+                e.page_id = Some(page);
+            }
+        }
     }
 
     /// An event was dragged in the calendar: move it by days and minutes,
@@ -3042,8 +3557,7 @@ impl AppState {
         };
         let length = (copied.end - copied.start).max(15 * when::MINUTE);
         let (start, end) = if copied.all_day {
-            let start = when::midnight(day);
-            (start, start + length)
+            repeat::whole_days_from(&copied, day)
         } else if minute >= 0 {
             let start = when::midnight(day) + minute.clamp(0, 24 * 60 - 15) * when::MINUTE;
             (start, start + length)
@@ -3076,6 +3590,8 @@ impl AppState {
     /// Empty time was dragged over: a slot of that length to type the
     /// name of the new event in.
     pub fn draw_event(mut self, day: &str, from: i64, to: i64) {
+        // (The press became a drag: its minute is for no click.)
+        CAL_PRESS.with(|p| p.set(None));
         let Some(day) = when::parse_date(day) else { return };
         let (from, to) = (from.clamp(0, 24 * 60 - 15), to.clamp(15, 24 * 60));
         if to <= from {
@@ -3091,9 +3607,10 @@ impl AppState {
         let Ok(rule) = repeat::parse(choice) else { return };
         let (series, _) = repeat::split_id(id);
         let series = series.to_string();
-        let first = {
+        let (first, old) = {
             let mut events = self.events.write();
             let Some(e) = events.get_mut(&series) else { return };
+            let old = e.repeat.is_some().then(|| e.clone());
             e.repeat = rule.map(|mut r| {
                 if let Some(old) = &e.repeat {
                     r.until = old.until.clone();
@@ -3102,8 +3619,11 @@ impl AppState {
                 r
             });
             e.updated_at = now_ms();
-            when::date_of(e.start)
+            (repeat::first_day(e), old)
         };
+        if let Some(old) = old {
+            self.carry_repeat_pages(&old);
+        }
         self.save_event(&series);
         // Select the event's first time, which is now a repeat (or not).
         let repeats = self.events.peek().get(&series).is_some_and(|e| e.repeat.is_some());
@@ -3125,6 +3645,8 @@ impl AppState {
         let series = series.to_string();
         self.events.write().remove(&series);
         store::with(|s| s.delete_event(&series));
+        // (The pages of its repeats stay, as pages; the list has no use for them.)
+        self.change_repeat_pages(|own| own.retain(|key, _| repeat::split_id(key).0 != series));
         sync::others(self.win.key, SyncMsg::EventRemoved(series));
         crate::notify::mark_dirty();
         self.select_event(None);
@@ -3149,7 +3671,8 @@ impl AppState {
         let (series, Some(day)) = repeat::split_id(id) else { return };
         let series = series.to_string();
         let Some(e) = self.events.peek().get(&series).cloned() else { return };
-        let mut one = repeat::at(&e, day);
+        // (With the notes page of this repeat, not the one page of an older Rune for all of them.)
+        let mut one = self.with_own_page(repeat::at(&e, day));
         let now = now_ms();
         one.id = new_id();
         one.repeat = None;
@@ -3157,6 +3680,10 @@ impl AppState {
         one.updated_at = now;
         let one_id = one.id.clone();
         self.events.write().insert(one_id.clone(), one);
+        // (Its page is on its own record now.)
+        self.change_repeat_pages(|own| {
+            own.remove(&repeat::page_key(&e, day));
+        });
         self.save_event(&one_id);
         if let Some(r) = self.events.write().get_mut(&series).and_then(|e| e.repeat.as_mut()) {
             r.skip.push(when::date_value(day));
@@ -3371,9 +3898,7 @@ impl AppState {
         }
         let into = others[0].id.clone();
         store::with(|s| s.delete_space(&id, &into));
-        for p in self.pages.write().values_mut().filter(|p| p.space_id == id) {
-            p.space_id = into.clone();
-        }
+        rehome(&mut self.pages.write(), &mut self.events.write(), std::slice::from_ref(&id), &into);
         self.spaces.set(others.clone());
         sync::others(self.win.key, SyncMsg::Spaces(others));
         self.set_modal(None);
@@ -3409,6 +3934,9 @@ impl AppState {
     /// installed Aven takes one, otherwise copied, with Aven brought to the
     /// front for a paste (see aven.rs).
     pub fn send_to_aven(self, page_id: &str) {
+        if self.locked_lines(page_id) {
+            return self.toast("A locked page is not given to other apps");
+        }
         let Some(app) = crate::aven::app() else {
             return self.toast("Aven is not on this Mac");
         };
@@ -3463,6 +3991,11 @@ impl AppState {
         // words that another program gets. One block that is no plain line
         // gets a line end, so that the paste comes to the app and is not
         // put in as typed words ("- [ ] Call Sam" became a bullet).
+        // One plain line gets none (in a title the line end was a Return,
+        // in a cell a space, in a terminal the Return key): the page
+        // script is told the words that are kept, and gives a paste of
+        // just those words in a line to the app (a line with a bold word
+        // showed its stars and backslashes).
         let blocks: Vec<Block> = {
             let picked = self.picked.peek().clone();
             let all = self.blocks.peek();
@@ -3471,7 +4004,17 @@ impl AppState {
         if !text.contains('\n') && blocks.iter().any(|b| b.kind != BlockKind::Text) {
             text.push('\n');
         }
-        COPIED_BLOCKS.with(|c| *c.borrow_mut() = Some((text.clone(), blocks)));
+        document::eval(&format!("window.__n2 && (window.__n2.keptCopy = {});", serde_json::to_string(&text).unwrap_or_default()));
+        // (The pages of rows that are not in the Trash now: the cut puts
+        // them there, and a paste of the table takes those out again, and
+        // not one that the person put there by hand before.)
+        let row_pages: Vec<Id> = if cut {
+            let pages = self.pages.peek();
+            blocks.iter().filter(|b| b.kind == BlockKind::Table).flat_map(|b| self.row_pages(&b.id).into_values()).filter(|id| pages.get(id).is_some_and(|p| !p.trashed)).collect()
+        } else {
+            Vec::new()
+        };
+        COPIED_BLOCKS.with(|c| *c.borrow_mut() = Some((text.clone(), blocks, cut, row_pages)));
         if let Err(e) = set_clipboard(text) {
             return self.toast(format!("Couldn't copy: {e}"));
         }
@@ -3736,7 +4279,11 @@ impl AppState {
         };
         crate::drawing::mark_shown(self.win.key, block_id, &data);
         self.history.write().set_data(block_id, &data);
-        store::with(|s| s.save_block_data(page_id, block_id, &data, now_ms()));
+        if crate::lock::is_open(page_id) {
+            store::with(|s| s.save_blocks_at(page_id, &blocks, now_ms()));
+        } else {
+            store::with(|s| s.save_block_data(page_id, block_id, &data, now_ms()));
+        }
         sync::others(self.win.key, SyncMsg::Blocks(page_id.to_string(), blocks));
     }
 
@@ -3753,6 +4300,17 @@ impl AppState {
     /// that spot, or paired with the tab it was let go on the middle of.
     pub fn drop_page_on_strip(mut self, page: &str, to: Option<&str>, mode: &str) {
         let route = Route::Page(page.to_string());
+        // A tab that shows the page already comes to the front, as at a
+        // click on the page (the drop made a second tab of it). Not when
+        // it is let go on the middle of another tab: that pairs the two.
+        let (shown, pairs) = {
+            let ui = self.ui.peek();
+            let free = |t: &Tab| t.pane_showing(&route).is_none();
+            (!ui.tabs.iter().all(free), mode == "split" && to.is_some_and(|id| ui.tabs.iter().any(|t| t.id == id && free(t))))
+        };
+        if shown && !pairs {
+            return self.open_page(page);
+        }
         {
             let pages = self.pages.peek();
             let mut guard = self.ui.write();
@@ -3825,6 +4383,22 @@ impl AppState {
         {
             let mut ui = self.ui.write();
             let tab = ui.tab_mut();
+            let id = id.map(str::to_string).unwrap_or_else(|| tab.focus.clone());
+            if tab.take_pane(&id).is_none() {
+                return;
+            }
+            ui.popover = None;
+        }
+        self.save_ui();
+    }
+
+    /// `close_pane` for any tab, not only the one in front: one part of a
+    /// tab of several pages was middle-clicked, or its page in front went
+    /// to a window of its own. The tab keeps its other pages.
+    pub fn close_pane_of(mut self, index: usize, id: Option<&str>) {
+        {
+            let mut ui = self.ui.write();
+            let Some(tab) = ui.tabs.get_mut(index) else { return };
             let id = id.map(str::to_string).unwrap_or_else(|| tab.focus.clone());
             if tab.take_pane(&id).is_none() {
                 return;
@@ -4213,6 +4787,42 @@ impl AppState {
         self.focus_title(&id);
     }
 
+    /// A new page by name, from search: "Plan" makes the page Plan; "Work/
+    /// Plan" makes Plan inside the page Work (made too if there is none).
+    /// The page opens with the caret on its first line.
+    pub fn new_page_at_path(self, typed: &str) {
+        let parts = path_parts(typed);
+        let Some((name, above)) = parts.split_last() else { return };
+        let (mut parent, missing) = {
+            let pages = self.pages.peek();
+            find_path(&pages, &self.ui.peek().space, above)
+        };
+        for title in missing.iter().chain(std::iter::once(name)) {
+            let id = self.create_page(parent.clone());
+            self.rename_page(&id, title.clone());
+            parent = Some(id);
+        }
+        let Some(id) = parent else { return };
+        self.open_in_new_tab(Route::Page(id.clone()));
+        if let Some(first) = self.blocks.peek().get(&id).and_then(|bs| bs.first()).map(|b| b.id.clone()) {
+            self.focus(Caret::end(&first));
+        }
+    }
+
+    /// Focus mode on or off (⌘., Escape leaves it). The page script keeps
+    /// the line being written near the middle while it is on.
+    pub fn toggle_focus_mode(mut self) {
+        let on = {
+            let mut ui = self.ui.write();
+            ui.focus_mode = !ui.focus_mode;
+            ui.focus_mode
+        };
+        document::eval(&format!("window.__n2 && window.__n2.focusMode({on})"));
+        if on {
+            self.toast("Focus mode. Esc leaves it.");
+        }
+    }
+
     pub fn rename_page(mut self, id: &str, title: String) {
         self.keep_version(id, None, false);
         let old = self.page_title(id);
@@ -4278,11 +4888,21 @@ impl AppState {
     }
 
     pub fn duplicate_page(mut self, id: &str) {
+        // (A copy would be plain, or sealed to the page it came from.)
+        if self.locked_lines(id) {
+            self.set_popover(None);
+            return self.toast("A locked page cannot be copied");
+        }
         let Some(original) = self.pages.peek().get(id).cloned() else { return };
         let mut copy = Page::new(original.parent_id.clone(), original.position + 0.5);
         copy.space_id = original.space_id.clone();
         copy.title = format!("{} (copy)", original.display_title());
         copy.icon = original.icon;
+        // (A copy came out bare: its cover, the place of the cover and the
+        // face of its title are part of the page.)
+        copy.cover = original.cover;
+        copy.cover_y = original.cover_y;
+        copy.font = original.font;
         let blocks: Vec<Block> = self
             .blocks
             .peek()
@@ -4365,26 +4985,7 @@ impl AppState {
 
     /// Tabs showing pages that are gone go back to Home.
     fn leave_pages(mut self, ids: &[Id]) {
-        {
-            let mut ui = self.ui.write();
-            for tab in ui.every_tab_mut() {
-                let gone: Vec<Id> = tab
-                    .panes
-                    .iter()
-                    .filter(|p| matches!(p.route(), Route::Page(id) if ids.contains(id)))
-                    .map(|p| p.id.clone())
-                    .collect();
-                for pane in gone {
-                    // The pane closes; a tab's only page goes Home instead.
-                    if tab.take_pane(&pane).is_none() {
-                        if let Some(p) = tab.panes.iter_mut().find(|p| p.id == pane) {
-                            p.push(Route::Home);
-                        }
-                    }
-                }
-            }
-            ui.recent.retain(|r| !ids.contains(r));
-        }
+        self.ui.write().leave_pages(ids);
         self.save_ui();
     }
 
@@ -4435,6 +5036,20 @@ impl AppState {
                 self.blocks.write().insert(page_id.to_string(), fresh.clone());
                 on_screen = Some(std::mem::replace(&mut before, fresh));
             }
+        }
+        // A locked page that is not open is one sealed line, and takes no
+        // line (that of a meeting whose notes are kept in it, say). The change is
+        // made on a copy, for what the caller wants back, and dropped. Made
+        // in the window, the store refused it but the window kept it: the
+        // page showed a "Locked page" line with the new lines under it and
+        // no password box, until the app was started again.
+        if crate::lock::sealed(&before).is_some() {
+            let mut copy = before.clone();
+            let result = f(&mut copy);
+            if copy != before {
+                self.tell_locked(page_id);
+            }
+            return result;
         }
         let (result, after) = {
             let mut all = self.blocks.write();
@@ -4532,7 +5147,9 @@ impl AppState {
         let Some(update) = self.update.peek().clone() else { return };
         // (The update starts the app again at once: not in the middle of a
         // meeting that is listened to, or of an AI's work on the notes.)
-        if self.listening.peek().is_some() {
+        // (In any window: the listening of another window was not seen,
+        // and the restart lost its last words and its notes.)
+        if self.listening.peek().is_some() || listener_runs() {
             return self.toast("Rune is listening to a meeting. Stop listening first, then update.");
         }
         if self.ai.peek().as_ref().is_some_and(|s| s.status == AiStatus::Streaming) {
@@ -4701,6 +5318,13 @@ impl AppState {
     pub fn open_voice(mut self, what: VoiceFor) {
         if !ai::has_ai() {
             return;
+        }
+        // The AI does this writing. On a locked page (also an open one) it
+        // would be given the picked words, or the words meant for the page.
+        if let VoiceFor::Into { page, .. } | VoiceFor::Edit { page, .. } = &what {
+            if self.locked_lines(page) {
+                return self.toast("The AI does not read locked pages");
+            }
         }
         let has_block = |page: &Id, block: &Id| self.blocks.peek().get(page).is_some_and(|bs| bs.iter().any(|b| &b.id == block));
         let ok = match &what {
@@ -4993,6 +5617,9 @@ impl AppState {
     /// speaker said. One step to undo.
     pub fn speech_edit(self, page: &str, block: &str, start: usize, end: usize, instruction: String) {
         let instruction = instruction.trim().to_string();
+        if self.locked_lines(page) {
+            return self.toast("The AI does not read locked pages");
+        }
         let Some(target) = self.blocks.peek().get(page).and_then(|bs| bs.iter().find(|b| b.id == block).cloned()) else { return };
         let selected = voice::selected_text(&target, start, end);
         if instruction.is_empty() || selected.trim().is_empty() {
@@ -5094,6 +5721,16 @@ impl AppState {
         if self.listening.peek().is_some() {
             return self.toast("Already listening");
         }
+        // (The transcript is kept in the page, and a locked page that is not
+        // open takes no lines.)
+        if self.blocks.peek().get(page).is_some_and(|bs| crate::lock::sealed(bs).is_some()) {
+            return self.notice("Open the page with its password first: the transcript is kept in it.");
+        }
+        // (One listener for the app: a second one, started in another
+        // window, ended the first, and then both windows stopped.)
+        if listener_runs() {
+            return self.toast("Rune is listening in another window. Stop it there first.");
+        }
         self.confirm_meeting(page);
         self.listen_offer.set(None);
         let (listener, mut heard) = match crate::listen::start(true) {
@@ -5104,6 +5741,7 @@ impl AppState {
             }
         };
         LISTENER.with(|l| *l.borrow_mut() = Some(listener));
+        LISTENER_WINDOW.with(|w| *w.borrow_mut() = Some((self.win.key, page.to_string())));
         self.pad_listens(page);
         let page = page.to_string();
         let started = now_ms();
@@ -5132,6 +5770,16 @@ impl AppState {
             // that says when.
             let (mut toggle, kept) = self.blocks.peek().get(&page).map(|bs| crate::listen::transcript_so_far(bs)).unwrap_or((None, 0));
             let again = (kept > 0).then(|| crate::listen::again_line(&when::time_label(started)));
+            // Words of this page that no notes were written from (the app
+            // was closed while it listened, or the notes failed): the notes
+            // at the end are written from them too. (They were written from
+            // the new part alone: the first part of the meeting had none.)
+            let earlier = match HEARD_NOT_NOTED.with(|h| h.borrow_mut().iter_mut().find(|(p, _)| *p == page).map(|(_, from)| *from.get_or_insert_with(|| self.blocks.peek().get(&page).map_or(0, |bs| crate::listen::last_part(bs))))) {
+                Some(from) => self.blocks.peek().get(&page).map(|bs| crate::listen::heard_before(bs, from)).unwrap_or_default(),
+                None => String::new(),
+            };
+            // (The lines as they were written the last time: see `keep_changes`.)
+            let mut shown = Vec::new();
             let mut written_at = now_ms();
             let mut problem = None;
             while let Some(event) = heard.next().await {
@@ -5155,7 +5803,7 @@ impl AppState {
                         // Into the page now and then, so nothing is lost if the app closes.
                         if now_ms() - written_at > 20_000 {
                             written_at = now_ms();
-                            self.write_transcript(&page, &mut toggle, kept, again.as_ref(), &transcript);
+                            self.write_transcript(&page, &mut toggle, kept, again.as_ref(), &transcript, &mut shown);
                         }
                     }
                     Heard::Note(message) => {
@@ -5170,12 +5818,19 @@ impl AppState {
                 }
             }
             LISTENER.with(|l| l.borrow_mut().take());
-            self.write_transcript(&page, &mut toggle, kept, again.as_ref(), &transcript);
+            LISTENER_WINDOW.with(|w| w.borrow_mut().take());
+            self.write_transcript(&page, &mut toggle, kept, again.as_ref(), &transcript, &mut shown);
             self.listening.set(None);
+            // (A locked page stayed open for its transcript: see `relock_unshown`.)
+            self.relock_unshown();
             // The page went to the Trash, or was deleted, while the app
             // listened: there is no page to write the notes in.
             if !self.pages.peek().get(&page).is_some_and(|p| !p.trashed) {
                 return self.toast("Stopped listening");
+            }
+            // (Until notes are written from these words: see `earlier`.)
+            if transcript.words() > 0 {
+                heard_not_noted(&page, Some(kept));
             }
             if let Some(message) = problem {
                 self.pad_problem(&page, &message);
@@ -5187,7 +5842,8 @@ impl AppState {
                 return self.notice("Nothing was heard, so there are no notes. Check the microphone, and that Rune may record audio (System Settings, Privacy & Security).");
             }
             // The AI writes the notes; without one, the transcript is what there is.
-            if !ai::has_ai() || transcript.words() < 12 {
+            // (What was heard into a locked page is not given to the AI.)
+            if !ai::has_ai() || transcript.words() + earlier.split_whitespace().count() < 12 || self.locked_lines(&page) {
                 self.pad_status(&page, "The transcript is in the page.", false);
                 return self.toast("The transcript is in the page");
             }
@@ -5195,7 +5851,7 @@ impl AppState {
             self.toast("Writing the notes…");
             let messages = vec![
                 ai::ChatMessage::system(crate::listen::NOTES),
-                ai::ChatMessage::user(format!("{}\n\n{}", when::today_for_ai(), crate::listen::for_ai(&transcript.text(), 120_000))),
+                ai::ChatMessage::user(format!("{}\n\n{}", when::today_for_ai(), crate::listen::for_ai(&crate::listen::all_heard(&earlier, &transcript.text()), 120_000))),
             ];
             let mut rx = ai::start(ai::Prefs::load(), messages);
             let mut reply = String::new();
@@ -5214,6 +5870,9 @@ impl AppState {
             }
             let notes = markdown::to_blocks(ai::clean_reply(&reply).0.trim());
             let added = if self.pages.peek().contains_key(&page) { self.edit_blocks(&page, move |bs| voice::fill_recap(bs, notes)) } else { 0 };
+            if added > 0 {
+                HEARD_NOT_NOTED.with(|h| h.borrow_mut().retain(|(p, _)| *p != page));
+            }
             match (error, added) {
                 (Some(e), 0) => {
                     self.pad_status(&page, "The transcript is in the page. The AI could not write the notes.", false);
@@ -5235,7 +5894,8 @@ impl AppState {
     /// toggle). `kept`: the lines that were in the toggle before this time of
     /// listening; they stay, and `again` (a line that says when the app
     /// started to listen again) comes between them and the new ones.
-    fn write_transcript(self, page: &str, toggle: &mut Option<Id>, kept: usize, again: Option<&Block>, transcript: &crate::listen::Transcript) {
+    /// `shown`: the lines as this wrote them the last time.
+    fn write_transcript(self, page: &str, toggle: &mut Option<Id>, kept: usize, again: Option<&Block>, transcript: &crate::listen::Transcript, shown: &mut Vec<String>) {
         let Some(mut blocks) = self.blocks.peek().get(page).cloned() else { return };
         let mut lines = transcript.blocks();
         if lines.is_empty() {
@@ -5244,6 +5904,7 @@ impl AppState {
         if let Some(again) = again {
             lines.insert(0, again.clone());
         }
+        crate::listen::keep_changes(&blocks, toggle.as_ref(), kept, shown, &mut lines);
         crate::listen::put_transcript(&mut blocks, toggle, kept, lines);
         self.set_blocks(page, blocks, true);
     }
@@ -5362,8 +6023,21 @@ impl AppState {
         let space = self.ui.peek().space.clone();
         let pages = self.pages.peek();
         let list: Vec<(&Page, String)> =
-            pages.values().filter(|p| p.space_id == space && !p.trashed).map(|p| (p, self.page_markdown(&p.id))).collect();
+            pages.values().filter(|p| p.space_id == space && !p.trashed && !self.locked_lines(&p.id)).map(|p| (p, self.page_markdown(&p.id))).collect();
         voice::relevant_pages(question, &list, 6)
+    }
+
+    /// Lines were about to be put into a locked page that is not open.
+    /// Nothing was written: the person is told why. (The same words are
+    /// told again only after two minutes: a transcript comes every 20 seconds.)
+    fn tell_locked(&self, page_id: &str) {
+        store::tell(&format!("“{}” is locked: nothing was written in it. Open it with its password first.", self.page_title(page_id)));
+    }
+
+    /// The page is locked (open or not): its lines are kept from the AI,
+    /// and from everything else that takes the words of a page out of it.
+    pub fn locked_lines(&self, page_id: &str) -> bool {
+        self.blocks.peek().get(page_id).is_some_and(|bs| crate::lock::hides(bs, page_id))
     }
 
     /// Keep an answer from Ask your notes as a page: the answer, then links
@@ -5549,7 +6223,9 @@ impl AppState {
         // ones: under that page's "Meetings" heading when it is a page of the
         // person's own (the heading is added the first time), so the links
         // stay together and apart from what else is on the page.
-        self.link_meeting_in(&parent, &id);
+        let heading = self.link_meeting_in(&parent, &id);
+        // (A heading made for the line of a draft goes with a draft that is refused.)
+        DRAFT_HEADING.with(|h| *h.borrow_mut() = heading.filter(|_| app.is_some()).map(|h| (id.clone(), h)));
         // When the meeting is over, the page asks which page to keep it in:
         // at the end of its event, or when the watcher says it ended, or
         // when listening stops. With none of those, after an hour.
@@ -5558,7 +6234,8 @@ impl AppState {
             Some(e) => remember_meeting_name(&id, e.display_title()),
             None => {
                 remember_slot_page(&id, day, minute, &plain_title);
-                if let crate::slots::Found::Keep(i) = slot {
+                // (Not for a draft, before the person says yes: see `confirm_meeting`.)
+                if let (crate::slots::Found::Keep(i), None) = (slot, app) {
                     crate::slots::seen(&mut slots, i, day, minute, &id, now);
                     save_meeting_slots(&slots);
                 }
@@ -5582,7 +6259,7 @@ impl AppState {
         if crate::listen::available() && self.listening.peek().is_none() {
             self.listen_offer.set(Some(id.clone()));
         }
-        MEETING.with(|m| *m.borrow_mut() = Some(MeetingNotes { page: id.clone(), stamp: stamp_id, started: now, ended: None, app, noticed: app.is_some(), span, event: event_id, padded: false, cut: false, draft }));
+        MEETING.with(|m| *m.borrow_mut() = Some(MeetingNotes { page: id.clone(), stamp: stamp_id, started: now, ended: None, app, noticed: app.is_some(), span, event: event_id, padded: false, cut: false, draft, also: None }));
         self.keep_meeting();
         // A draft is asked about by the pad: its page opens when the person
         // says yes (with no pad, the page itself asks).
@@ -5615,6 +6292,21 @@ impl AppState {
             return;
         }
         self.keep_meeting();
+        DRAFT_HEADING.with(|h| h.borrow_mut().take_if(|(of, _)| of == page));
+        // The meeting that comes at this time was seen again, now that the
+        // person wants its notes. (A call they refused counted too: its
+        // page, which went, was taken as the last notes of that meeting,
+        // and the name the person had given them was lost.)
+        if let Some((_, day, minute, _)) = slot_pages().into_iter().rev().find(|(p, ..)| p == page) {
+            let mut slots = meeting_slots();
+            let here = self.pages.peek().get(page).and_then(|p| p.parent_id.clone());
+            if let crate::slots::Found::Keep(i) = self.slot_found(&slots, day, minute) {
+                if here.as_deref() == Some(slots[i].home.as_str()) {
+                    crate::slots::seen(&mut slots, i, day, minute, page, now_ms());
+                    save_meeting_slots(&slots);
+                }
+            }
+        }
         let open = self.ui.peek().tabs.iter().any(|t| t.panes.iter().any(|p| *p.route() == Route::Page(page.to_string())));
         if !open && self.pages.peek().contains_key(page) {
             self.open_in_new_tab(Route::Page(page.to_string()));
@@ -5668,9 +6360,21 @@ impl AppState {
         let parent = self.pages.peek().get(page).and_then(|p| p.parent_id.clone());
         // (The link of a page is in `target`: looked for in `text`, the line
         // was never found, and each refused call left a dead line.)
+        // The "Meetings" heading that was made for this line, when nothing
+        // else came under it: it goes too. (Each refused call could leave
+        // an empty heading in a page of the person's own.)
+        let heading = DRAFT_HEADING.with(|h| h.borrow_mut().take_if(|(of, _)| of == page)).map(|(_, heading)| heading);
         if let Some(parent) = parent.filter(|p| self.blocks.peek().get(p).is_some_and(|bs| bs.iter().any(|b| b.kind == BlockKind::PageLink && b.target.as_deref() == Some(page)))) {
             let gone = page.to_string();
-            self.edit_blocks(&parent, move |bs| bs.retain(|b| !(b.kind == BlockKind::PageLink && b.target.as_deref() == Some(gone.as_str()))));
+            self.edit_blocks(&parent, move |bs| {
+                bs.retain(|b| !(b.kind == BlockKind::PageLink && b.target.as_deref() == Some(gone.as_str())));
+                if let Some(h) = heading.and_then(|id| bs.iter().position(|b| b.id == id)) {
+                    let untouched = bs[h].kind == BlockKind::Heading2 && bs[h].text == "Meetings";
+                    if untouched && bs.get(h + 1).is_none_or(|next| next.kind != BlockKind::PageLink) {
+                        bs.remove(h);
+                    }
+                }
+            });
         }
         // A tab that was opened for the draft alone goes with it (not to
         // the closed tabs: there is nothing in it to open again).
@@ -5725,7 +6429,7 @@ impl AppState {
         let went = self.drop_meeting_draft(page);
         if went {
             let now = now_ms();
-            set_declined(Some(Declined { app: app.map(str::to_string), seen: now, said: now, of }));
+            set_declined(Declined { app: app.map(str::to_string), seen: now, said: now, of });
         }
         went
     }
@@ -5775,51 +6479,88 @@ impl AppState {
 
     /// The meeting goes on (the watcher still sees it): written down now and
     /// then, so that the next run of the app knows until when it was seen.
-    pub fn meeting_seen(self) {
+    /// `apps`: the programs the call is in now.
+    pub fn meeting_seen(self, apps: &[&'static str]) {
         let due = MEETING.with(|m| m.borrow().as_ref().is_some_and(|n| n.ended.is_none()))
             && MEETING_KEPT.with(|at| now_ms() - at.get() >= 30_000);
         if due {
             MEETING_KEPT.with(|at| at.set(now_ms()));
             self.keep_meeting();
         }
-        // A call the person said no to goes on: seen now. (Not while there
-        // are notes of a meeting: then the call that is on is that meeting.)
+        // A call the person said no to goes on: seen now, while its program
+        // is in the call. (The no to a long call was not seen during the
+        // notes of a meeting in another program: after a meeting of twenty
+        // minutes it was forgotten, and the long call asked again.) A no to
+        // notes made by hand has no program: seen while there are no notes.
         let now = now_ms();
         let no_notes = MEETING.with(|m| m.borrow().as_ref().map_or(true, |n| n.ended.is_some()));
-        if let Some(d) = MEETING_DECLINED.with(|d| d.borrow().clone()).filter(|d| no_notes && now - d.seen >= 30_000 && now - d.seen < SAME_MEETING_MS) {
-            set_declined(Some(Declined { seen: now, ..d }));
+        let mut nos = declined();
+        let mut seen = false;
+        for d in nos.iter_mut().filter(|d| now - d.seen >= 30_000 && now - d.seen < SAME_MEETING_MS) {
+            if d.app.as_deref().map_or(no_notes, |of| apps.contains(&of)) {
+                d.seen = now;
+                seen = true;
+            }
+        }
+        if seen {
+            keep_declined(nos);
+        }
+    }
+
+    /// No call is on. A draft that nobody answered, of a call that ended
+    /// while the app was closed, goes when that call can no more be the
+    /// one that comes back. (It stayed, with its line and its question,
+    /// until the next call started.)
+    pub fn meeting_quiet(self) {
+        let now = now_ms();
+        let stale = MEETING.with(|m| {
+            m.borrow().as_ref().filter(|n| n.draft && n.ended.is_some_and(|end| now - end >= SAME_MEETING_MS) && !n.span.is_some_and(|(_, end)| now < end)).map(|n| n.page.clone())
+        });
+        if let Some(page) = stale {
+            self.drop_meeting_draft(&page);
         }
     }
 
     /// As the app opens: take up the meeting that an earlier run wrote down.
     /// One that was on then counts as quiet since the last time it was seen;
     /// a call that is noticed soon after is that meeting (see `same_meeting`).
-    /// Gives the program of a meeting that was on then, less than an hour
-    /// ago, for the watcher (`Watch::after`).
-    pub fn recall_meeting(self) -> Option<&'static str> {
-        let declined = store::setting("meeting_declined").and_then(|s| serde_json::from_str::<Declined>(&s).ok());
-        MEETING_DECLINED.with(|d| *d.borrow_mut() = declined.clone());
+    /// Gives the programs of the calls that were on then, for the watcher
+    /// (`Watch::after`): that of a meeting with notes, less than an hour
+    /// ago, first, then those of the calls that were refused.
+    pub fn recall_meeting(self) -> Vec<&'static str> {
+        let nos = read_declined(&store::setting("meeting_declined").unwrap_or_default());
+        MEETING_DECLINED.with(|d| *d.borrow_mut() = nos.clone());
         if MEETING.with(|m| m.borrow().is_some()) {
-            return None;
+            return Vec::new();
         }
-        // The call that was refused, if it can still be on: its sound alone
-        // says that it goes on (the person may be muted).
-        let refused = declined.filter(|d| now_ms() - d.seen < SAME_MEETING_MS).and_then(|d| d.app).and_then(|of| crate::meeting::call_app_named(&of)).map(|a| a.name);
-        let Some(k) = store::setting("meeting_last").and_then(|s| serde_json::from_str::<KeptMeeting>(&s).ok()) else { return refused };
+        // The calls that were refused, if they can still be on: their sound
+        // alone says that they go on (the person may be muted).
+        let mut were_on: Vec<&'static str> =
+            nos.iter().filter(|d| now_ms() - d.seen < SAME_MEETING_MS).filter_map(|d| d.app.as_deref().and_then(crate::meeting::call_app_named)).map(|a| a.name).collect();
+        let Some(k) = store::setting("meeting_last").and_then(|s| serde_json::from_str::<KeptMeeting>(&s).ok()) else { return were_on };
         let app = k.app.as_deref().and_then(crate::meeting::call_app_named).map(|a| a.name);
         let was_on = k.ended.is_none() && now_ms() - k.seen < when::HOUR;
         let (k_page, k_draft) = (k.page.clone(), k.draft);
         let was_on_lately = k.ended.is_none() && now_ms() - k.seen < SAME_MEETING_MS;
         let ended = Some(k.ended.unwrap_or(k.seen).max(k.started));
+        // The app was closed while it listened: the words it had heard are
+        // in the page, and no notes were written from them.
+        if k.listened && k.ended.is_none() {
+            heard_not_noted(&k.page, None);
+        }
         MEETING.with(|m| {
-            *m.borrow_mut() = Some(MeetingNotes { page: k.page, stamp: k.stamp, started: k.started, ended, app, noticed: k.noticed, span: k.span, event: k.event, padded: k.padded, cut: k.listened && k.ended.is_none(), draft: k.draft })
+            *m.borrow_mut() = Some(MeetingNotes { page: k.page, stamp: k.stamp, started: k.started, ended, app, noticed: k.noticed, span: k.span, event: k.event, padded: k.padded, cut: k.listened && k.ended.is_none(), draft: k.draft, also: None })
         });
         // A draft that nobody answered, of a call that cannot be on any
         // more: it goes (it stayed for good, with its line and its question).
         if k_draft && !was_on_lately {
             self.drop_meeting_draft(&k_page);
         }
-        app.filter(|_| was_on).or(refused)
+        if let Some(app) = app.filter(|_| was_on) {
+            were_on.retain(|a| *a != app);
+            were_on.insert(0, app);
+        }
+        were_on
     }
 
     /// A call is noticed. When it is the meeting whose notes were made last
@@ -5854,6 +6595,11 @@ impl AppState {
             let first_seen = same && !n.noticed;
             if same {
                 n.noticed = true;
+                // (The program the meeting is in now, when it is not the
+                // one its notes were made in: see `meeting_left`.)
+                if let Some(app) = app.filter(|_| app != n.app) {
+                    n.also = Some(bound_to(n.also, app));
+                }
             }
             same.then(|| (n.ended.take(), first_seen, n.page.clone(), std::mem::take(&mut n.cut), std::mem::take(&mut n.padded)))
         });
@@ -5922,11 +6668,18 @@ impl AppState {
         // The call the person said no to goes on: the watcher stays in it,
         // and the no stays fresh (`meeting_seen`). (It was taken as not that
         // call; after twenty minutes of mute the no was forgotten.)
+        // (Also while there are notes of a meeting in another call program:
+        // the sound of the refused call is not that meeting.)
         let now = now_ms();
-        let declined = MEETING_DECLINED.with(|d| d.borrow().clone());
-        let no_notes = MEETING.with(|m| m.borrow().as_ref().map_or(true, |n| n.ended.is_some() && now - n.ended.unwrap_or(now) >= SAME_MEETING_MS));
-        if no_notes && still_declined(declined.as_ref(), app, now, None) {
-            set_declined(declined.map(|d| Declined { seen: now, ..d }));
+        let no = no_for(&declined(), app).cloned();
+        let browser = |a: &str| crate::meeting::call_app_named(a).is_some_and(|c| c.browser);
+        let no_notes = MEETING.with(|m| {
+            m.borrow().as_ref().map_or(true, |n| (n.ended.is_some() && now - n.ended.unwrap_or(now) >= SAME_MEETING_MS) || n.app.is_some_and(|of| of != app && !browser(of)))
+        });
+        if no_notes && still_declined(no.as_ref(), app, now, None) {
+            if let Some(d) = no {
+                set_declined(Declined { seen: now, ..d });
+            }
             return true;
         }
         match MEETING.with(|m| m.borrow().as_ref().map(|n| n.ended.is_some())) {
@@ -5941,23 +6694,73 @@ impl AppState {
     /// call that is on has no notes (the person said no to it, or never
     /// answered: a voice channel of Discord that is on all day), this is a
     /// call of its own and asks; a meeting in Teams was not noticed then.
-    /// With notes, it is the same meeting passing to another program.
+    /// Notes of a browser's call, and notes made by hand a moment ago, are
+    /// the notes of this call: it passed to this program.
     pub fn meeting_joined(self, app: &'static str) {
         let browser = |a: &str| crate::meeting::call_app_named(a).is_some_and(|c| c.browser);
-        if browser(app) {
-            return;
+        let now = now_ms();
+        let on = MEETING.with(|m| m.borrow().as_ref().filter(|n| n.ended.is_none()).map(|n| (n.page.clone(), n.app, n.draft, n.event.clone().zip(n.span).map(|(id, (start, end))| (id, start, end)))));
+        let also = MEETING.with(|m| m.borrow().as_ref().filter(|n| n.ended.is_none()).and_then(|n| n.also));
+        // The call the person said no to has its microphone again, during
+        // the notes of another meeting (it left the call when it was silent
+        // for a while): it is that call, and changes nothing. (Its return
+        // must not take away the question of the meeting that is on.)
+        // (Not for notes made by hand that have no program yet: they can be
+        // the notes of this very call. See below.)
+        if on.as_ref().is_some_and(|(_, of, ..)| notes_of_another(*of, also, app)) && refused_lately(&declined(), app, now) {
+            if let Some(d) = declined().into_iter().find(|d| d.app.as_deref() == Some(app)) {
+                return set_declined(Declined { seen: now, ..d });
+            }
         }
-        let on = MEETING.with(|m| m.borrow().as_ref().filter(|n| n.ended.is_none()).map(|n| (n.page.clone(), n.app, n.draft)));
         match on {
             None => self.meeting_started(app),
             // A draft of the other program that nobody answered: it goes,
-            // and this call gets its own.
-            Some((page, Some(of), true)) if of != app && !browser(of) => {
+            // and this call gets its own. No answer is a no for that call,
+            // as at its end: it asks no more while it goes on.
+            Some((page, Some(of), true, event)) if of != app && !browser(of) => {
                 if self.drop_meeting_draft(&page) {
+                    set_declined(Declined { app: Some(of.to_string()), seen: now, said: now, of: event });
                     self.meeting_started(app);
                 }
             }
+            // Notes made by hand, or by "Join" on an event, a moment ago:
+            // they are the notes of this call (see `carry_on_meeting`).
+            Some((_, None, ..)) => {
+                self.carry_on_meeting(Some(app));
+            }
+            // The call passed from the browser to its own program.
+            Some((page, Some(of), ..)) if browser(of) && !browser(app) => MEETING.with(|m| {
+                if let Some(n) = m.borrow_mut().as_mut().filter(|n| n.page == page) {
+                    n.also = Some(app);
+                }
+            }),
             _ => {}
+        }
+    }
+
+    /// During a call in several programs, one of them went silent while
+    /// another goes on (`rest`: the programs the call is still in). When
+    /// the notes that are on are of the call in that program, their meeting
+    /// is over, as at `meeting_ended`: the listening stops, the notes are
+    /// written and the page asks where to keep them. The other call goes
+    /// on, and a no to it holds.
+    pub fn meeting_left(self, app: &'static str, rest: &[&'static str], at: i64) {
+        let over = MEETING.with(|m| {
+            m.borrow().as_ref().is_some_and(|n| {
+                let mine = [n.app, n.also];
+                n.ended.is_none() && mine.contains(&Some(app)) && !mine.iter().flatten().any(|of| rest.contains(of))
+            })
+        });
+        if over {
+            self.meeting_ended(at);
+            // A program that joined during those notes was not asked: its
+            // call was taken as a part of that meeting. It goes on, so it
+            // is a call of its own now. (It got no pad and no page.) A call
+            // that was refused a short time ago stays as it is.
+            let nos = declined();
+            if let Some(other) = rest.iter().find(|of| !refused_lately(&nos, of, now_ms())) {
+                self.meeting_started(other);
+            }
         }
     }
 
@@ -5965,20 +6768,24 @@ impl AppState {
     /// notes page, unless it is the meeting of the last notes that carries
     /// on, and show its pad (the app is usually behind the meeting).
     pub fn meeting_started(self, app: &'static str) {
-        if self.carry_on_meeting(Some(app)) {
+        let now = now_ms();
+        let notes_app = MEETING.with(|m| m.borrow().as_ref().and_then(|n| n.app));
+        if !not_its_notes(&declined(), notes_app, app, now) && self.carry_on_meeting(Some(app)) {
             return;
         }
         // The call the person said no to (it went quiet and is back, or the
         // app was opened again during it): it asks no more.
-        let now = now_ms();
         let on_now = self.meeting_event(now).map(|e| (e.id.clone(), e.start, e.end));
-        let declined = MEETING_DECLINED.with(|d| d.borrow().clone());
-        if still_declined(declined.as_ref(), app, now, on_now.as_ref()) {
+        let no = no_for(&declined(), app).cloned();
+        if let Some(d) = no.clone().filter(|d| still_declined(Some(d), app, now, on_now.as_ref())) {
             crate::meeting::log("No notes of this call, as the person said");
-            return set_declined(declined.map(|d| Declined { seen: now, ..d }));
+            return set_declined(Declined { seen: now, ..d });
         }
-        if declined.is_some() {
-            set_declined(None);
+        // A new call in this program: the no to its last call is over. (The
+        // nos to calls in other programs stay: a meeting joined during a
+        // refused call took that call's no away.)
+        if no.is_some() {
+            keep_declined(without_no(declined(), app));
         }
         // The draft of an earlier call that got no answer and no end (the
         // app was closed during it): it goes now, or it stayed for good.
@@ -6011,8 +6818,9 @@ impl AppState {
     }
 
     /// Put the line of a meeting's page in the page that holds it, above
-    /// the earlier ones (see `make_meeting_notes`).
-    fn link_meeting_in(self, parent: &str, id: &str) {
+    /// the earlier ones (see `make_meeting_notes`). Gives the "Meetings"
+    /// heading, when it made one for the line.
+    fn link_meeting_in(self, parent: &str, id: &str) -> Option<Id> {
         let link = Block::page_link(id.to_string());
         let own_folder = self.pages.peek().get(parent).is_some_and(|p| p.title == "Meeting notes" && p.icon.as_deref() == Some("folder:blue"));
         self.edit_blocks(parent, move |bs| {
@@ -6029,11 +6837,15 @@ impl AppState {
                     if bs.last().is_some_and(|b| b.kind == BlockKind::Text && b.text.trim().is_empty()) {
                         bs.pop();
                     }
-                    bs.push(Block::new(BlockKind::Heading2, "Meetings"));
+                    let heading = Block::new(BlockKind::Heading2, "Meetings");
+                    let made = heading.id.clone();
+                    bs.push(heading);
                     bs.push(link);
+                    return Some(made);
                 }
             }
-        });
+            None
+        })
     }
 
     /// The places a page can be kept in, in every space (see `places_to_keep`).
@@ -6050,6 +6862,7 @@ impl AppState {
     pub fn is_notes_page(&self, id: &str) -> bool {
         self.is_meeting_page(id)
             || self.events.peek().values().any(|e| e.page_id.as_deref() == Some(id))
+            || self.repeat_pages.peek().values().any(|p| p == id)
             || self.mac_cal.peek().pages.values().any(|p| p == id)
     }
 
@@ -6245,11 +7058,8 @@ impl AppState {
 
     /// The meeting ended at `at`: its date line gets the end time and length.
     pub fn meeting_ended(mut self, at: i64) {
-        // (A no to this call stays for a while: the call can go quiet and
-        // come back. It is counted from the end.)
-        if let Some(d) = MEETING_DECLINED.with(|d| d.borrow().clone()) {
-            set_declined(Some(Declined { seen: d.seen.max(at), ..d }));
-        }
+        // (A no to a call stays for a while after it was last seen, so the
+        // call can go quiet and come back: see `meeting_seen`.)
         if let Some((page, app, of)) =
             MEETING.with(|m| m.borrow().as_ref().filter(|n| n.draft && n.ended.is_none()).map(|n| (n.page.clone(), n.app, n.event.clone().zip(n.span).map(|(id, (start, end))| (id, start, end)))))
         {
@@ -6257,7 +7067,7 @@ impl AppState {
                 // No answer is a no for this call: it went quiet, and asks
                 // no more when it comes back. (A new page and the question
                 // came at each pause of a long call.)
-                set_declined(Some(Declined { app: app.map(str::to_string), seen: at, said: at, of }));
+                set_declined(Declined { app: app.map(str::to_string), seen: at, said: at, of });
                 return;
             }
         }
@@ -6322,7 +7132,9 @@ impl AppState {
             return false;
         }
         let now = now_ms();
-        let can_listen = crate::listen::available() && self.listening.peek().is_none();
+        // (A listener that is finishing its last words is free in a moment:
+        // a meeting that starts as another ends still asks.)
+        let can_listen = crate::listen::available() && self.listening.peek().as_ref().is_none_or(|l| l.stopping);
         let (started, span) = MEETING.with(|m| m.borrow().as_ref().filter(|n| n.page == page).map(|n| (n.started, n.span))).unwrap_or((now, None));
         let mut pad = Pad::new(page, if can_listen { Form::Ask } else { Form::Small }, now, span);
         pad.started = started;
@@ -6608,7 +7420,8 @@ impl AppState {
     pub fn export_all(self) {
         let spaces = self.spaces.peek().clone();
         let pages = self.pages.peek().clone();
-        let blocks = self.blocks.peek().clone();
+        let mut blocks = self.blocks.peek().clone();
+        shut_open_pages(&mut blocks, &crate::lock::open_pages());
         spawn_forever(async move {
             let Some(parent) = rfd::AsyncFileDialog::new()
                 .set_title("Choose where to save the export")
@@ -6731,8 +7544,25 @@ impl AppState {
         }
     }
 
+    /// The page is locked and not open: its earlier versions are not shown
+    /// or put back. True, with a word to the person, when that is so.
+    fn history_is_shut(self, page_id: &str) -> bool {
+        let shut = crate::lock::page_lock(&self, page_id) == crate::lock::LockState::Shut;
+        if shut {
+            self.toast("Open the page with its password first");
+        }
+        shut
+    }
+
     /// Show the earlier versions of a page.
     pub fn open_history(mut self, page_id: &str) {
+        // The earlier versions of a locked page can hold its lines in plain
+        // (sync keeps there the lines written here that a locked page took
+        // the place of): not shown while the page is shut. Every way to the
+        // history comes through here: the menu of the page, search, the menu bar.
+        if self.history_is_shut(page_id) {
+            return;
+        }
         {
             let mut ui = self.ui.write();
             ui.popover = None;
@@ -6745,6 +7575,9 @@ impl AppState {
     /// Put a page back as it was in one of its kept versions. The page as it
     /// is now is kept first, so this can be undone (⌘Z or Page history).
     pub fn restore_version(self, page_id: &str, version_id: i64) {
+        if self.history_is_shut(page_id) {
+            return self.set_modal(None);
+        }
         let Some(version) =
             store::with(|s| s.load_versions(page_id)).and_then(|vs| vs.into_iter().find(|v| v.id == version_id))
         else {
@@ -6767,9 +7600,18 @@ impl AppState {
                 }
             }
         }
+        let (back, _) = tables_put_back(&mut blocks, &now, |id| self.table_in_another_page(page_id, id));
         self.edit_blocks(page_id, move |b| *b = blocks);
+        for id in &back {
+            self.bring_row_pages(page_id, id, &[]);
+        }
         self.set_modal(None);
         self.toast(format!("Restored the version from {}", when::moment(version.at)));
+    }
+
+    /// A table with this id is in a page other than `page`.
+    fn table_in_another_page(&self, page: &str, id: &str) -> bool {
+        self.blocks.peek().iter().any(|(p, bs)| p != page && bs.iter().any(|b| b.id == id && b.kind == BlockKind::Table))
     }
 
     /// Replace a page's blocks wholesale (undo, redo, changes from elsewhere).
@@ -6777,6 +7619,12 @@ impl AppState {
         let old = self.blocks.peek().get(page_id).cloned().unwrap_or_default();
         if old == new {
             return;
+        }
+        // (A locked page that is not open takes no lines, here a transcript:
+        // see `edit_blocks_from`. What other windows and the notes file say
+        // of the page comes with `save` off, and is taken.)
+        if save && crate::lock::sealed(&old).is_some() {
+            return self.tell_locked(page_id);
         }
         // (What comes to the page from outside the history, the lines of a
         // transcript or an AI's words, ends the run of typing that is going
@@ -6801,9 +7649,12 @@ impl AppState {
     }
 
     /// The user typed into a block; `value` is its stored text (inline Markdown).
-    pub fn on_block_input(mut self, page_id: &str, block_id: &str, value: String) {
+    /// `pos` is where the caret is (see `Bridge::Input`).
+    pub fn on_block_input(mut self, page_id: &str, block_id: &str, value: String, pos: Option<usize>) {
         let mut caret = None;
         let mut slash = None;
+        let mut typed_to = 0;
+        let mut mid_line = false;
         let origin = Origin::Typing { block: block_id, text: &value };
         self.edit_blocks_from(page_id, origin, |bs| {
             let Some(i) = index_of(bs, block_id) else { return };
@@ -6829,12 +7680,29 @@ impl AppState {
             }
             bs[i].text = value.clone();
             if !code {
-                slash = markdown::slash_query(&plain).map(|(at, q)| (utf16_len(&plain[..at]), q, false, false));
+                // What is typed for a menu ends at the caret. (It was read
+                // to the end of the line: "[[Pr" typed in the middle of a
+                // line asked for a page named with the rest of the line,
+                // and Return made that page and took those words out.)
+                let typed = &plain[..pos.map_or(plain.len(), |p| utf16_to_byte(&plain, p))];
+                slash = markdown::slash_query(typed).map(|(at, q)| (utf16_len(&typed[..at]), q, false, false));
                 if slash.is_none() {
-                    slash = markdown::mention_query(&plain).map(|(at, wiki, q)| (utf16_len(&plain[..at]), q, true, wiki));
+                    slash = markdown::mention_query(typed).map(|(at, wiki, q)| (utf16_len(&typed[..at]), q, true, wiki));
                 }
+                typed_to = utf16_len(typed);
+                mid_line = typed.len() < plain.len();
             }
         });
+        // With words after the caret, "/" opens its list only while a
+        // command fits: "see /usr" typed in the middle of a line is words,
+        // and the arrows, Return and Tab stay with the line. (Before the
+        // caret was known, no list opened there at all. At the end of a
+        // line the list says "No results", as it did.)
+        if let Some((_, query, false, _)) = &slash {
+            if mid_line && filter_slash(query).is_empty() {
+                slash = None;
+            }
+        }
         // "@" opens the list only while a page fits what is typed, so that
         // "@5pm" stays text and Return stays Return.
         if let Some((_, query, true, false)) = &slash {
@@ -6854,6 +7722,8 @@ impl AppState {
                     page_id: page_id.to_string(),
                     block_id: block_id.to_string(),
                     slash_at,
+                    end: typed_to,
+                    added: false,
                     query,
                     selected,
                     pages,
@@ -6879,9 +7749,9 @@ impl AppState {
 
     pub fn handle_bridge(mut self, msg: Bridge) {
         match msg {
-            Bridge::Input { page, id, md } => {
+            Bridge::Input { page, id, md, pos } => {
                 self.clear_picked();
-                self.on_block_input(&page, &id, md)
+                self.on_block_input(&page, &id, md, pos)
             }
             Bridge::Enter { page, id, pos, value } => {
                 let caret = self.edit_blocks(&page, |bs| {
@@ -6895,6 +7765,12 @@ impl AppState {
                 let caret = self.edit_blocks(&page, |bs| {
                     index_of(bs, &id).and_then(|i| press_backspace_at_start(bs, i, &value))
                 });
+                if let Some(c) = caret {
+                    self.focus(c);
+                }
+            }
+            Bridge::Delete { page, id, value } => {
+                let caret = self.edit_blocks(&page, |bs| index_of(bs, &id).and_then(|i| press_delete_at_end(bs, i, &value)));
                 if let Some(c) = caret {
                     self.focus(c);
                 }
@@ -7151,6 +8027,9 @@ impl AppState {
         if self.listening.peek().is_some() {
             return self.toast("Already listening");
         }
+        if listener_runs() {
+            return self.toast("Rune is listening in another window. Stop it there first.");
+        }
         let Some(playing) = self.player.peek().clone() else { return };
         // The page the video's line is in; a video with no line (or a line
         // that is gone) writes at the end of the page on screen.
@@ -7167,6 +8046,7 @@ impl AppState {
             Err(e) => return self.notice(e),
         };
         LISTENER.with(|l| *l.borrow_mut() = Some(listener));
+        LISTENER_WINDOW.with(|w| *w.borrow_mut() = Some((self.win.key, page.clone())));
         let started = now_ms();
         self.listening.set(Some(Listening { page: page.clone(), started, seconds: 0, others: true, words: 0, latest: String::new(), stopping: false, video: true }));
         spawn_forever(async move {
@@ -7227,8 +8107,10 @@ impl AppState {
                 }
             }
             LISTENER.with(|l| l.borrow_mut().take());
+            LISTENER_WINDOW.with(|w| w.borrow_mut().take());
             put(&mut words, "Transcript of the video", true, transcript.plain_blocks());
             self.listening.set(None);
+            self.relock_unshown();
             if let Some(message) = problem {
                 return self.notice(message);
             }
@@ -7236,7 +8118,8 @@ impl AppState {
                 return self.notice("Nothing was heard of the video. Check that it plays with sound, and that Rune may record the Mac's audio (System Settings, Privacy & Security).");
             }
             // The AI writes the notes; without one, the words are what there is.
-            if !ai::has_ai() || transcript.words() < 12 {
+            // (What was heard into a locked page is not given to the AI.)
+            if !ai::has_ai() || transcript.words() < 12 || self.locked_lines(&page) {
                 return self.toast("The words of the video are under it");
             }
             self.toast("Writing the notes…");
@@ -7373,15 +8256,24 @@ impl AppState {
     }
 
     /// The time of a to-do's reminder (None: no reminder). A to-do with no
-    /// day gets today, or tomorrow when the time has passed today.
+    /// day gets today, or tomorrow when the time has passed today; so does
+    /// one whose day with that time is gone (see `day_for_reminder`).
     pub fn set_reminder(self, page: &str, id: &str, time: Option<chrono::NaiveTime>) {
         let today = crate::when::today();
         let now = now_ms();
+        // The time box of the menu sends each step of a time that is typed
+        // ("1", then "16"). The day is worked out from the day the to-do
+        // had when the menu opened, at each step: a step that is past (01:00)
+        // moved the day to tomorrow, and it stayed there at 16:00.
+        let was = match &self.ui.peek().popover {
+            Some(Popover::Due { block_id, was }) if block_id == id => Some(*was),
+            _ => None,
+        };
         self.edit_blocks(page, |bs| {
             if let Some(i) = index_of(bs, id) {
                 bs[i].remind = time;
-                if let (Some(t), None) = (time, bs[i].due) {
-                    bs[i].due = Some(if crate::when::at(today, t) > now { today } else { crate::when::next_day(today) });
+                if let Some(t) = time {
+                    bs[i].due = Some(day_for_reminder(was.unwrap_or(bs[i].due), t, today, now));
                 }
             }
         });
@@ -7497,8 +8389,17 @@ impl AppState {
 
     fn paste_image(self, page: &str, at: &str, base64: &str) {
         use base64::Engine;
+        // The first picture of a drop names its line; the others say "last"
+        // (see `put_image`). A first one that cannot be kept still says
+        // where the drop was: the others went after some older picture of
+        // the page, the last one that had been put there.
+        if at != "last" {
+            LAST_IMAGE.with(|l| *l.borrow_mut() = Some((page.to_string(), at.to_string())));
+        }
         let bytes = match base64::engine::general_purpose::STANDARD.decode(base64.trim()) {
-            Ok(bytes) => bytes,
+            Ok(bytes) if !bytes.is_empty() => bytes,
+            // (The page sends no bytes for a file over the limit.)
+            Ok(_) => return self.notice("That picture is too large (the most is 30 MB)."),
             Err(_) => return self.notice("That picture could not be read."),
         };
         match crate::files::save(&bytes) {
@@ -7510,7 +8411,8 @@ impl AppState {
     /// Show a kept picture at a block: in that block if it is an image
     /// block still empty or an empty line, otherwise in a new block after it.
     fn put_image(self, page: &str, at: &str, name: String) {
-        // "last": after the picture put just before (several dropped together).
+        // "last": after the picture put just before (several dropped
+        // together), or at the line of the drop when none was put yet.
         let at = if at == "last" { LAST_IMAGE.with(|l| l.borrow().clone()).filter(|(p, _)| p == page).map(|(_, id)| id).unwrap_or_default() } else { at.to_string() };
         let at = at.as_str();
         let mut put: Option<Id> = None;
@@ -7572,7 +8474,7 @@ impl AppState {
     pub fn pick_image(self, page: &str, id: &str) {
         let (page, id) = (page.to_string(), id.to_string());
         spawn_forever(async move {
-            let Some(file) = rfd::AsyncFileDialog::new().set_title("Choose a Picture").add_filter("Pictures", &["png", "jpg", "jpeg", "gif", "webp", "heic", "tiff", "bmp"]).pick_file().await else {
+            let Some(file) = rfd::AsyncFileDialog::new().set_title("Choose a Picture").add_filter("Pictures", &["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "tiff", "bmp"]).pick_file().await else {
                 return;
             };
             match crate::files::import(file.path()) {
@@ -7678,7 +8580,7 @@ impl AppState {
     pub fn pick_cover(self, page: &str) {
         let page = page.to_string();
         spawn_forever(async move {
-            let Some(file) = rfd::AsyncFileDialog::new().set_title("Choose a Cover Picture").add_filter("Pictures", &["png", "jpg", "jpeg", "gif", "webp", "heic", "tiff", "bmp"]).pick_file().await else {
+            let Some(file) = rfd::AsyncFileDialog::new().set_title("Choose a Cover Picture").add_filter("Pictures", &["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "tiff", "bmp"]).pick_file().await else {
                 return;
             };
             match crate::files::import(file.path()) {
@@ -7767,6 +8669,8 @@ impl AppState {
                     page_id: page.to_string(),
                     block_id: nid.clone(),
                     slash_at: 0,
+                    end: 1,
+                    added: true,
                     query: String::new(),
                     selected: 0,
                     pages: false,
@@ -7809,6 +8713,17 @@ impl AppState {
         self.focus(Caret::start(&first));
     }
 
+    /// The down arrow in the title moves to the first line of the page that
+    /// can be typed in. It makes none. (As Return does: on a page that
+    /// starts with a table, a picture or a divider, an arrow key put an
+    /// empty line above it.)
+    pub fn title_down(self, page: &str) {
+        let first = self.blocks.peek().get(page).and_then(|bs| bs.iter().find(|b| !b.floats() && b.kind.is_editable()).map(|b| b.id.clone()));
+        if let Some(first) = first {
+            self.focus(Caret::start(&first));
+        }
+    }
+
     /// Several lines were pasted into a block: they become blocks.
     fn paste(mut self, page: &str, id: &str, pos: usize, value: String, text: &str) {
         // The link of a page by itself (Copy link): on an empty line, the
@@ -7842,14 +8757,28 @@ impl AppState {
         // What was copied or cut in the app as whole blocks, and is still what
         // the clipboard holds: those blocks again, each with a new id.
         let same = |a: &str, b: &str| a.replace("\r\n", "\n").trim() == b.replace("\r\n", "\n").trim();
-        let kept = COPIED_BLOCKS.with(|c| c.borrow().as_ref().filter(|(words, bs)| !bs.is_empty() && same(words, text)).map(|(_, bs)| bs.clone()));
+        let kept = COPIED_BLOCKS.with(|c| c.borrow().as_ref().filter(|(words, bs, ..)| !bs.is_empty() && same(words, text)).map(|(_, bs, cut, row_pages)| (bs.clone(), *cut, row_pages.clone())));
+        // A table that was cut and is in no page now (Undo did not put it
+        // back, and it was not pasted before) is moved by this paste, not
+        // copied: it stays the block it was. The pages of its rows find it
+        // by its id: with a new id each row opened an empty page, and what
+        // was written in the rows' pages stayed in the Trash.
+        let mut moved: Vec<Id> = Vec::new();
+        let mut row_pages: Vec<Id> = Vec::new();
         let mut items = match kept {
-            Some(blocks) => {
+            Some((blocks, cut, cut_row_pages)) => {
+                row_pages = cut_row_pages;
                 let least = blocks.iter().map(|b| b.indent).min().unwrap_or(0);
+                let all = self.blocks.peek();
+                let in_no_page = |id: &str| !all.values().any(|bs| bs.iter().any(|b| b.id == id));
                 blocks
                     .into_iter()
                     .map(|mut b| {
-                        b.id = new_id();
+                        if cut && b.kind == BlockKind::Table && in_no_page(&b.id) {
+                            moved.push(b.id.clone());
+                        } else {
+                            b.id = new_id();
+                        }
                         b.indent -= least;
                         b
                     })
@@ -7899,6 +8828,9 @@ impl AppState {
             bs[li].text = inline::join_for(bs[li].kind, &bs[li].text, kind, &after);
             Some(Caret { id: last, pos: at })
         });
+        for block in &moved {
+            self.bring_row_pages(page, block, &row_pages);
+        }
         if let Some(c) = caret {
             self.focus(c);
         }
@@ -7927,16 +8859,32 @@ impl AppState {
         let current = self.blocks.peek().get(&page).cloned().unwrap_or_default();
         // Only what this step changed: a transcript or an AI's text that came
         // in after it is not part of the step, and stays.
-        let target = if undo {
+        let mut target = if undo {
             crate::history::rebase(&current, &e.after, &e.before)
         } else {
             crate::history::rebase(&current, &e.before, &e.after)
         };
+        let (back, copies) = tables_put_back(&mut target, &current, |id| self.table_in_another_page(&page, id));
+        // (The step goes by the new id of a copy from now on: with the old
+        // id, Redo did not take the copy away, and the next Undo put one
+        // more copy in the page.)
+        let mut e = e;
+        for (was, now) in &copies {
+            e.rename_block(was, now);
+        }
         self.set_blocks(&page, target.clone(), true);
         // (The first cell of a row is the name of the row's page, and a row
         // that this step takes out takes its page along.)
         self.name_row_pages_of(&page);
         self.drop_lost_row_pages(&current, &target);
+        // A table that this step puts back takes the pages of its rows
+        // back into this page, when the table was pasted in another page
+        // and that paste was undone there. They come out of the Trash when
+        // their row is opened, as they always did (`row_page`): one that
+        // the person put in the Trash by hand must not come out with them.
+        for id in &back {
+            self.bring_row_pages(&page, id, &[]);
+        }
         for id in &e.trashed {
             self.set_trashed(id, !undo);
         }
@@ -8007,12 +8955,32 @@ impl AppState {
                 self.leave_pages(&ids);
             }
             SyncMsg::Theme(t) => self.ui.write().theme = Theme::parse(&t),
-            SyncMsg::Spaces(spaces) => self.spaces.set(spaces),
+            SyncMsg::Spaces(spaces) => {
+                // A space was deleted in another window. This window leaves
+                // it, and what it holds of that space goes where the notes
+                // file put it (the first space left): a page made here is
+                // never saved to a space that is not there.
+                // (Only a space that the notes file does not have either:
+                // see `spaces_told`.)
+                let (spaces, gone) = spaces_told(&self.spaces.peek(), spaces, store::with(|s| s.load_spaces()));
+                let into = spaces.first().map(|s| s.id.clone()).filter(|_| !gone.is_empty());
+                self.spaces.set(spaces);
+                if let Some(into) = into {
+                    rehome(&mut self.pages.write(), &mut self.events.write(), &gone, &into);
+                    if gone.contains(&self.ui.peek().space) {
+                        self.switch_space(&into);
+                    }
+                    self.ui.write().parked.retain(|id, _| !gone.contains(id));
+                }
+            }
             SyncMsg::Event(e) => {
                 self.events.write().insert(e.id.clone(), e);
+                // (Another window may have changed the pages of repeats with it.)
+                self.change_repeat_pages(|_| {});
             }
             SyncMsg::EventRemoved(id) => {
                 self.events.write().remove(&id);
+                self.change_repeat_pages(|_| {});
                 if self.cal.peek().selected.as_deref() == Some(id.as_str()) {
                     self.cal.write().selected = None;
                 }
@@ -8024,7 +8992,7 @@ impl AppState {
                     crate::notify::mark_dirty();
                 }
             }
-            SyncMsg::Look { glass, blur, tint } => self.look.set(Look { glass, blur, tint }),
+            SyncMsg::Look { glass, blur, tint, accent } => self.look.set(Look { glass, blur, tint, accent }),
             SyncMsg::Reload(data) => {
                 let (pages, blocks) = &*data;
                 let changed_pages: Vec<Page> = pages
@@ -8047,12 +9015,11 @@ impl AppState {
                     self.history.write().forget(&page);
                     self.set_blocks(&page, bs, false);
                 }
+                // A page that another program (an AI tool) put in the Trash
+                // is left by every pane, also by one that only has it behind
+                // the page on show: Back opened it again from there.
                 let trashed: Vec<Id> = pages.values().filter(|p| p.trashed).map(|p| p.id.clone()).collect();
-                let open_and_trashed = {
-                    let ui = self.ui.peek();
-                    ui.tabs.iter().chain(ui.parked.values().flat_map(|set| set.0.iter())).any(|t| matches!(t.route(), Route::Page(p) if trashed.contains(p)))
-                };
-                if open_and_trashed {
+                if self.ui.peek().remembers(&trashed) {
                     self.leave_pages(&trashed);
                 }
             }
@@ -8080,7 +9047,19 @@ impl AppState {
             "enter" if len > 0 && slash.pages => self.apply_mention(slash.selected),
             "enter" if len > 0 => self.apply_slash(slash.selected),
             "enter" => self.slash.set(None),
-            "close" => self.slash.set(None),
+            "close" => {
+                self.slash.set(None);
+                // The "+" beside a line put a "/" in the new line, for this
+                // menu. Closed with nothing chosen and nothing typed, the
+                // "/" goes too: it stayed in the line, and was saved.
+                if slash.added {
+                    self.edit_blocks(&slash.page_id, |bs| {
+                        if let Some(b) = bs.iter_mut().find(|b| b.id == slash.block_id && b.text == "/") {
+                            b.text.clear();
+                        }
+                    });
+                }
+            }
             _ => {}
         }
     }
@@ -8118,11 +9097,13 @@ impl AppState {
         let Some(slash) = self.slash.peek().clone().filter(|s| s.pages) else { return };
         let (found, create) = self.mention_items(&slash);
         self.slash.set(None);
+        let mut made = None;
         let target = match (found.get(index), create) {
             (Some(p), _) => p.id.clone(),
             (None, Some(name)) if index == found.len() => {
                 let id = self.create_page(Some(slash.page_id.clone()));
                 self.rename_page(&id, name);
+                made = Some(id.clone());
                 id
             }
             _ => return,
@@ -8131,13 +9112,22 @@ impl AppState {
         let (page, id) = (slash.page_id.clone(), slash.block_id.clone());
         let done = self.edit_blocks(&page, |bs| {
             let i = index_of(bs, &id)?;
-            let before = inline::split_for(bs[i].kind, &bs[i].text, slash.slash_at).0;
+            let kind = bs[i].kind;
+            let before = inline::split_for(kind, &bs[i].text, slash.slash_at).0;
+            // (What was after the caret stays in the line.)
+            let after = inline::split_for(kind, &bs[i].text, slash.end.max(slash.slash_at)).1;
             // A space after it, to go on typing.
-            bs[i].text = inline::concat(&inline::concat(&before, &link), " ");
-            Some(())
+            let with = inline::concat(&inline::concat(&before, &link), " ");
+            let at = inline::len_for(kind, &with);
+            bs[i].text = inline::concat(&with, &after);
+            Some(at)
         });
-        if done.is_some() {
-            self.focus(Caret::end(&id));
+        if let Some(at) = done {
+            // (Undo of the link takes the page it made away too, as for "/page".)
+            if let Some(new) = &made {
+                self.history.write().attach(&page, &[], std::slice::from_ref(new));
+            }
+            self.focus(Caret { id, pos: at });
         }
     }
 
@@ -8149,9 +9139,12 @@ impl AppState {
         let id = slash.block_id.clone();
 
         // Remove the typed "/query" and see what's left in the block.
+        // (What was after the caret stays in the line.)
         let remaining = self.edit_blocks(&page, |bs| {
             let i = index_of(bs, &id)?;
-            bs[i].text = inline::split_for(bs[i].kind, &bs[i].text, slash.slash_at).0;
+            let kind = bs[i].kind;
+            let after = inline::split_for(kind, &bs[i].text, slash.end.max(slash.slash_at)).1;
+            bs[i].text = inline::concat(&inline::split_for(kind, &bs[i].text, slash.slash_at).0, &after);
             Some(bs[i].plain_text().trim().is_empty())
         });
         let Some(block_is_empty) = remaining else { return };
@@ -8217,6 +9210,21 @@ impl AppState {
 
     /// Open the inline AI panel under a block (⌘J, the slash menu or a block menu).
     pub fn ai_open(mut self, action: AiAction, page: &str, anchor: &str) {
+        if self.locked_lines(page) {
+            return self.toast("The AI does not read locked pages");
+        }
+        // The AI is at work (most times on another page, where its card is
+        // out of view): a press that asks for the AI showed a new box and
+        // stopped that job half way, with some of its pages made and no
+        // word. The press shows the job; its card has Stop.
+        let at_work = self.ai.peek().as_ref().filter(|s| s.status == AiStatus::Streaming).map(|s| s.page_id.clone());
+        if let Some(at) = at_work.filter(|at| self.pages.peek().get(at).is_some_and(|p| !p.trashed)) {
+            self.set_popover(None);
+            if at != page {
+                self.open_page(&at);
+            }
+            return self.toast("The AI is still at work on this page");
+        }
         self.ai_stop();
         // A run before this one that changed things: say so as it goes.
         if let Some(old) = self.ai.peek().clone() {
@@ -8245,6 +9253,9 @@ impl AppState {
             given: Vec::new(),
             part: Vec::new(),
             offer: None,
+            cut: false,
+            line_sent: String::new(),
+            did_before: 0,
         });
         // What is picked on the page when the AI is asked: the request is
         // about that. Picked blocks are the part of the page it gets (and
@@ -8273,8 +9284,9 @@ impl AppState {
         if !ai::has_ai() {
             return self.open_settings_at("AI");
         }
-        // With no page in front (Home, Calendar) the question is for all the notes.
-        let Some(page) = self.current_page() else {
+        // With no page in front (Home, Calendar) the question is for all the
+        // notes; so it is on a locked page, whose lines the AI never reads.
+        let Some(page) = self.current_page().filter(|p| !self.locked_lines(p)) else {
             self.set_modal(Some(Modal::AskNotes));
             return;
         };
@@ -8415,15 +9427,24 @@ impl AppState {
     /// Another page of the notes, chosen after "@" in the AI box: its words
     /// go with the request. `prompt` is the request without the "@name".
     pub fn ai_give_page(mut self, page_id: &str, prompt: String) {
+        // (Also while it is open: its lines are in plain in the window then.)
+        if self.locked_lines(page_id) {
+            return self.toast("A locked page is not given to the AI");
+        }
+        let link = inline::page_url(page_id);
         let title = self.page_title(page_id);
         let text = self.page_for_ai(page_id);
         if let Some(s) = self.ai.write().as_mut() {
             s.prompt = prompt;
-            if s.given.iter().any(|g| g.kind == crate::attach::Kind::Page && g.name == title) {
+            // (Each page once, by the page and not by its name: of two
+            // pages with one name, the second was not given, with no word.)
+            if s.given.iter().any(|g| g.kind == crate::attach::Kind::Page && g.url == link) {
                 return;
             }
         }
-        let _ = self.ai_give(crate::attach::Attached::new(&title, crate::attach::Kind::Page, text, ""));
+        let mut it = crate::attach::Attached::new(&title, crate::attach::Kind::Page, text, "");
+        it.url = link;
+        let _ = self.ai_give(it);
     }
 
     /// Put a kept picture on the clipboard (a test run keeps the person's
@@ -8471,13 +9492,20 @@ impl AppState {
         if !self.pages.peek().get(page_id).is_some_and(|p| !p.trashed) {
             return;
         }
+        if self.locked_lines(page_id) {
+            return self.toast("A locked page is not given to the AI");
+        }
         let title = self.page_title(page_id);
-        let has = |list: &[crate::attach::Attached]| list.iter().any(|g| g.kind == crate::attach::Kind::Page && g.name == title);
+        // (By the page, not by its name: see `ai_give_page`.)
+        let link = inline::page_url(page_id);
+        let has = |list: &[crate::attach::Attached]| list.iter().any(|g| g.kind == crate::attach::Kind::Page && g.url == link);
         if has(&self.ask_given.peek()) || self.ai.peek().as_ref().is_some_and(|s| has(&s.given)) {
             return;
         }
         let text = self.page_for_ai(page_id);
-        let _ = self.ai_give(crate::attach::Attached::new(&title, crate::attach::Kind::Page, text, ""));
+        let mut it = crate::attach::Attached::new(&title, crate::attach::Kind::Page, text, "");
+        it.url = link;
+        let _ = self.ai_give(it);
     }
 
     /// The person asked for the page of a web address: it is fetched now
@@ -8526,21 +9554,17 @@ impl AppState {
 
     /// The picked part of a page as the AI is given it (see `page_for_ai`).
     fn part_for_ai(&self, page_id: &str, part: &[Id]) -> String {
-        let pages = self.pages.peek();
-        let mut blocks: Vec<Block> = self.blocks.peek().get(page_id).map(|bs| bs.iter().filter(|b| part.contains(&b.id)).cloned().collect()).unwrap_or_default();
-        // (From the edge: the step in that the whole part has is put back
-        // when a reply takes its place, see `ai_revise`.)
-        let least = blocks.iter().map(|b| b.indent).min().unwrap_or(0);
-        for b in &mut blocks {
-            b.indent -= least;
-        }
-        crate::mcp::render_body(&pages, &blocks)
+        part_as_given(&self.pages.peek(), self.blocks.peek().get(page_id).map(|bs| bs.as_slice()).unwrap_or_default(), part)
     }
 
     pub fn ai_run(mut self) {
         let Some(session) = self.ai.peek().clone() else { return };
         if matches!(session.action, AiAction::Ask | AiAction::Recap) && session.prompt.trim().is_empty() {
             return;
+        }
+        // (The page was locked after the box was opened on it.)
+        if self.locked_lines(&session.page_id) {
+            return self.toast("The AI does not read locked pages");
         }
         if session.action == AiAction::Recap {
             // The recap is written into the page's notes; the box has done its part.
@@ -8574,6 +9598,8 @@ impl AppState {
         if let Some(s) = self.ai.write().as_mut() {
             s.sent = sent;
             s.offer = None;
+            s.cut = !session.action.rewrites_block() && ai::is_cut(&page_text);
+            s.line_sent = block_text.clone();
         }
         // The request with what was given with it, as words.
         let mut asked = session.prompt.clone();
@@ -8588,8 +9614,12 @@ impl AppState {
         // A request in the person's own words is run with the tools of Rune
         // (where the AI tool can use them): the AI can then do anything in
         // the app, and what it changes is written down for "Undo".
+        // ("Try again" after a run that changed things and then failed: this
+        // run writes into the same record. With a new one, what the first
+        // run changed was forgotten, and no Undo took it back.)
+        let earlier = session.journal.clone().filter(|_| !session.did.is_empty());
         let tools = (session.action == AiAction::Ask && ai::takes_tools())
-            .then(|| ai::Tools { journal: std::env::temp_dir().join(format!("rune-ai-{}-{}.jsonl", std::process::id(), now_ms())) });
+            .then(|| ai::Tools { journal: earlier.unwrap_or_else(|| std::env::temp_dir().join(format!("rune-ai-{}-{}.jsonl", std::process::id(), now_ms()))) });
         let messages = match &tools {
             Some(_) => {
                 let title = self.pages.peek().get(&session.page_id).map(|p| p.title.clone()).unwrap_or_default();
@@ -8608,7 +9638,12 @@ impl AppState {
         // Whichever AI Settings picks (an installed tool by default); a missing
         // tool or key arrives as an Error event.
         let mut rx = ai::start_with(ai::Prefs::load(), messages, tools, session.pictures.clone());
-        let task = spawn(async move {
+        // (A task of the window, not of the card: the card goes when its
+        // pane shows another page, and a task of the card went with it. The
+        // job then stopped half way with no word, and its card said that
+        // it was still at work for as long as it was open.)
+        let job_page = session.page_id.clone();
+        let task = spawn_forever(async move {
             while let Some(event) = rx.next().await {
                 // After a step and at the end: show what the tools changed in the notes.
                 let mut look = false;
@@ -8667,6 +9702,14 @@ impl AppState {
                     sync::check_outside_changes();
                 }
                 if ended {
+                    // The job came to its end while its page is not in
+                    // view: a short line says so. (Its card is on its page,
+                    // and nothing told the person on another page.)
+                    if self.ui.peek().tab().pane_showing(&Route::Page(job_page.clone())).is_none() {
+                        let failed = self.ai.peek().as_ref().is_some_and(|s| matches!(s.status, AiStatus::Error(_)));
+                        let title = self.page_title(&job_page);
+                        self.toast(if failed { format!("The AI stopped on “{title}”") } else { format!("The AI is done on “{title}”") });
+                    }
                     break;
                 }
             }
@@ -8675,6 +9718,7 @@ impl AppState {
             s.run = run;
             s.output.clear();
             s.steps.clear();
+            s.did_before = if s.journal.is_some() && s.journal == journal { s.did.len() } else { 0 };
             s.did.clear();
             s.journal = journal;
             s.working = None;
@@ -8732,7 +9776,16 @@ impl AppState {
         };
         let in_bar = self.ai.peek().as_ref().is_some_and(|s| s.status == AiStatus::Prompting);
         let full = "No more than four pictures go with one request";
-        if in_bar {
+        // (The box that asks all the notes lies over the page: with both
+        // open, the picture is for the one in front, as a file is in
+        // `ai_give`. It went to the box of the page under it, out of
+        // sight, and the question went without it.)
+        if self.ui.peek().modal == Some(Modal::AskNotes) {
+            if self.ask_pictures.peek().len() >= ai::MOST_PICTURES {
+                return self.toast(full);
+            }
+            self.ask_pictures.write().push(picture);
+        } else if in_bar {
             let mut ai = self.ai.write();
             let Some(s) = ai.as_mut() else { return };
             if s.pictures.len() >= ai::MOST_PICTURES {
@@ -8740,11 +9793,6 @@ impl AppState {
                 return self.toast(full);
             }
             s.pictures.push(picture);
-        } else if self.ui.peek().modal == Some(Modal::AskNotes) {
-            if self.ask_pictures.peek().len() >= ai::MOST_PICTURES {
-                return self.toast(full);
-            }
-            self.ask_pictures.write().push(picture);
         }
     }
 
@@ -8832,11 +9880,13 @@ impl AppState {
     /// and its blocks as Markdown in which a picture, a drawing and a link
     /// to a page are lines that can be kept where they are.
     fn page_for_ai(&self, page_id: &str) -> String {
-        let pages = self.pages.peek();
-        let title = pages.get(page_id).map(|p| p.title.trim().to_string()).unwrap_or_default();
-        let blocks = self.blocks.peek().get(page_id).cloned().unwrap_or_default();
-        let body = crate::mcp::render_body(&pages, &blocks);
-        if title.is_empty() { body } else { format!("# {title}\n\n{body}") }
+        // A locked page that is open has its lines in plain here: the AI
+        // gets of it what it gets of one that is shut, the line that says
+        // it is locked. (Every way to give a page comes through here.)
+        if crate::lock::is_open(page_id) {
+            return page_as_given(&self.pages.peek(), page_id, &[Block::new(BlockKind::Locked, "")]);
+        }
+        page_as_given(&self.pages.peek(), page_id, self.blocks.peek().get(page_id).map(|bs| bs.as_slice()).unwrap_or_default())
     }
 
     /// The AI's reply is the page as it must be after a change: put it in
@@ -8871,7 +9921,10 @@ impl AppState {
         // The reply is the page as it was when the AI was asked, changed.
         // Lines written on the page since then are not in it: put in place
         // of the page, it would take them away. (What the AI's own tools
-        // changed in this run is the AI's, and no reason to refuse.)
+        // changed on the page in this run is the AI's, and no reason to
+        // refuse: that is taken out before the page is compared. With no
+        // check at all after a run that used a tool, a line typed while the
+        // AI made an event went when its page was put in place.)
         // (A line put between the blocks of the part since then is not in
         // the reply either: the part must still be one run of blocks.)
         let apart = !whole && {
@@ -8879,7 +9932,17 @@ impl AppState {
             let at: Vec<usize> = blocks.get(&session.page_id).map(|bs| bs.iter().enumerate().filter(|(_, b)| session.part.contains(&b.id)).map(|(i, _)| i).collect()).unwrap_or_default();
             at.is_empty() || at[at.len() - 1] - at[0] + 1 != at.len()
         };
-        if apart || (session.did.is_empty() && !session.sent.is_empty() && given_now != session.sent) {
+        // (Of this run: after "Try again" the page was given as the runs before it left it.)
+        let did = session.did.get(session.did_before..).unwrap_or_default();
+        let given_less_tools = if did.is_empty() {
+            Some(given_now)
+        } else {
+            let mut pages = self.pages.peek().clone();
+            let now = self.blocks.peek().get(&session.page_id).cloned().unwrap_or_default();
+            crate::mcp::before_run(did, &session.page_id, &mut pages, now)
+                .map(|was| if whole { page_as_given(&pages, &session.page_id, &was) } else { part_as_given(&pages, &was, &session.part) })
+        };
+        if apart || (!session.sent.is_empty() && given_less_tools.as_deref() != Some(session.sent.as_str())) {
             return self.toast("The page was changed after you asked, so the AI's page was not put in its place. Ask again to get it with your changes.");
         }
         // The sub-pages first, so that the page can link to them.
@@ -8997,6 +10060,15 @@ impl AppState {
         if new_blocks.is_empty() {
             return;
         }
+        // A rewrite of a line takes the line's place only while the line is
+        // as it was sent. Words typed in it since then are not in the
+        // reply, and went with the line: the reply goes under it.
+        let line_now = self.blocks.peek().get(&session.page_id).and_then(|bs| bs.iter().find(|b| b.id == session.anchor).map(|b| b.text.clone()));
+        let typed_since = replace && session.action.rewrites_block() && line_now.is_some_and(|now| now != session.line_sent);
+        let replace = replace && !typed_since;
+        if typed_since {
+            self.toast("The line was changed after you asked, so the AI's text was put under it.");
+        }
         let last_id = new_blocks.last().map(|b| b.id.clone());
         self.edit_blocks(&session.page_id, |bs| {
             let at = match index_of(bs, &session.anchor) {
@@ -9093,7 +10165,8 @@ impl AppState {
             "voice_here" => {
                 let at = self.focus.peek().clone();
                 match at {
-                    Some((page, block)) if ai::has_ai() => self.open_voice(VoiceFor::Into { page, block }),
+                    // (On a locked page the words are typed as they are said, with no AI.)
+                    Some((page, block)) if ai::has_ai() && !self.locked_lines(&page) => self.open_voice(VoiceFor::Into { page, block }),
                     Some(_) => self.dictate("line"),
                     None => self.command("voice"),
                 }
@@ -9150,6 +10223,13 @@ impl AppState {
             // self-test can stand in for a real meeting.
             "meeting_started" => self.meeting_started(crate::meeting::TEAMS.name),
             "meeting_ended" => self.meeting_ended(now_ms()),
+            // (For the self-test: during that call, a second call program
+            // takes the microphone; then it goes silent while the first call
+            // goes on; and the watcher sees that no call is on.)
+            "meeting_joined" => self.meeting_joined("Zoom"),
+            "meeting_left" => self.meeting_left("Zoom", &[crate::meeting::TEAMS.name], now_ms()),
+            "meeting_left_first" => self.meeting_left(crate::meeting::TEAMS.name, &["Zoom"], now_ms()),
+            "meeting_quiet" => self.meeting_quiet(),
             // The self-test draws the meeting pad in this window (see
             // `pad::inline`), and makes the pad's questions old at once.
             "pad_inline" => crate::pad::set_inline(true),
@@ -9205,7 +10285,7 @@ impl AppState {
             "forget_meeting" => {
                 MEETING.with(|m| *m.borrow_mut() = None);
                 self.keep_meeting();
-                set_declined(None);
+                keep_declined(Vec::new());
             }
             // (For the self-test: the watcher hears the sound of the meeting's
             // program again, with no microphone; the answer is left for the test.)
@@ -9225,8 +10305,8 @@ impl AppState {
                 self.keep_meeting();
                 MEETING.with(|m| *m.borrow_mut() = None);
                 self.close_pad();
-                let app = self.recall_meeting();
-                document::eval(&format!("document.body.dataset.meetingApp = {:?};", app.unwrap_or("")));
+                let apps = self.recall_meeting();
+                document::eval(&format!("document.body.dataset.meetingApp = {:?};", apps.join(", ")));
             }
             // (For the self-test: the meetings that start take no event of the
             // calendar, so that a check of a meeting with no event does not
@@ -9255,6 +10335,32 @@ impl AppState {
                 document::eval("requestAnimationFrame(()=>requestAnimationFrame(()=>{const t=document.getElementById('ai-input')||document.getElementById('ask-notes-input');if(t)t.focus();}))");
             }
             "toggle_sidebar" => self.toggle_sidebar(),
+            "focus_mode" => self.toggle_focus_mode(),
+            "lock_page" => match self.current_page() {
+                Some(id) if self.listens_in(&id) => {}
+                Some(id) if !crate::lock::page_lock(&self, &id).is_locked() => self.set_modal(Some(Modal::LockPage)),
+                Some(_) => {}
+                None => self.toast("Open a page first"),
+            },
+            "lock_now" => {
+                if let Some(id) = self.current_page() {
+                    self.relock(&id);
+                }
+            }
+            "unlock_page" => {
+                if let Some(id) = self.current_page() {
+                    self.remove_password(&id);
+                }
+            }
+            "sync_now" => {
+                let sync = crate::devsync::status();
+                if sync.icloud || sync.wifi {
+                    crate::devsync::nudge();
+                    self.toast("Syncing");
+                } else {
+                    self.open_settings_at("Sync");
+                }
+            }
             "dark_mode" => {
                 let dark = match self.ui.peek().theme {
                     Theme::Dark => false,
@@ -9384,6 +10490,81 @@ fn seed(pages: &mut HashMap<Id, Page>, blocks: &mut HashMap<Id, Vec<Block>>, spa
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_table_put_back_while_it_is_in_another_page_is_a_copy() {
+        let table = |id: &str| {
+            let mut b = Block::new(BlockKind::Table, "");
+            b.id = id.to_string();
+            b
+        };
+        let line = Block::text("a line");
+        let current = vec![line.clone(), table("stays")];
+        // Undo puts two tables back: one is in no page (it comes back as
+        // the block it was), one was pasted in another page (a copy, with
+        // an id of its own). The table that never left, and lines, are as they are.
+        let mut target = vec![line.clone(), table("stays"), table("nowhere"), table("moved")];
+        let (back, copies) = tables_put_back(&mut target, &current, |id| id == "moved" || id == "stays");
+        assert_eq!(back, ["nowhere"]);
+        assert_eq!((target[0].id.as_str(), target[1].id.as_str(), target[2].id.as_str()), (line.id.as_str(), "stays", "nowhere"));
+        assert!(target[3].id != "moved" && target[3].kind == BlockKind::Table);
+        assert_eq!(copies, [("moved".to_string(), target[3].id.clone())]);
+    }
+
+    #[test]
+    fn undo_and_redo_of_a_cut_whose_table_is_in_another_page_keep_one_copy() {
+        let mut table = Block::new(BlockKind::Table, "");
+        table.id = "moved".into();
+        let line = Block::text("a line");
+        // The cut of the table on this page; the table is in another page now.
+        let mut h = crate::history::History::default();
+        h.record("p", vec![line.clone(), table], vec![line.clone()], None, 0);
+        let mut page = vec![line];
+        let mut step = |page: &mut Vec<Block>, undo: bool| {
+            let mut e = if undo { h.take_undo("p") } else { h.take_redo("p") }.unwrap();
+            let mut target = if undo { crate::history::rebase(page, &e.after, &e.before) } else { crate::history::rebase(page, &e.before, &e.after) };
+            let (_, copies) = tables_put_back(&mut target, page, |id| id == "moved");
+            for (was, now) in &copies {
+                e.rename_block(was, now);
+            }
+            *page = target;
+            if undo { h.push_redo(e) } else { h.push_undo(e) }
+            page.iter().filter(|b| b.kind == BlockKind::Table).count()
+        };
+        // Undo: one copy. Redo takes that copy away. Undo again: one copy, not two.
+        assert_eq!(step(&mut page, true), 1);
+        assert_eq!(step(&mut page, false), 0);
+        assert_eq!(step(&mut page, true), 1);
+        assert_eq!(step(&mut page, false), 0);
+    }
+
+    #[test]
+    fn a_path_typed_in_search_finds_the_pages_that_are_there() {
+        let mut pages: HashMap<Id, Page> = HashMap::new();
+        let mut add = |id: &str, title: &str, parent: Option<&str>, space: &str| {
+            let mut p = Page::new(parent.map(String::from), 1.0);
+            p.id = id.into();
+            p.title = title.into();
+            p.space_id = space.into();
+            pages.insert(id.into(), p);
+        };
+        add("w", "Work", None, "s1");
+        add("plan", "Plan", Some("w"), "s1");
+        add("deep", "Notes", Some("plan"), "s1");
+        add("other", "Work", None, "s2");
+        assert_eq!(path_parts(" Work / Plan //Ideas "), vec!["Work", "Plan", "Ideas"]);
+        assert!(path_parts(" / ").is_empty());
+        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // All there: the deepest page, nothing to make.
+        assert_eq!(find_path(&pages, "s1", &names(&["work", "PLAN"])), (Some("plan".into()), vec![]));
+        // Part there: the rest is made inside the last page found.
+        assert_eq!(find_path(&pages, "s1", &names(&["Work", "Plan", "Ideas", "Later"])), (Some("plan".into()), names(&["Ideas", "Later"])));
+        // None there: all of it is made at the top.
+        assert_eq!(find_path(&pages, "s1", &names(&["Trips", "Rome"])), (None, names(&["Trips", "Rome"])));
+        // The first name may be a page further down; other spaces do not count.
+        assert_eq!(find_path(&pages, "s1", &names(&["Notes"])), (Some("deep".into()), vec![]));
+        assert_eq!(find_path(&pages, "s2", &names(&["Work", "Plan"])), (Some("other".into()), names(&["Plan"])));
+    }
+
     fn page_in(id: &str, space: &str) -> (Id, Page) {
         let mut p = Page::new(None, 1.0);
         p.id = id.into();
@@ -9408,6 +10589,7 @@ mod tests {
             space: space.into(),
             history: None,
             voice: VoiceFor::NewPage,
+            focus_mode: false,
         }
     }
 
@@ -9432,6 +10614,78 @@ mod tests {
         assert!(!ui.show_tabs_of("one", &pages, Route::Home));
         assert_eq!((titles(&ui.tabs), ui.active), (vec!["a".to_string(), "b".to_string()], 1));
         assert_eq!(titles(&ui.parked["two"].0), vec!["t".to_string()]);
+    }
+
+    #[test]
+    fn only_the_first_window_keeps_its_folds_recent_pages_and_zoom() {
+        let mut ui = ui_with(vec![Tab::new(Route::Home)], "one");
+        ui.zoom = 1.5;
+        ui.expanded.insert("a".into());
+        let keys = |primary: bool| ui_settings(&ui, primary).into_iter().map(|(k, _)| k).collect::<Vec<_>>();
+        assert_eq!(keys(false), ["theme"], "a second window would write its old copy over the first window's");
+        assert_eq!(keys(true), ["theme", "expanded", "recent", "sidebar_open", "sidebar_width", "zoom", "tabs", "space_tabs"]);
+        assert!(ui_settings(&ui, true).contains(&("zoom", "1.5".to_string())));
+    }
+
+    #[test]
+    fn a_page_trashed_by_another_program_is_found_behind_the_page_on_show() {
+        let page = |id: &str| Route::Page(id.to_string());
+        // A tab went from a to b; another program then put a in the Trash.
+        let mut tab = Tab::new(page("a"));
+        tab.push(page("b"));
+        let mut ui = ui_with(vec![tab], "one");
+        let trashed = ["a".to_string(), "old".to_string()];
+        assert!(ui.remembers(&trashed), "a is not on show, but Back leads to it");
+        ui.leave_pages(&trashed);
+        assert_eq!((titles(&ui.tabs), ui.tabs[0].can_back()), (vec!["b".to_string()], false));
+        // Nothing is held now: a reload with the same Trash changes nothing.
+        assert!(!ui.remembers(&trashed));
+        // A tab of a space that is not in front counts too.
+        ui.parked.insert("two".into(), (vec![Tab::new(page("old"))], 0));
+        assert!(ui.remembers(&trashed));
+    }
+
+    #[test]
+    fn back_does_not_open_a_page_that_went_to_the_trash() {
+        let page = |id: &str| Route::Page(id.to_string());
+        // One tab went from a to b; a second shows a beside c.
+        let mut first = Tab::new(page("a"));
+        first.push(page("b"));
+        let mut second = Tab::new(page("c"));
+        second.add_pane(Pane::new(page("a")), None, Edge::Right);
+        let mut ui = ui_with(vec![first, second], "one");
+        ui.recent = vec!["b".into(), "a".into()];
+        // b goes to the Trash: its tab shows Home, and Back leads to a, not to b.
+        ui.leave_pages(&["b".to_string()]);
+        assert_eq!(titles(&ui.tabs), ["home", "a"]);
+        assert_eq!(ui.tabs[0].panes[0].history, [page("a"), Route::Home]);
+        assert!(ui.tabs[0].can_back() && !ui.tabs[0].can_forward());
+        // a goes too: the pane beside c closes, and the first tab has only Home left.
+        ui.leave_pages(&["a".to_string()]);
+        assert_eq!((ui.tabs[1].panes.len(), titles(&ui.tabs)), (1, vec!["home".to_string(), "c".to_string()]));
+        assert_eq!(ui.tabs[0].panes[0].history, [Route::Home]);
+        assert!(!ui.tabs[0].can_back());
+        assert!(ui.recent.is_empty());
+        // A page behind the one on show is forgotten as well, and the page on show stays.
+        let mut tab = Tab::new(page("x"));
+        tab.push(page("y"));
+        let mut ui = ui_with(vec![tab], "one");
+        ui.leave_pages(&["x".to_string()]);
+        assert_eq!((titles(&ui.tabs), ui.tabs[0].can_back()), (vec!["y".to_string()], false));
+    }
+
+    #[test]
+    fn what_a_deleted_space_held_goes_to_the_space_that_takes_it() {
+        let mut pages: HashMap<Id, Page> = [page_in("a", "one"), page_in("old", "two")].into_iter().collect();
+        let mut events: HashMap<Id, Event> =
+            [Event::new("two", "Call", 0, 1, false), Event::new("one", "Lunch", 0, 1, false)].into_iter().map(|e| (e.title.clone(), e)).collect();
+        rehome(&mut pages, &mut events, &["two".to_string()], "one");
+        assert_eq!((pages["a"].space_id.as_str(), pages["old"].space_id.as_str()), ("one", "one"));
+        assert_eq!((events["Call"].space_id.as_str(), events["Lunch"].space_id.as_str()), ("one", "one"));
+        // Nothing of a space that stays is touched.
+        pages.insert("w".into(), page_in("w", "work").1);
+        rehome(&mut pages, &mut events, &["two".to_string()], "one");
+        assert_eq!(pages["w"].space_id, "work");
     }
 
     #[test]
@@ -9629,12 +10883,131 @@ mod tests {
     }
 
     #[test]
+    fn a_no_to_a_call_holds_at_a_pause_near_an_event() {
+        const MIN: i64 = when::MINUTE;
+        let now = 1_800_000_000_000i64;
+        // Refused an hour ago, on since, quiet for forty seconds; an event
+        // of the calendar starts in five minutes.
+        let no = Declined { app: Some("Discord".into()), seen: now - 40_000, said: now - 60 * MIN, of: None };
+        let event = ("e1".to_string(), now + 5 * MIN, now + 35 * MIN);
+        assert!(still_declined(Some(&no), "Discord", now, None));
+        assert!(still_declined(Some(&no), "Discord", now, Some(&event)), "a pause of the long call is not the meeting of the calendar");
+        // The same for a no that was said under the name of an event that is over.
+        let named = Declined { of: Some(("e0".to_string(), now - 60 * MIN, now - 30 * MIN)), ..no.clone() };
+        assert!(still_declined(Some(&named), "Discord", now, Some(&event)));
+        // A call in another program at that moment is that meeting, and asks.
+        assert!(!still_declined(Some(&no), "Microsoft Teams", now, Some(&event)));
+        // A call that was refused and has ended, however long it was: the
+        // meeting of the calendar that starts in the same program some
+        // minutes later is the next one, and asks.
+        let event_now = ("e2".to_string(), now, now + 30 * MIN);
+        let ended = Declined { app: Some("Microsoft Teams".into()), seen: now - 5 * MIN, said: now - 35 * MIN, of: None };
+        assert!(!still_declined(Some(&ended), "Microsoft Teams", now, Some(&event_now)));
+        let short = Declined { app: Some("Microsoft Teams".into()), seen: now - 4 * MIN, said: now - 9 * MIN, of: None };
+        assert!(!still_declined(Some(&short), "Microsoft Teams", now, Some(&event)));
+        // With no event near, a call that is back within twenty minutes is still that call.
+        assert!(still_declined(Some(&ended), "Microsoft Teams", now, None));
+        // The long call asks again after its twenty quiet minutes.
+        let quiet = Declined { seen: now - 21 * MIN, ..no.clone() };
+        assert!(!still_declined(Some(&quiet), "Discord", now, Some(&event)));
+        // The long call, silent for three minutes: still a pause.
+        let three = Declined { seen: now - 190_000, said: now - 3 * 60 * MIN, ..no.clone() };
+        assert!(still_declined(Some(&three), "Discord", now, Some(&event)));
+        // A call refused a moment ago that is silent for three minutes has ended.
+        let brief = Declined { seen: now - 190_000, said: now - 6 * MIN, ..no.clone() };
+        assert!(!still_declined(Some(&brief), "Discord", now, Some(&event)));
+    }
+
+    #[test]
+    fn the_event_of_a_no_keeps_it_only_for_the_call_that_was_refused() {
+        const MIN: i64 = when::MINUTE;
+        let start = 1_800_000_000_000i64;
+        let event = ("e1".to_string(), start, start + 30 * MIN);
+        // Refused ten minutes before the event, under its name, and over
+        // five minutes before it: the call at the start of the event is
+        // the meeting of the event, and asks.
+        let over = Declined { app: Some("Microsoft Teams".into()), seen: start - 5 * MIN, said: start - 10 * MIN, of: Some(event.clone()) };
+        assert!(!still_declined(Some(&over), "Microsoft Teams", start, Some(&event)));
+        assert!(!still_declined(Some(&over), "Microsoft Teams", start + 16 * MIN, Some(&event)));
+        // Joined ten minutes early, refused, and still in that call when the event starts: refused.
+        let still_on = Declined { seen: start + 2 * MIN, ..over.clone() };
+        assert!(still_declined(Some(&still_on), "Microsoft Teams", start + 12 * MIN, Some(&event)));
+        assert!(still_declined(Some(&still_on), "Microsoft Teams", start + 28 * MIN, Some(&event)), "quiet for long, but its event is on");
+        // That call paused for a minute just before the event: refused.
+        let paused = Declined { seen: start - MIN, ..over.clone() };
+        assert!(still_declined(Some(&paused), "Microsoft Teams", start, Some(&event)));
+    }
+
+    #[test]
+    fn notes_bound_to_a_meetings_program_stay_bound_to_it() {
+        // Notes made from an event, bound to the meeting's program; the
+        // voice call takes the microphone again: they stay the meeting's.
+        assert_eq!(bound_to(None, "Microsoft Teams"), "Microsoft Teams");
+        assert_eq!(bound_to(Some("Microsoft Teams"), "Discord"), "Microsoft Teams");
+        assert_eq!(bound_to(Some("Microsoft Teams"), "Microsoft Teams"), "Microsoft Teams");
+        // A call that passes from the browser to its own program is bound to that.
+        assert_eq!(bound_to(Some("Google Chrome"), "Zoom"), "Zoom");
+        // The notes that are on are another program's: made for it, or bound to it.
+        assert!(notes_of_another(Some("Microsoft Teams"), None, "Discord"));
+        assert!(notes_of_another(None, Some("Microsoft Teams"), "Discord"));
+        assert!(!notes_of_another(None, None, "Discord"), "notes made by hand, with no program yet");
+        assert!(!notes_of_another(None, Some("Discord"), "Discord"));
+    }
+
+    #[test]
+    fn a_refused_call_that_starts_leaves_the_notes_of_another_program_alone() {
+        const MIN: i64 = when::MINUTE;
+        let now = 1_800_000_000_000i64;
+        let nos = vec![Declined { app: Some("Discord".into()), seen: now - MIN, said: now - 5 * 60 * MIN, of: None }];
+        // The notes of a meeting in another call program: not its notes,
+        // though its no is too old to hold (it was seen a minute ago).
+        assert!(!still_declined(no_for(&nos, "Discord"), "Discord", now, None));
+        assert!(refused_lately(&nos, "Discord", now));
+        assert!(not_its_notes(&nos, Some("Microsoft Teams"), "Discord", now));
+        // Notes made by hand, its own notes, and a call that passes from or to a browser can carry on.
+        assert!(!not_its_notes(&nos, None, "Discord", now));
+        assert!(!not_its_notes(&nos, Some("Discord"), "Discord", now));
+        assert!(!not_its_notes(&nos, Some("Google Chrome"), "Discord", now));
+        // A program that was not refused, or was refused long ago, is not held back.
+        assert!(!not_its_notes(&nos, Some("Microsoft Teams"), "Zoom", now));
+        assert!(!refused_lately(&nos, "Discord", now + 20 * MIN));
+        assert!(!not_its_notes(&nos, Some("Microsoft Teams"), "Discord", now + 20 * MIN));
+    }
+
+    #[test]
     fn the_meeting_is_written_down_in_a_form_that_reads_back() {
         let kept = KeptMeeting { page: "p".into(), stamp: "s".into(), started: 5, ended: None, app: Some("Zoom".into()), noticed: true, span: Some((1, 9)), event: Some("e".into()), padded: true, listened: false, seen: 7, draft: true };
         let back: KeptMeeting = serde_json::from_str(&serde_json::to_string(&kept).unwrap()).unwrap();
         assert_eq!((back.page.as_str(), back.started, back.ended, back.app.as_deref(), back.span, back.event.as_deref(), back.padded, back.seen), ("p", 5, None, Some("Zoom"), Some((1, 9)), Some("e"), true, 7));
         // What an older run wrote (or nothing) is not a meeting.
         assert!(serde_json::from_str::<KeptMeeting>("").is_err());
+    }
+
+    #[test]
+    fn there_is_one_no_for_each_program() {
+        let t0 = 1_800_000_000_000i64;
+        let said = |app: &str, at: i64| Declined { app: Some(app.to_string()), seen: at, said: at, of: None };
+        // A long call is refused; then a meeting in a second program is refused too.
+        let nos = with_no(Vec::new(), said("Discord", t0));
+        let nos = with_no(nos, said("Microsoft Teams", t0 + 60_000));
+        assert_eq!(nos.len(), 2);
+        assert!(still_declined(no_for(&nos, "Discord"), "Discord", t0 + 120_000, None), "the no to the first call holds");
+        assert!(still_declined(no_for(&nos, "Microsoft Teams"), "Microsoft Teams", t0 + 120_000, None));
+        assert_eq!(no_for(&nos, "Zoom"), None);
+        // A later no to the same program takes the place of the earlier one.
+        let nos = with_no(nos, said("Discord", t0 + 180_000));
+        assert_eq!(nos.len(), 2);
+        assert_eq!(no_for(&nos, "Discord").map(|d| d.said), Some(t0 + 180_000));
+        // A new meeting in the second program asks again: only its no goes.
+        let nos = without_no(nos, "Microsoft Teams");
+        assert_eq!(nos.iter().map(|d| d.app.as_deref()).collect::<Vec<_>>(), vec![Some("Discord")]);
+        // The list is written down and read back; what an older version
+        // wrote (one no, not in a list) is read as a list of one.
+        let text = serde_json::to_string(&nos).unwrap();
+        assert_eq!(read_declined(&text), nos);
+        let old = serde_json::to_string(&said("Discord", t0)).unwrap();
+        assert_eq!(read_declined(&old), vec![said("Discord", t0)]);
+        assert_eq!(read_declined(""), Vec::new());
     }
 
     #[test]
@@ -9820,6 +11193,55 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&g.to_json()).unwrap();
         assert_eq!(json["nodes"][0]["t"], "Plan");
         assert_eq!(json["edges"][0], serde_json::json!([0, 1, 1]));
+    }
+
+    /// A locked page that is open has its lines in plain in the window:
+    /// the graph shows none of its links, and an export of every page
+    /// writes it as a shut one.
+    #[test]
+    fn a_space_that_the_sender_does_not_know_is_not_gone() {
+        let space = |id: &str, position: f64| {
+            let mut s = Space::new(id, "blue", position);
+            s.id = id.into();
+            s
+        };
+        let (home, work, synced) = (space("home", 1.0), space("work", 2.0), space("synced", 3.0));
+        let ids = |list: &[Space]| list.iter().map(|s| s.id.clone()).collect::<Vec<_>>();
+        // The sender's list is older: it has no "synced", the notes file has it.
+        let file = vec![home.clone(), work.clone(), synced.clone()];
+        let (list, gone) = spaces_told(&file, vec![home.clone(), work.clone()], Some(file.clone()));
+        assert_eq!((ids(&list), gone), (ids(&file), vec![]), "the space stays, and its pages stay in it");
+        // A space deleted in the other window is not in the file either: gone.
+        let (list, gone) = spaces_told(&file, vec![home.clone(), synced.clone()], Some(vec![home.clone(), synced.clone()]));
+        assert_eq!((ids(&list), gone), (vec!["home".to_string(), "synced".to_string()], vec!["work".to_string()]));
+        // A new space of the sender comes; a file that cannot be read takes nothing away.
+        let (list, gone) = spaces_told(&[home.clone()], vec![home.clone(), work.clone()], Some(vec![home.clone(), work.clone()]));
+        assert_eq!((ids(&list), gone), (vec!["home".to_string(), "work".to_string()], vec![]));
+        let (list, gone) = spaces_told(&file, vec![home.clone()], None);
+        assert_eq!((ids(&list), gone), (ids(&file), vec![]));
+    }
+
+    #[test]
+    fn an_open_locked_page_shows_no_links_and_is_exported_shut() {
+        let named = |title: &str, at: i64| {
+            let mut p = Page::new(None, 1.0);
+            p.title = title.into();
+            p.space_id = "home".into();
+            p.created_at = at;
+            p
+        };
+        let (diary, plan) = (named("Diary", 1), named("Plan", 2));
+        let link = |p: &Page| inline::link(&p.title, &format!("notion2://page/{}", p.id));
+        let mut blocks: HashMap<Id, Vec<Block>> = [(diary.id.clone(), vec![Block::text(format!("The code is 4711, see {}", link(&plan)))]), (plan.id.clone(), vec![Block::text("Plain")])].into_iter().collect();
+        let pages: HashMap<Id, Page> = [&diary, &plan].into_iter().map(|p| (p.id.clone(), p.clone())).collect();
+        assert_eq!(page_graph(&pages, &blocks, "home").edges, vec![(0, 1, false)]);
+        crate::lock::hold(&diary.id, crate::lock::test_key("pw-pw-pw"), 0);
+        assert!(page_graph(&pages, &blocks, "home").edges.is_empty(), "open and locked: no link of it shows");
+        shut_open_pages(&mut blocks, &crate::lock::open_pages());
+        crate::lock::forget(&diary.id);
+        let out = markdown::from_blocks(&diary.title, &blocks[&diary.id], |_| String::new());
+        assert!(out.contains("Locked page") && !out.contains("4711"), "{out}");
+        assert_eq!(blocks[&plan.id][0].text, "Plain", "a page with no lock is as it was");
     }
 
     #[test]

@@ -141,6 +141,10 @@ impl Engine {
         let conn = Connection::open(db).map_err(err)?;
         conn.busy_timeout(std::time::Duration::from_secs(5)).map_err(err)?;
         conn.pragma_update(None, "journal_mode", "WAL").map_err(err)?;
+        // As the app's own connection (store.rs): what this one deletes is
+        // overwritten too. It takes the plain lines of a page out when the
+        // page comes locked from another device.
+        conn.pragma_update(None, "secure_delete", "ON").map_err(err)?;
         std::fs::create_dir_all(state).map_err(err)?;
         let mut engine = Engine { conn, state: state.to_path_buf(), pictures, device: String::new(), name: name.to_string(), told: HashMap::new() };
         engine.conn.execute_batch(TABLES).map_err(err)?;
@@ -698,21 +702,52 @@ fn apply(tx: &Connection, change: &Change, report: &mut Report) -> Result<(), St
             // wins; else the newer one. The loser of two pages goes to the
             // page's history.
             report.conflicts += 1;
-            let wins = match (change.removed, *removed) {
+            let mut wins = match (change.removed, *removed) {
                 (false, true) => true,
                 (true, false) => false,
                 _ => change.version.newer_than(version),
             };
+            let here = if change.kind == "page" && !removed { read_page(tx, &change.id)? } else { None };
+            // A page locked in one place and changed in plain in the other
+            // (the phone changed it while the Mac locked it): the locked
+            // side wins whatever the versions say. By the versions alone
+            // the plain lines took the place of the sealed page about half
+            // the time. The plain lines are never lost: the device that
+            // has them keeps them in its own history when the locked page
+            // takes their place (below, and rule 4 on the phone). They are
+            // only not written into the history of the device that holds
+            // the locked page.
+            let (sealed_here, sealed_there) = (here.as_ref().is_some_and(|p| is_sealed(&p.blocks)), change.page.as_ref().is_some_and(|p| is_sealed(&p.blocks)));
+            let lock_decides = !change.removed && !removed && sealed_here != sealed_there;
+            if lock_decides && sealed_here {
+                if wins {
+                    // The page here gets a newer version than the one that
+                    // lost, and goes out again. Its `base` stays what this
+                    // Mac last wrote, not the loser's version: the device
+                    // that has the plain lines then sees two changes at
+                    // once, the locked page wins there by its version, and
+                    // that device keeps its own lines in its history. (As
+                    // a change on top of the loser's, it was taken as an
+                    // ordinary change and the lines were gone.)
+                    if let Some(device) = get_meta(tx, "device")? {
+                        let clock = get_meta(tx, "clock")?.and_then(|v| v.parse::<i64>().ok()).unwrap_or(0).max(change.version.clock) + 1;
+                        set_meta(tx, "clock", &clock.to_string())?;
+                        tx.execute("UPDATE sync_records SET clock = ?3, device = ?4 WHERE kind = ?1 AND id = ?2", params![change.kind, change.id, clock, device]).map_err(err)?;
+                    }
+                }
+                return Ok(());
+            }
+            wins = wins || lock_decides;
             if !wins {
                 if let Some(page) = &change.page {
                     add_to_history(tx, &change.id, &page.title, &page.blocks, page.updated_at)?;
                 }
                 return Ok(());
             }
-            if change.kind == "page" && !removed {
-                if let Some(page) = read_page(tx, &change.id)? {
-                    add_to_history(tx, &change.id, &page.title, &page.blocks, page.updated_at)?;
-                }
+            // (Also the plain lines of here that a locked page takes the
+            // place of: they were written here, and are not lost.)
+            if let Some(page) = here {
+                add_to_history(tx, &change.id, &page.title, &page.blocks, page.updated_at)?;
             }
         }
     }
@@ -869,6 +904,11 @@ fn add_to_history(tx: &Connection, page: &str, title: &str, blocks: &[SyncBlock]
     )
     .map_err(err)?;
     Ok(())
+}
+
+/// The lines of a locked page: one sealed line (see lock.rs).
+fn is_sealed(blocks: &[SyncBlock]) -> bool {
+    crate::lock::sealed(&blocks.iter().map(to_block).collect::<Vec<_>>()).is_some()
 }
 
 fn to_block(b: &SyncBlock) -> Block {
@@ -1351,6 +1391,116 @@ mod tests {
         assert_eq!((report.applied, report.conflicts), (0, 1));
         assert_eq!(version_of(&mac, "page", "plan"), now);
         assert_eq!(mac.one("SELECT title FROM page_versions WHERE page_id = 'plan' ORDER BY id DESC LIMIT 1"), "Text(\"Old phone title\")");
+    }
+
+    /// A page as a Mac that locked it writes it: one sealed line.
+    fn sealed_lines(page: &str, words: &str) -> Block {
+        crate::lock::seal_with(&crate::lock::test_key("pw-pw-pw"), page, &[Block::text(words)])
+    }
+
+    fn locked_blocks(mac: &Mac, page: &str) -> String {
+        mac.one(&format!("SELECT group_concat(kind) FROM blocks WHERE page_id = '{page}'"))
+    }
+
+    #[test]
+    fn a_locked_page_wins_over_plain_lines_changed_at_the_same_time() {
+        let mut mac = Mac::new("lock-wins");
+        let own = mac.own();
+        let base = version_of(&mac, "page", "plan");
+        // The Mac locks the page and sends it. The phone changed the page
+        // too, from the same base, with a newer clock: by the versions the
+        // phone's plain lines would win.
+        crate::store::Store::open(mac.db.clone()).unwrap().save_blocks_at("plan", &[sealed_lines("plan", "The code is 4711")], now_ms()).unwrap();
+        mac.run(&[own.clone()]);
+        let sent = version_of(&mac, "page", "plan");
+        phone_writes(&own, 1, vec![phone_page(Some(base), 1000, "Phone title", "Buy milk in plain")]);
+        let report = mac.run(&[own.clone()]);
+        assert_eq!((report.applied, report.conflicts, report.written), (0, 1, 1));
+        assert_eq!(locked_blocks(&mac, "plan"), "Text(\"locked\")", "the page is still locked");
+        assert_eq!(mac.one("SELECT title FROM pages WHERE id = 'plan'"), "Text(\"Plan\")");
+        assert_eq!(mac.one("SELECT count(*) FROM page_versions WHERE page_id = 'plan'"), "Integer(0)", "the plain lines are not in its history");
+        // It went out again with a version newer than the phone's, and
+        // with the base it had (what the Mac sent before), not the phone's
+        // version: the phone, which let its own lines win, sees two changes
+        // at once, the locked page wins there by its version, and the phone
+        // keeps its own lines in its history (its rule 4).
+        let files = mac.change_files(&own);
+        let again = files.last().unwrap().changes.last().unwrap().clone();
+        let phone = Version { clock: 1000, device: PHONE.into() };
+        assert_eq!(again.base, Some(sent), "not an ordinary change on top of the phone's lines");
+        assert!(again.version.newer_than(&phone) && again.version.device == mac.engine.device());
+        assert_eq!(again.page.unwrap().blocks.iter().map(|b| b.kind.as_str()).collect::<Vec<_>>(), ["locked"]);
+        // The same file of the phone again changes nothing, and nothing more goes out.
+        assert_eq!(mac.run(&[own.clone()]), Report { devices: vec![], ..Default::default() });
+        // An older plain change loses by its version: not kept in the history either.
+        phone_writes(&own, 2, vec![phone_page(Some(Version { clock: 3, device: PHONE.into() }), 4, "Old phone title", "plain too")]);
+        let report = mac.run(&[own.clone()]);
+        assert_eq!((report.applied, report.conflicts, report.written), (0, 1, 0));
+        assert_eq!(locked_blocks(&mac, "plan"), "Text(\"locked\")");
+        assert_eq!(mac.one("SELECT count(*) FROM page_versions WHERE page_id = 'plan'"), "Integer(0)");
+    }
+
+    #[test]
+    fn a_page_that_comes_locked_wins_over_plain_lines_changed_here() {
+        let mut mac = Mac::new("lock-arrives");
+        let own = mac.own();
+        let base = version_of(&mac, "page", "plan");
+        // This Mac changed the page three times; another device locked it
+        // from the same base, with an older clock: by the versions the
+        // plain lines here would win.
+        for title in ["One", "Two", "Three"] {
+            mac.sql(&format!("UPDATE pages SET title = '{title}' WHERE id = 'plan'; UPDATE blocks SET text = 'Written here: {title}' WHERE page_id = 'plan';"));
+            mac.run(&[own.clone()]);
+        }
+        let here = version_of(&mac, "page", "plan");
+        let sealed = sealed_lines("plan", "The code is 4711");
+        let mut change = phone_page(Some(base), here.clock - 1, "Plan", "");
+        change.page.as_mut().unwrap().blocks = vec![SyncBlock { id: sealed.id.clone(), kind: "locked".into(), data: sealed.data.clone(), ..Default::default() }];
+        phone_writes(&own, 1, vec![change]);
+        let report = mac.run(&[own.clone()]);
+        assert_eq!((report.applied, report.conflicts, report.written), (1, 1, 0));
+        assert_eq!(locked_blocks(&mac, "plan"), "Text(\"locked\")", "the page is locked here too");
+        // What was written here is not lost: it is in the history of this Mac.
+        assert_eq!(mac.one("SELECT count(*) FROM page_versions WHERE page_id = 'plan'"), "Integer(1)");
+        assert_eq!(mac.one("SELECT title FROM page_versions WHERE page_id = 'plan'"), "Text(\"Three\")");
+        assert_eq!(mac.one("SELECT instr(blocks, 'Written here: Three') > 0 FROM page_versions WHERE page_id = 'plan'"), "Integer(1)");
+    }
+
+    /// Two Macs have the page locked. On one the password is removed and
+    /// lines are written; on the other the page is given a new name before
+    /// the two sync. The locked page wins on both, the written lines are in
+    /// the history of the Mac they were written on, and the two come to rest.
+    #[test]
+    fn lines_written_after_a_lock_came_off_are_kept_when_the_locked_page_wins() {
+        let mut one = Mac::new("lock-one");
+        let mut two = Mac::new("lock-two");
+        let cloud = one.dir.join("icloud");
+        std::fs::create_dir_all(&cloud).unwrap();
+        let (folders1, folders2) = (vec![one.own(), cloud.clone()], vec![two.own(), cloud.clone()]);
+        let both = |one: &mut Mac, two: &mut Mac| {
+            let mut quiet = 0;
+            for _ in 0..12 {
+                let (a, b) = (one.run(&folders1), two.run(&folders2));
+                quiet = if a.written + a.applied + b.written + b.applied == 0 { quiet + 1 } else { 0 };
+                if quiet == 2 {
+                    return;
+                }
+            }
+            panic!("the two Macs do not come to rest");
+        };
+        both(&mut one, &mut two);
+        crate::store::Store::open(one.db.clone()).unwrap().save_blocks_at("plan", &[sealed_lines("plan", "The code is 4711")], now_ms()).unwrap();
+        both(&mut one, &mut two);
+        assert_eq!((locked_blocks(&one, "plan"), locked_blocks(&two, "plan")), ("Text(\"locked\")".to_string(), "Text(\"locked\")".to_string()));
+        // Mac two: the password is removed, and lines are written. Mac one: a new name.
+        two.sql("DELETE FROM blocks WHERE page_id = 'plan'; INSERT INTO blocks(id, page_id, position, kind, text) VALUES ('w1', 'plan', 0, 'text', 'Written after the lock came off');");
+        one.sql("UPDATE pages SET title = 'Plan B' WHERE id = 'plan';");
+        both(&mut one, &mut two);
+        assert_eq!((locked_blocks(&one, "plan"), locked_blocks(&two, "plan")), ("Text(\"locked\")".to_string(), "Text(\"locked\")".to_string()), "the locked page wins on both");
+        assert_eq!(version_of(&one, "page", "plan"), version_of(&two, "page", "plan"));
+        assert_eq!(two.one("SELECT title FROM pages WHERE id = 'plan'"), "Text(\"Plan B\")");
+        assert_eq!(two.one("SELECT count(*) FROM page_versions WHERE page_id = 'plan' AND instr(blocks, 'Written after the lock came off') > 0"), "Integer(1)", "the lines are in the history of the Mac they were written on");
+        assert_eq!(one.one("SELECT count(*) FROM page_versions WHERE page_id = 'plan' AND instr(blocks, 'Written after the lock came off') > 0"), "Integer(0)", "and not in the history of the Mac that holds the locked page");
     }
 
     #[test]

@@ -234,9 +234,11 @@ pub struct View {
     pub title: String,
     pub when: String,
     pub icon: Option<String>,
-    /// The app's theme class and its glass colours (see `glass::css_vars`).
+    /// The app's theme class and its glass colours (see `glass::css_vars`),
+    /// and its accent colour by name ("" for the app's blue).
     pub theme: String,
     pub glass: String,
+    pub accent: String,
     /// This copy of the app can listen, and is not listening to something else.
     pub can_listen: bool,
     pub has_ai: bool,

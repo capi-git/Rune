@@ -8,6 +8,9 @@
 use crate::model::{utf16_len, Block, Caret, Id};
 
 const GROUP_TYPING_MS: i64 = 1200;
+/// The longest run of typing that is one step. (With no pause it had no
+/// end: a minute of typing went with one Undo.)
+const LONGEST_TYPING_MS: i64 = 5000;
 const LIMIT: usize = 300;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -18,10 +21,23 @@ pub struct Entry {
     /// Set while the step is plain typing in this block (so it can grow).
     typing: Option<Id>,
     at: i64,
+    /// When the step began.
+    since: i64,
     /// Pages moved to the trash by this step (restored on undo).
     pub trashed: Vec<Id>,
     /// Pages created by this step (moved to the trash on undo).
     pub created: Vec<Id>,
+}
+
+impl Entry {
+    /// A block of this step has another id in the page now (a table that
+    /// came back as a copy, see `tables_put_back` in state.rs): the step
+    /// goes by that id.
+    pub fn rename_block(&mut self, was: &str, now: &str) {
+        for b in self.before.iter_mut().chain(self.after.iter_mut()).filter(|b| b.id == was) {
+            b.id = now.to_string();
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -37,7 +53,7 @@ impl History {
         }
         self.redo.retain(|e| e.page != page);
         if let (Some(t), Some(last)) = (typing, self.undo.last_mut()) {
-            if last.page == page && last.typing.as_deref() == Some(t) && now - last.at < GROUP_TYPING_MS {
+            if last.page == page && last.typing.as_deref() == Some(t) && now - last.at < GROUP_TYPING_MS && now - last.since < LONGEST_TYPING_MS {
                 last.after = after;
                 last.at = now;
                 return;
@@ -49,6 +65,7 @@ impl History {
             after,
             typing: typing.map(str::to_string),
             at: now,
+            since: now,
             trashed: Vec::new(),
             created: Vec::new(),
         });
@@ -203,6 +220,18 @@ mod tests {
         h.record("p", b, c, Some(&id), 5000);
         assert!(h.take_undo("p").is_some() && h.take_undo("p").is_some());
         assert!(h.take_undo("p").is_none());
+        // Typing with no pause: a new step after five seconds, not one step for it all.
+        let mut text = Block::text("");
+        text.id = id.clone();
+        let mut before = vec![text];
+        for n in 1..=30 {
+            let mut after = before.clone();
+            after[0].text.push('x');
+            h.record("p", before.clone(), after.clone(), Some(&id), n * 500);
+            before = after;
+        }
+        let steps: Vec<usize> = std::iter::from_fn(|| h.take_undo("p")).map(|e| e.after[0].text.len() - e.before[0].text.len()).collect();
+        assert_eq!(steps, [10, 10, 10]);
     }
 
     #[test]

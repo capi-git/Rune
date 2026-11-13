@@ -76,7 +76,10 @@ pub fn ColumnMenu(page_id: String, id: String, c: usize, table: Table) -> Elemen
     let sorted = table.view.sort.iter().find(|s| s.column == c).map(|s| s.down);
     // (By the column's own place in the table: see `Grid`.)
     let place = c;
-    let frozen_here = table.view.frozen == place + 1;
+    // (The last frozen column that shows: when the last frozen column is
+    // hidden, no menu that can be opened said "Unfreeze".)
+    let frozen_here = table.shown_columns().into_iter().filter(|&shown| shown < table.view.frozen).max() == Some(place);
+    let names_pages = c == 0 && table.has_ids();
     let grouped = table.view.group == Some(c);
     let total = column.total.map(|t| t.label()).unwrap_or("None");
     let from_name = (!column.from.is_empty()).then(|| state.tables_to_link(&page_id, &id).into_iter().find(|(block, _)| *block == column.from).map(|(_, name)| name).unwrap_or_else(|| "Gone".to_string())).unwrap_or_else(|| "Choose".to_string());
@@ -158,10 +161,14 @@ pub fn ColumnMenu(page_id: String, id: String, c: usize, table: Table) -> Elemen
                 },
             }
             if !locked {
-                MenuRow { icon: "insert-left", label: "Insert left", name: "left", onpick: op("left") }
+                // (The first column of a table whose rows have pages is
+                // their names: nothing goes before it, and it stays.)
+                if !names_pages {
+                    MenuRow { icon: "insert-left", label: "Insert left", name: "left", onpick: op("left") }
+                }
                 MenuRow { icon: "insert-right", label: "Insert right", name: "right", onpick: op("right") }
                 MenuRow { icon: "duplicate", label: "Duplicate", name: "duplicate", onpick: op("duplicate") }
-                if table.columns() > 1 {
+                if table.columns() > 1 && !names_pages {
                     MenuRow { icon: "trash", label: "Delete", name: "delete", onpick: op("delete") }
                 }
             }

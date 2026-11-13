@@ -31,6 +31,34 @@ pub fn midnight(date: NaiveDate) -> i64 {
     at(date, NaiveTime::MIN)
 }
 
+/// The day that the start of an all-day event means (and, for its end, the
+/// day after its last). Such an event is kept as the moments of midnight in
+/// the time zone it was made in. After travel those moments are some hours
+/// off the midnight of this zone: taken as they are, the event showed on the
+/// day before or on two days, and its reminder came a day early. The nearest
+/// midnight here is the day that was meant (while the two zones are less
+/// than twelve hours apart).
+pub fn whole_day(ms: i64) -> NaiveDate {
+    whole_day_in(&Local, ms)
+}
+
+fn whole_day_in<Z: TimeZone>(zone: &Z, ms: i64) -> NaiveDate {
+    zone.timestamp_millis_opt(ms + 12 * HOUR).single().map(|t| t.date_naive()).unwrap_or_else(|| date_of(ms))
+}
+
+/// The next whole hour by the local clock after a moment (10:10 gives
+/// 11:00). Worked out in hours since 1970, it was a half hour (10:30) where
+/// the zone is a half hour off, as in India.
+pub fn next_hour(ms: i64) -> i64 {
+    next_hour_in(&Local, ms)
+}
+
+fn next_hour_in<Z: TimeZone>(zone: &Z, ms: i64) -> i64 {
+    let Some(t) = zone.timestamp_millis_opt(ms).single() else { return (ms / HOUR + 1) * HOUR };
+    let into_the_hour = i64::from(t.minute()) * MINUTE + i64::from(t.second()) * 1000 + i64::from(t.timestamp_subsec_millis());
+    ms - into_the_hour + HOUR
+}
+
 pub fn next_day(date: NaiveDate) -> NaiveDate {
     date.checked_add_days(Days::new(1)).unwrap_or(date)
 }
@@ -257,6 +285,44 @@ mod tests {
         assert_eq!(from_now(start, end, end - 1), "Now");
         assert_eq!(from_now(start, end, end + 2 * HOUR), "Ended 2 hours ago");
         assert_eq!(from_now(start, end, end + 5 * MINUTE), "Ended 5 minutes ago");
+    }
+
+    #[test]
+    fn an_all_day_event_keeps_its_day_in_another_time_zone() {
+        let los_angeles = chrono::FixedOffset::west_opt(8 * 3600).unwrap();
+        let london = chrono::FixedOffset::east_opt(0).unwrap();
+        let day = |d: u32| NaiveDate::from_ymd_opt(2026, 11, d).unwrap();
+        let midnight_in = |zone: &chrono::FixedOffset, d: u32| zone.from_local_datetime(&NaiveDateTime::new(day(d), NaiveTime::MIN)).unwrap().timestamp_millis();
+        // "Trip" on 20 November, made in Los Angeles: from that midnight to the next.
+        let (start, end) = (midnight_in(&los_angeles, 20), midnight_in(&los_angeles, 21));
+        assert_eq!((whole_day_in(&los_angeles, start), whole_day_in(&los_angeles, end)), (day(20), day(21)));
+        // Read in London, those moments are 8 in the morning: still the 20th, one day.
+        // (Taken as they are, the end fell in the 21st, and the trip showed on two days.)
+        assert_eq!(london.timestamp_millis_opt(end - 1).unwrap().date_naive(), day(21));
+        assert_eq!((whole_day_in(&london, start), whole_day_in(&london, end)), (day(20), day(21)));
+        // Made in London and read in Los Angeles, they are 4 in the afternoon of the day before: still the 20th.
+        // (Taken as they are, the trip began on the 19th, and its reminder came then.)
+        let (start, end) = (midnight_in(&london, 20), midnight_in(&london, 21));
+        assert_eq!(los_angeles.timestamp_millis_opt(start).unwrap().date_naive(), day(19));
+        assert_eq!((whole_day_in(&los_angeles, start), whole_day_in(&los_angeles, end)), (day(20), day(21)));
+        // In this Mac's own zone a midnight is its own day, also on the days the clocks change.
+        for d in [NaiveDate::from_ymd_opt(2026, 3, 8).unwrap(), NaiveDate::from_ymd_opt(2026, 11, 1).unwrap(), day(20)] {
+            assert_eq!((whole_day(midnight(d)), whole_day(midnight(next_day(d)))), (d, next_day(d)));
+        }
+    }
+
+    #[test]
+    fn the_next_whole_hour_is_by_the_local_clock() {
+        let india = chrono::FixedOffset::east_opt(5 * 3600 + 1800).unwrap();
+        let clock = |h: u32, m: u32| india.from_local_datetime(&NaiveDateTime::new(NaiveDate::from_ymd_opt(2026, 11, 12).unwrap(), NaiveTime::from_hms_opt(h, m, 0).unwrap())).unwrap().timestamp_millis();
+        // 10:10 in India: 11:00 there. (In hours since 1970 it was 10:30.)
+        assert_eq!(next_hour_in(&india, clock(10, 10)), clock(11, 0));
+        assert_eq!((clock(10, 10) / HOUR + 1) * HOUR, clock(10, 30));
+        assert_eq!(next_hour_in(&india, clock(10, 0)), clock(11, 0));
+        assert_eq!(next_hour_in(&india, clock(10, 59) + 59_999), clock(11, 0));
+        // In this Mac's zone: a whole hour of its clock, less than an hour away.
+        let now = at(NaiveDate::from_ymd_opt(2026, 11, 12).unwrap(), NaiveTime::from_hms_opt(10, 10, 0).unwrap());
+        assert_eq!(time_label(next_hour(now)), "11 AM");
     }
 
     #[test]
