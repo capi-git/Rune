@@ -19,6 +19,16 @@ pub fn label(route: &Route, pages: &std::collections::HashMap<String, crate::mod
     }
 }
 
+/// The letter a pinned tab shows in place of an icon: the first of the
+/// page's name, for a page with no icon (the grey page sign made all such
+/// tabs look the same). None for a page with an icon or with no name, and
+/// for Home, the calendar and the graph, which have icons.
+fn pin_letter(route: &Route, pages: &std::collections::HashMap<String, crate::model::Page>) -> Option<String> {
+    let Route::Page(id) = route else { return None };
+    let page = pages.get(id).filter(|p| p.icon.as_deref().is_none_or(|i| i.trim().is_empty()))?;
+    page.title.trim().chars().next().map(|c| c.to_uppercase().to_string())
+}
+
 #[derive(Clone, PartialEq)]
 struct Shown {
     index: usize,
@@ -31,6 +41,12 @@ struct Shown {
     /// The pane in focus.
     focus: String,
     active: bool,
+    /// Pinned: its icon only (of its first page, when it holds several).
+    pinned: bool,
+    /// What the pointer's rest on the tab says: the name of each page.
+    names: String,
+    /// Pinned, and its page has no icon: the letter it shows (see `pin_letter`).
+    letter: Option<String>,
 }
 
 #[component]
@@ -55,7 +71,11 @@ pub fn TopRow() -> Element {
             } else {
                 Vec::new()
             };
-            Shown { index: i, id: t.id.clone(), icon, title, segs, focus: t.focus.clone(), active: i == ui.active }
+            let names = if segs.is_empty() { title.clone() } else { segs.iter().map(|s| s.2.as_str()).collect::<Vec<_>>().join(" | ") };
+            // A pinned tab is drawn as one part, with the icon of its first page.
+            let (icon, segs) = if t.pinned { (segs.first().map(|s| s.1.clone()).unwrap_or(icon), Vec::new()) } else { (icon, segs) };
+            let letter = t.ordered().first().filter(|_| t.pinned).and_then(|first| pin_letter(first.route(), &pages));
+            Shown { index: i, id: t.id.clone(), icon, title, segs, focus: t.focus.clone(), active: i == ui.active, pinned: t.pinned, names, letter }
         })
         .collect();
     let menu = match &ui.popover {
@@ -100,9 +120,10 @@ pub fn TopRow() -> Element {
                 for t in shown {
                     div {
                         key: "{t.id}",
-                        class: format!("tab{}{}", if t.active { " active" } else { "" }, if t.segs.is_empty() { "" } else { " split" }),
+                        class: format!("tab{}{}{}", if t.active { " active" } else { "" }, if t.segs.is_empty() { "" } else { " split" }, if t.pinned { " pinned" } else { "" }),
                         style: format!("--segs: {}", t.segs.len().max(1)),
-                        title: if t.segs.is_empty() { t.title.clone() } else { t.segs.iter().map(|s| s.2.as_str()).collect::<Vec<_>>().join(" | ") },
+                        title: "{t.names}",
+                        "aria-label": if t.pinned { t.names.clone() },
                         draggable: "true",
                         "data-tab": "{t.id}",
                         onclick: move |_| state.select_tab(t.index),
@@ -123,7 +144,11 @@ pub fn TopRow() -> Element {
                             e.prevent_default();
                             state.set_popover(Some(Popover::TabMenu { index: t.index }));
                         },
-                        if t.segs.is_empty() {
+                        if let Some(letter) = &t.letter {
+                            span { class: "tab-icon", span { class: "tab-letter space-badge", "{letter}" } }
+                        } else if t.pinned {
+                            span { class: "tab-icon", PageIcon { icon: t.icon.clone(), size: 14 } }
+                        } else if t.segs.is_empty() {
                             span { class: "tab-icon", PageIcon { icon: t.icon.clone(), size: 14 } }
                             span { class: "tab-title", "{t.title}" }
                         } else {
@@ -163,18 +188,20 @@ pub fn TopRow() -> Element {
                                 }
                             }
                         }
-                        button {
-                            class: "tab-close",
-                            title: "Close tab (⌘W)",
-                            draggable: "false",
-                            onclick: move |e| {
-                                e.stop_propagation();
-                                state.close_tab(t.index);
-                            },
-                            Icon { name: "close", size: 12 }
+                        if !t.pinned {
+                            button {
+                                class: "tab-close",
+                                title: "Close tab (⌘W)",
+                                draggable: "false",
+                                onclick: move |e| {
+                                    e.stop_propagation();
+                                    state.close_tab(t.index);
+                                },
+                                Icon { name: "close", size: 12 }
+                            }
                         }
                         if menu == Some(t.index) {
-                            TabMenu { index: t.index, split: !t.segs.is_empty() }
+                            TabMenu { index: t.index }
                         }
                     }
                 }
@@ -190,16 +217,26 @@ pub fn TopRow() -> Element {
 }
 
 #[component]
-fn TabMenu(index: usize, split: bool) -> Element {
+fn TabMenu(index: usize) -> Element {
     let state = use_context::<AppState>();
-    let others = state.ui.read().tabs.len() > 1;
+    let ui = state.ui.read();
+    let (pinned, split) = ui.tabs.get(index).map(|t| (t.pinned, t.is_split())).unwrap_or_default();
+    // (Tabs that "Close Other Tabs" would close: a pinned one stays.)
+    let others = ui.tabs.iter().enumerate().any(|(i, t)| i != index && !t.pinned);
+    drop(ui);
     rsx! {
         div {
             class: "popover tab-menu",
             onclick: move |e| e.stop_propagation(),
-            div { class: "menu-item compact", onclick: move |_| state.close_tab(index),
-                span { "Close Tab" }
-                span { class: "menu-shortcut", "⌘W" }
+            div { class: "menu-item compact", onclick: move |_| state.pin_tab(index, !pinned),
+                span { if pinned { "Unpin Tab" } else { "Pin Tab" } }
+            }
+            // (A pinned tab does not close: unpin it first.)
+            if !pinned {
+                div { class: "menu-item compact", onclick: move |_| state.close_tab(index),
+                    span { "Close Tab" }
+                    span { class: "menu-shortcut", "⌘W" }
+                }
             }
             if others {
                 div { class: "menu-item compact", onclick: move |_| state.close_other_tabs(index),
@@ -224,7 +261,8 @@ fn TabMenu(index: usize, split: bool) -> Element {
                         if split {
                             state.close_pane_of(index, None);
                         } else {
-                            state.close_tab(index);
+                            // (Moved, not closed: no message says "Tab closed".)
+                            state.take_tab(index);
                         }
                     }
                 },
@@ -538,5 +576,35 @@ pub fn PageBar(route: Route, pane: String, multi: bool) -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Page;
+
+    #[test]
+    fn a_pinned_tab_of_a_page_with_no_icon_shows_the_first_letter_of_its_name() {
+        let mut pages = std::collections::HashMap::new();
+        let mut add = |id: &str, title: &str, icon: Option<&str>| {
+            let mut p = Page::new(None, 1.0);
+            p.id = id.into();
+            p.title = title.into();
+            p.icon = icon.map(str::to_string);
+            pages.insert(id.to_string(), p);
+        };
+        add("plain", "  quiet page", None);
+        add("blank", "Écoute", Some("  "));
+        add("icon", "Plan", Some("plane:blue"));
+        add("bare", "   ", None);
+        let letter = |id: &str| pin_letter(&Route::Page(id.into()), &pages);
+        assert_eq!(letter("plain").as_deref(), Some("Q"));
+        assert_eq!(letter("blank").as_deref(), Some("É"));
+        // A page with an icon shows its icon; one with no name, the page sign.
+        assert_eq!(letter("icon"), None);
+        assert_eq!(letter("bare"), None);
+        assert_eq!(letter("gone"), None);
+        assert_eq!(pin_letter(&Route::Home, &pages), None);
     }
 }

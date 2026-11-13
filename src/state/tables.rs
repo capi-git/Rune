@@ -262,6 +262,7 @@ impl AppState {
     /// "duplicate", "delete".
     pub fn column_op(self, page: &str, id: &str, c: usize, op: &str) {
         let mut then = None;
+        let was = (op == "delete").then(|| self.before_removal(page, id)).flatten();
         match op {
             "sort-up" | "sort-down" => self.change_table_view(page, id, |v| v.sort_by(c, op == "sort-down")),
             "filter" => return self.add_table_filter(page, id, c),
@@ -282,6 +283,7 @@ impl AppState {
         if let Some(c) = then {
             self.focus_cell(id, 0, c);
         }
+        self.say_removed(page, id, was);
     }
 
     /// A new column of a kind, at the right end, with the caret in its heading.
@@ -554,6 +556,7 @@ impl AppState {
         }
         let mut focus = None;
         let today = crate::when::today();
+        let was = matches!(op, "remove-row" | "remove-column").then(|| self.before_removal(page, id)).flatten();
         self.edit_table(page, id, |t| {
             if t.view.locked && matches!(op, "add-column" | "remove-column") {
                 return;
@@ -590,6 +593,29 @@ impl AppState {
         if let Some((r, c)) = focus {
             self.focus_cell(id, r, c);
         }
+        self.say_removed(page, id, was);
+    }
+
+    /// How many rows and columns a table has, and the step that Undo would
+    /// take back on its page, before rows or columns are taken out.
+    fn before_removal(&self, page: &str, id: &str) -> Option<(usize, usize, Option<u64>)> {
+        let table = self.table_at(page, id)?;
+        Some((table.rows.len(), table.columns(), self.history.peek().next_undo(page)))
+    }
+
+    /// Say what was taken out of a table (`was`: see `before_removal`),
+    /// with an "Undo" that takes back that one step. (In words: the Delete
+    /// key can take out what is out of sight.)
+    fn say_removed(self, page: &str, id: &str, was: Option<(usize, usize, Option<u64>)>) {
+        let (Some((rows, columns, step)), Some(now)) = (was, self.table_at(page, id)) else { return };
+        let said = match (rows.saturating_sub(now.rows.len()), columns.saturating_sub(now.columns())) {
+            (0, 0) => return,
+            (1, 0) => "1 row deleted".to_string(),
+            (n, 0) => format!("{n} rows deleted"),
+            (_, 1) => "1 column deleted".to_string(),
+            (_, n) => format!("{n} columns deleted"),
+        };
+        self.toast_step(said, page, step);
     }
 
     /// Open the menu of a row. A row that is one of several picked rows
@@ -628,19 +654,11 @@ impl AppState {
     pub fn delete_picked_in_table(self, page: &str, id: &str) {
         let Some(table) = self.table_at(page, id) else { return };
         let (rows, columns) = crate::ui::tables::picked(id, &table);
+        // (Each says what it took out: see `say_removed`.)
         if !rows.is_empty() {
             self.rows_op(page, id, &rows, "delete");
         } else if !columns.is_empty() {
             self.columns_op(page, id, &columns, "delete");
-        }
-        // (Said in words: the Delete key can take out what is out of sight.)
-        let Some(now) = self.table_at(page, id) else { return };
-        match (table.rows.len().saturating_sub(now.rows.len()), table.columns().saturating_sub(now.columns())) {
-            (0, 0) => {}
-            (1, 0) => self.toast("1 row deleted"),
-            (n, 0) => self.toast(format!("{n} rows deleted")),
-            (_, 1) => self.toast("1 column deleted"),
-            (_, n) => self.toast(format!("{n} columns deleted")),
         }
     }
 
@@ -655,7 +673,11 @@ impl AppState {
                     }
                 }
             }),
-            "delete" => self.edit_columns(page, id, |t| t.remove_columns(&columns)),
+            "delete" => {
+                let was = self.before_removal(page, id);
+                self.edit_columns(page, id, |t| t.remove_columns(&columns));
+                self.say_removed(page, id, was);
+            }
             _ => {}
         }
         crate::ui::tables::unpick(id);
@@ -668,6 +690,7 @@ impl AppState {
         let mut rows = rows.to_vec();
         rows.sort_unstable();
         rows.dedup();
+        let was = (op == "delete").then(|| self.before_removal(page, id)).flatten();
         self.edit_table(page, id, |t| {
             rows.retain(|&r| r >= 1 && r < t.rows.len());
             match op {
@@ -688,6 +711,7 @@ impl AppState {
         });
         crate::ui::tables::unpick(id);
         self.set_popover(None);
+        self.say_removed(page, id, was);
     }
 
     // ----- rows as pages -------------------------------------------------------
@@ -841,6 +865,7 @@ impl AppState {
     /// Show a page at the side of the pane in focus. The pane at the side
     /// is used again for the next page opened this way.
     pub fn open_peek(mut self, route: Route) {
+        let mut fresh = None;
         {
             let pages = self.pages.peek();
             let mut guard = self.ui.write();
@@ -854,6 +879,7 @@ impl AppState {
                 (None, Some(peek)) => {
                     tab.folded.retain(|p| *p != peek);
                     if let Some(pane) = tab.panes.iter_mut().find(|p| p.id == peek) {
+                        fresh = Some((peek.clone(), route.place_key()));
                         pane.push(route);
                     }
                     tab.focus = peek;
@@ -864,6 +890,9 @@ impl AppState {
                     tab.add_pane(pane, None, Edge::Right);
                 }
             }
+        }
+        if let Some((pane, place)) = fresh {
+            self.place_fresh(&pane, &place);
         }
         self.save_ui();
     }

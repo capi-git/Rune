@@ -842,6 +842,13 @@ button.table-chip:hover,
   outline: none;
   box-shadow: inset 0 0 0 1.5px var(--accent);
 }
+/* In a table the cell itself has the ring (`td:focus-within`). With a ring
+   around the pictures too, a row made tall by the words of another cell
+   showed two boxes, one over the other. (On a row's page the values have
+   no ring of their own: there this one stays.) */
+.table-block td .cell-pics[data-pic-cell]:focus {
+  box-shadow: none;
+}
 .cell-pics.pic-drop {
   background: var(--accent-soft);
   box-shadow: inset 0 0 0 1.5px var(--accent);

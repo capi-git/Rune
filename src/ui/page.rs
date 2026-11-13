@@ -606,21 +606,25 @@ pub fn PageView(page_id: String) -> Element {
     };
     let icon_picker = matches!(&ui.popover, Some(Popover::IconPicker { page_id: p }) if *p == page_id);
     let cover_picker = matches!(&ui.popover, Some(Popover::CoverPicker { page_id: p }) if *p == page_id);
+    // The headings folded on this page: the lines under them are not drawn.
+    let folded = ui.folds.get(&page_id).cloned().unwrap_or_default();
     drop(ui);
 
-    let visible = visibility(&blocks);
+    let visible = shown(&blocks, &folded);
+    let in_open_toggles = visibility(&blocks);
     let numbers = list_numbers(&blocks);
     // The blocks picked as a whole on this page.
     let picked: Vec<Id> = state.picked.read().as_ref().filter(|p| p.page == page_id).map(|p| p.ids.clone()).unwrap_or_default();
     let backlinks = crate::state::linked_from(&state.pages.read(), &state.blocks.read(), &page_id);
-    // Children of a toggle that was just opened ease in, one after another.
+    // Children of a toggle that was just opened ease in, one after another
+    // (and so do the lines under a heading that was just opened).
     let reveal = state.reveal.read().clone().filter(|(p, _)| *p == page_id).and_then(|(_, t)| {
         let i = index_of(&blocks, &t)?;
-        Some((i + 1, subtree_end(&blocks, i)))
+        Some((i + 1, if heading_level(blocks[i].kind).is_some() { section_end(&blocks, i) } else { subtree_end(&blocks, i) }))
     });
     let sides = side_lines(&blocks);
     let mut appear_n = 0usize;
-    let rows: Vec<(Block, Option<usize>, bool, Option<usize>, (u8, bool))> = blocks
+    let rows: Vec<(Block, Option<usize>, bool, Option<usize>, (u8, bool), Option<(bool, String)>)> = blocks
         .iter()
         .enumerate()
         .filter(|(i, _)| visible[*i])
@@ -629,7 +633,18 @@ pub fn PageView(page_id: String) -> Element {
                 appear_n += 1;
                 appear_n - 1
             });
-            (b.clone(), numbers[i], has_children(&blocks, i), appear, sides[i])
+            // A heading with lines under it can be folded. A folded one
+            // carries the words it hides, for find in page (bridge.js).
+            let fold = heading_level(b.kind).and_then(|_| {
+                let (is_folded, end) = (folded.contains(&b.id), section_end(&blocks, i));
+                let hidden = if is_folded {
+                    (i + 1..end).filter(|&j| in_open_toggles[j] && blocks[j].kind.is_editable()).map(|j| blocks[j].plain_text()).collect::<Vec<_>>().join("\n")
+                } else {
+                    String::new()
+                };
+                (is_folded || end > i + 1).then_some((is_folded, hidden))
+            });
+            (b.clone(), numbers[i], has_children(&blocks, i), appear, sides[i], fold)
         })
         .collect();
 
@@ -687,7 +702,7 @@ pub fn PageView(page_id: String) -> Element {
             }
         }
         if outline.len() >= 2 {
-            nav { class: "page-outline", "aria-label": "On this page",
+            nav { class: "page-outline", "aria-label": "On this page", "data-page": "{page_id}",
                 div { class: "page-outline-list",
                     for (id, level, name) in outline {
                         button { key: "{id}", class: "outline-item", "data-outline": "{id}", "data-level": "{level}", title: "{name}",
@@ -821,10 +836,11 @@ pub fn PageView(page_id: String) -> Element {
                 MeetingBand { page_id: page_id.clone(), voices: v }
             }
             div { class: "blocks",
-                for (block, number, kids, appear, (side, side_last)) in rows {
+                for (block, number, kids, appear, (side, side_last), fold) in rows {
                     BlockRow {
                         key: "{block.id}",
                         appear,
+                        fold,
                         side,
                         side_last,
                         page_id: page_id.clone(),
@@ -949,6 +965,10 @@ fn BlockRow(
     #[props(default)]
     side: u8,
     #[props(default)] side_last: bool,
+    /// For a heading with lines under it: whether it is folded, and the
+    /// words of the lines it then hides.
+    #[props(!optional)]
+    fold: Option<(bool, String)>,
 ) -> Element {
     let state = use_context::<AppState>();
     // A diagram shows its code only while it is edited (an empty one always does).
@@ -959,9 +979,12 @@ fn BlockRow(
     let free = block.floats() && crate::files::valid_name(&block.data);
     // A line that is only a YouTube link shows the video under it.
     let video = crate::video::in_block(kind, &block.text).filter(|_| block.data != crate::video::HIDDEN);
+    let is_folded = fold.as_ref().is_some_and(|f| f.0);
+    let fold_text = fold.as_ref().filter(|f| f.0).map(|f| f.1.clone());
     let class = format!(
-        "block-row kind-{}{}{}{}{}{}{}",
+        "block-row kind-{}{}{}{}{}{}{}{}",
         kind.as_str(),
+        if is_folded { " folded" } else { "" },
         if side > 0 { " side" } else { "" },
         if block.checked { " checked" } else { "" },
         if menu_open { " menu-open" } else { "" },
@@ -1025,6 +1048,7 @@ fn BlockRow(
     let (p3, b3) = (page_id.clone(), id.clone());
     let (p4, b4) = (page_id.clone(), id.clone());
     let (p5, b5) = (page_id.clone(), id.clone());
+    let (p6, b6) = (page_id.clone(), id.clone());
     let tint = block.tint.clone();
 
     rsx! {
@@ -1034,6 +1058,7 @@ fn BlockRow(
             "data-page": "{page_id}",
             // (The colour of the line: see the tints in style.css.)
             "data-tint": "{tint}",
+            "data-fold-text": fold_text,
             style: "{row_style}",
             div { class: "block-inner",
                 div { class: "gutter",
@@ -1053,6 +1078,18 @@ fn BlockRow(
                             state.set_popover(next);
                         },
                         Icon { name: "grip", size: 16 }
+                    }
+                }
+                // A heading folds: the arrow of a toggle, beside the heading
+                // while the pointer is over its line, and turned, in view,
+                // while it is folded.
+                if fold.is_some() {
+                    button {
+                        class: if is_folded { "toggle-arrow fold-arrow closed" } else { "toggle-arrow fold-arrow" },
+                        "aria-label": if is_folded { "Show the lines under this heading" } else { "Hide the lines under this heading" },
+                        "aria-expanded": if is_folded { "false" } else { "true" },
+                        onclick: move |_| state.toggle_fold(&p6, &b6),
+                        Icon { name: "triangle-right", size: 12 }
                     }
                 }
                 match kind {
@@ -1152,6 +1189,27 @@ fn BlockRow(
                                         "{lang}"
                                     }
                                 }
+                            }
+                            // The code as plain text, as it is kept (no
+                            // line end is added). It shows while the pointer
+                            // is over the block or the keyboard is in it,
+                            // and a press leaves the caret where it is
+                            // (see `.code-copy` in bridge.js).
+                            button {
+                                class: "icon-btn small code-copy",
+                                title: "Copy code",
+                                "aria-label": "Copy code",
+                                onclick: {
+                                    let (pid, bid) = (page_id.clone(), id.clone());
+                                    move |e| {
+                                        e.stop_propagation();
+                                        let code = state.blocks.peek().get(&pid).and_then(|bs| bs.iter().find(|b| b.id == bid)).map(|b| b.text.clone()).unwrap_or_default();
+                                        if !code.is_empty() {
+                                            state.copy_to_clipboard(code, "Copied the code");
+                                        }
+                                    }
+                                },
+                                Icon { name: "duplicate", size: 14 }
                             }
                             {editor}
                         }
@@ -1451,7 +1509,7 @@ fn PageLinkView(target: Option<String>) -> Element {
         Some(p) => {
             let id = p.id.clone();
             rsx! {
-                div { class: "page-link", onclick: move |_| state.open_page(&id),
+                div { class: "page-link", "data-preview": "{p.id}", onclick: move |_| state.open_page(&id),
                     span { class: "pl-icon", PageIcon { icon: p.icon.clone(), size: 18 } }
                     span { class: "pl-title", "{p.display_title()}" }
                 }

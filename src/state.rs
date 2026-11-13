@@ -33,6 +33,19 @@ pub enum Route {
     Graph,
 }
 
+impl Route {
+    /// A name for what a pane shows. The page script keeps the scroll place
+    /// of each by it (see "a page keeps its scroll place" in bridge.js).
+    pub fn place_key(&self) -> String {
+        match self {
+            Route::Home => "home".to_string(),
+            Route::Page(id) => format!("page:{id}"),
+            Route::Calendar => "calendar".to_string(),
+            Route::Graph => "graph".to_string(),
+        }
+    }
+}
+
 /// One page slot in a tab, with its own back and forward history.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Pane {
@@ -121,6 +134,12 @@ pub struct Tab {
     /// row opened that way takes its place there. Not kept from run to run.
     #[serde(skip)]
     pub peek: Option<Id>,
+    /// Pinned: it stands at the left of the row, shows its icon only, and
+    /// does not close until it is unpinned. Written only when it is so: a
+    /// tab that is not pinned is saved as it always was, and an older Rune
+    /// reads a pinned one as a plain tab.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
 }
 
 impl Tab {
@@ -128,7 +147,7 @@ impl Tab {
         Tab::with_pane(Pane::new(route))
     }
     pub fn with_pane(pane: Pane) -> Tab {
-        Tab { id: new_id(), layout: Layout::pane(&pane.id), focus: pane.id.clone(), panes: vec![pane], folded: Vec::new(), peek: None }
+        Tab { id: new_id(), layout: Layout::pane(&pane.id), focus: pane.id.clone(), panes: vec![pane], folded: Vec::new(), peek: None, pinned: false }
     }
     /// The panes shown as rails.
     pub fn rails(&self) -> Vec<Id> {
@@ -216,6 +235,7 @@ impl Tab {
         }
         if let Some(first) = out.first_mut() {
             first.id = self.id;
+            first.pinned = self.pinned;
         }
         out
     }
@@ -240,6 +260,8 @@ struct SavedTab {
     split: Option<Route>,
     #[serde(default)]
     folded: Vec<Id>,
+    #[serde(default)]
+    pinned: bool,
 }
 
 impl From<SavedTab> for Tab {
@@ -263,7 +285,7 @@ impl From<SavedTab> for Tab {
         let layout = s.layout.filter(|l| l.fits(&ids)).unwrap_or_else(|| Layout::row(&ids));
         let focus = s.focus.filter(|f| ids.contains(f)).unwrap_or_else(|| ids[0].clone());
         let folded = s.folded.into_iter().filter(|f| ids.contains(f)).collect();
-        Tab { id: s.id, panes, layout, focus, folded, peek: None }
+        Tab { id: s.id, panes, layout, focus, folded, peek: None, pinned: s.pinned }
     }
 }
 
@@ -308,6 +330,26 @@ pub struct SlashState {
     pub pages: bool,
     /// After "[[": a page with the typed name can be made as well.
     pub wiki: bool,
+}
+
+/// What the "Undo" in a message puts back, each by the app's own way for it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Back {
+    /// A page out of the Trash (as "Restore" in the Trash does). `tab`:
+    /// the tab it was the one page of, in front. The Trash left Home in
+    /// its place there, and it shows again in that place: in that tab,
+    /// not in a new one (see `Ui::put_page_back_in`).
+    Page { id: Id, tab: Option<Id> },
+    /// One step of a page's own Undo (rows, columns or lines that were
+    /// deleted): the step with this number, and only while it is the step
+    /// that Undo would take back (see `History::next_undo`).
+    Step { page: Id, step: u64 },
+    /// A deleted event, with the notes pages that its repeats had.
+    Event { event: Event, pages: Vec<(String, Id)> },
+    /// One repeat that was deleted: the day its repeating event skips.
+    Repeat { series: Id, day: String },
+    /// A closed tab, while it is the one "Reopen Closed Tab" would open.
+    Tab(Id),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -426,6 +468,19 @@ fn one_tab_of(tabs: &mut Vec<Tab>, active: &mut usize, view: &Route) -> bool {
     true
 }
 
+/// Pinned tabs stand first in their row, in the order they have; the tab in
+/// front stays the one in front. Says whether a tab moved.
+fn pins_first(tabs: &mut Vec<Tab>, active: &mut usize) -> bool {
+    if tabs.iter().skip_while(|t| t.pinned).all(|t| !t.pinned) {
+        return false;
+    }
+    let front = tabs.get(*active).map(|t| t.id.clone());
+    // (A stable sort: the pinned ones keep their order, and so do the others.)
+    tabs.sort_by_key(|t| !t.pinned);
+    *active = front.and_then(|id| tabs.iter().position(|t| t.id == id)).unwrap_or(0);
+    true
+}
+
 /// The space of the page a tab shows. Home, the calendar and the graph are
 /// in no space of their own.
 fn tab_space(tab: &Tab, pages: &HashMap<Id, Page>) -> Option<Id> {
@@ -452,6 +507,7 @@ fn ui_settings(ui: &Ui, primary: bool) -> Vec<(&'static str, String)> {
             ("zoom", ui.zoom.to_string()),
             ("tabs", serde_json::to_string(&(&ui.tabs, ui.active)).unwrap_or_default()),
             ("space_tabs", serde_json::to_string(&ui.parked).unwrap_or_default()),
+            ("folds", json(&ui.folds)),
         ]);
     }
     pairs
@@ -534,6 +590,11 @@ pub struct Ui {
     /// Focus mode: only the page is shown, the lines around the caret are
     /// pale, and the line being written stays near the middle. Not kept.
     pub focus_mode: bool,
+    /// The headings folded on each page (page id, then the ids of its
+    /// folded headings): the lines under them are hidden, never changed
+    /// (see `shown` in model.rs). Kept with the window's layout, not in the
+    /// notes themselves.
+    pub folds: HashMap<Id, HashSet<Id>>,
 }
 
 impl Ui {
@@ -543,6 +604,23 @@ impl Ui {
     fn tab_mut(&mut self) -> &mut Tab {
         let i = self.active.min(self.tabs.len() - 1);
         &mut self.tabs[i]
+    }
+    /// Pin a tab or unpin it: a pinned one goes after the others that are
+    /// pinned, an unpinned one before the others that are not.
+    fn pin_tab(&mut self, index: usize, on: bool) {
+        if let Some(tab) = self.tabs.get_mut(index) {
+            tab.pinned = on;
+            pins_first(&mut self.tabs, &mut self.active);
+        }
+    }
+    /// Close every tab but one, and but the pinned ones. Gives the tabs
+    /// that went.
+    fn close_others(&mut self, keep: usize) -> Vec<Tab> {
+        let Some(kept) = self.tabs.get(keep).map(|t| t.id.clone()) else { return Vec::new() };
+        let (stay, gone): (Vec<Tab>, Vec<Tab>) = std::mem::take(&mut self.tabs).into_iter().partition(|t| t.pinned || t.id == kept);
+        self.tabs = stay;
+        self.active = self.tabs.iter().position(|t| t.id == kept).unwrap_or(0);
+        gone
     }
     /// Every open tab, also those of the spaces not in front.
     fn every_tab_mut(&mut self) -> impl Iterator<Item = &mut Tab> {
@@ -589,18 +667,38 @@ impl Ui {
             let gone: Vec<Id> =
                 tab.panes.iter().filter(|p| matches!(p.route(), Route::Page(id) if ids.contains(id))).map(|p| p.id.clone()).collect();
             for pane in gone {
-                // The pane closes; a tab's only page goes Home instead.
+                // The pane closes; a tab's only page goes Home instead, and
+                // is pinned no more: the pin was for the page. (It stayed
+                // as a pinned Home tab that could not be closed.)
                 if tab.take_pane(&pane).is_none() {
                     if let Some(p) = tab.panes.iter_mut().find(|p| p.id == pane) {
                         p.push(Route::Home);
                     }
+                    tab.pinned = false;
                 }
             }
             for pane in tab.panes.iter_mut() {
                 pane.forget(ids);
             }
         }
+        pins_first(&mut self.tabs, &mut self.active);
+        for set in self.parked.values_mut() {
+            pins_first(&mut set.0, &mut set.1);
+        }
         self.recent.retain(|r| !ids.contains(r));
+    }
+    /// The "Undo" of a page's move to the Trash, for the tab the page was
+    /// the one page of: the Trash left Home in its place there
+    /// (`leave_pages`), and the page takes that place again, in front. No
+    /// tab is made. False, and nothing changes, when that tab is gone or
+    /// shows something else by now.
+    fn put_page_back_in(&mut self, tab: &str, page: &str) -> bool {
+        let Some(i) = self.tabs.iter().position(|t| t.id == tab && t.panes.len() == 1 && t.route() == &Route::Home) else { return false };
+        let pane = self.tabs[i].focused_mut();
+        let at = pane.cursor.min(pane.history.len() - 1);
+        pane.history[at] = Route::Page(page.to_string());
+        self.active = i;
+        true
     }
     /// The tab in front goes to another space, which comes to the front
     /// with that tab showing.
@@ -885,6 +983,9 @@ pub enum Bridge {
         #[serde(default)]
         here: String,
     },
+    /// The pointer rests on a link to a page: what the card over it says is
+    /// asked for (see `preview_page`). `n` comes back with the answer.
+    PagePreview { id: String, n: u32 },
     /// A page chosen from that list in the Ask box: it goes with the question.
     AskGivePage { id: String },
     /// ⌘C on an event of the calendar.
@@ -970,8 +1071,9 @@ pub struct AppState {
     /// The block with the caret. Never read while drawing, so changing it
     /// redraws nothing.
     pub focus: Signal<Option<(Id, Id)>>,
-    /// (id, text, leaving): shown for a second, then it fades out.
-    pub toast_msg: Signal<Option<(u64, String, bool)>>,
+    /// (id, text, leaving, what its "Undo" puts back): shown for a second
+    /// (six with an "Undo"), then it fades out.
+    pub toast_msg: Signal<Option<(u64, String, bool, Option<Back>)>>,
     /// How see-through the window is.
     pub look: Signal<Look>,
     /// A toggle that was just opened (page, block), so its children ease in.
@@ -1520,6 +1622,55 @@ pub fn snippet_of(blocks: &[Block], most: usize) -> String {
         return format!("{}…", cut.trim_end_matches([',', '.', ';', ':', ' ']));
     }
     out
+}
+
+/// What the card over a link to a page says (see `page_preview`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PagePreview {
+    pub title: String,
+    pub icon: Option<String>,
+    /// Where the page is: the pages it is inside, or its space.
+    pub place: String,
+    /// Its first lines, as plain words. None for a locked page.
+    pub lines: Vec<String>,
+    pub locked: bool,
+}
+
+/// The lines a card shows of a page, and one more (the card cuts what does
+/// not fit, with its sign that there is more).
+const PREVIEW_LINES: usize = 5;
+
+/// What the card over a link to a page says. Nothing for a page that is in
+/// the Trash or gone. A locked page gives its name only, also while it is
+/// open (as search and "Linked from": see `lock::hides`). The words are
+/// plain: a table says "Table", a chart "Chart", a line that is a sub-page
+/// its name, and a picture, a drawing or code nothing.
+pub fn page_preview(pages: &HashMap<Id, Page>, blocks: &HashMap<Id, Vec<Block>>, spaces: &[Space], id: &str) -> Option<PagePreview> {
+    let page = pages.get(id).filter(|p| !p.trashed)?;
+    let above = ancestors(pages, id);
+    let place = if above.is_empty() {
+        spaces.iter().find(|s| s.id == page.space_id).map(|s| s.name.clone()).unwrap_or_default()
+    } else {
+        above.iter().map(|a| a.display_title().to_string()).collect::<Vec<_>>().join(" / ")
+    };
+    let own = blocks.get(id).map(Vec::as_slice).unwrap_or_default();
+    let locked = crate::lock::hides(own, id);
+    let mut lines = Vec::new();
+    for b in own.iter().filter(|_| !locked) {
+        let line = match b.kind {
+            BlockKind::Table => "Table".to_string(),
+            BlockKind::Chart => "Chart".to_string(),
+            BlockKind::PageLink => b.target.as_ref().and_then(|t| pages.get(t)).filter(|p| !p.trashed).map(|p| p.display_title().to_string()).unwrap_or_default(),
+            _ => snippet_of(std::slice::from_ref(b), 200),
+        };
+        if !line.is_empty() {
+            lines.push(line);
+        }
+        if lines.len() == PREVIEW_LINES {
+            break;
+        }
+    }
+    Some(PagePreview { title: page.display_title().to_string(), icon: page.icon.clone(), place, lines, locked })
 }
 
 /// The tables that a change of a page from `current` to `target` puts back
@@ -2595,6 +2746,16 @@ impl AppState {
             history: None,
             voice: VoiceFor::NewPage,
             focus_mode: false,
+            // (A Rune from before folded headings has no such setting. Pages
+            // that are gone take their entries along; with no page read at
+            // all, nothing is dropped.)
+            folds: store::setting("folds")
+                .and_then(|s| serde_json::from_str::<HashMap<Id, HashSet<Id>>>(&s).ok())
+                .map(|mut folds| {
+                    folds.retain(|page, ids| !ids.is_empty() && (pages.is_empty() || pages.contains_key(page)));
+                    folds
+                })
+                .unwrap_or_default(),
         };
         AppState {
             pages: Signal::new(pages),
@@ -2773,6 +2934,22 @@ impl AppState {
                 one_home_tab(&mut set.0, &mut set.1);
             }
         }
+        // Pinned tabs stand first, whatever moved a tab (a drop, a page
+        // that changed its space, a tab opened again).
+        let loose = {
+            let ui = self.ui.peek();
+            let loose = |tabs: &Vec<Tab>| tabs.iter().skip_while(|t| t.pinned).any(|t| t.pinned);
+            loose(&ui.tabs) || ui.parked.values().any(|set| loose(&set.0))
+        };
+        if loose {
+            let mut sig = self.ui;
+            let mut ui = sig.write();
+            let ui = &mut *ui;
+            pins_first(&mut ui.tabs, &mut ui.active);
+            for set in ui.parked.values_mut() {
+                pins_first(&mut set.0, &mut set.1);
+            }
+        }
         store::set_settings(&ui_settings(&self.ui.peek(), self.win.primary));
     }
 
@@ -2847,9 +3024,95 @@ impl AppState {
         self.toast_for(message.into(), 1000);
     }
 
-    fn toast_for(mut self, message: String, show_ms: u64) {
+    /// A message about something that was taken away, with an "Undo" in it
+    /// that puts it back. It stays long enough to be pressed.
+    pub fn toast_back(self, message: impl Into<String>, back: Back) {
+        self.toast_with(message.into(), 6000, Some(back));
+    }
+
+    /// The same for a change of a page that its own Undo takes back: the
+    /// message gets the step that was just made. With no new step (`was`
+    /// is the step Undo would have taken before the change), it has no
+    /// "Undo".
+    fn toast_step(self, message: impl Into<String>, page: &str, was: Option<u64>) {
+        let step = self.history.peek().next_undo(page).filter(|s| Some(*s) != was);
+        match step {
+            Some(step) => self.toast_back(message, Back::Step { page: page.to_string(), step }),
+            None => self.toast(message),
+        }
+    }
+
+    /// Whether the "Undo" of a message would still put back the thing the
+    /// message is about, and nothing else. (It is asked while the message
+    /// is drawn, so the "Undo" goes when this is no longer so, and again
+    /// at the press.)
+    pub fn back_holds(&self, back: &Back) -> bool {
+        match back {
+            Back::Page { id, .. } => self.pages.read().get(id).is_some_and(|p| p.trashed),
+            // The person changed the page after that step (they typed, say):
+            // Undo would now take back the later change. And a page that is
+            // not on the screen is not changed behind the person's back.
+            Back::Step { page, step } => {
+                let _ = self.ui.read();
+                self.history.read().next_undo(page) == Some(*step) && self.shows_page(page)
+            }
+            Back::Event { event, .. } => !self.events.read().contains_key(&event.id),
+            Back::Repeat { series, day } => self.events.read().get(series).and_then(|e| e.repeat.as_ref()).is_some_and(|r| r.skip.contains(day)),
+            Back::Tab(id) => {
+                let pages = self.pages.read();
+                self.ui.read().closed.last().is_some_and(|t| {
+                    t.id == *id
+                        && match t.route() {
+                            Route::Page(p) => pages.get(p).is_some_and(|p| !p.trashed),
+                            _ => true,
+                        }
+                })
+            }
+        }
+    }
+
+    /// The "Undo" of the message was pressed: the message goes at once, and
+    /// its thing comes back, when that is still the thing to bring back.
+    pub fn toast_undo(mut self) {
+        let Some(back) = self.toast_msg.peek().as_ref().and_then(|t| t.3.clone()) else { return };
+        self.toast_msg.set(None);
+        if !self.back_holds(&back) {
+            return;
+        }
+        match back {
+            Back::Page { id, tab } => {
+                self.take_out_of_trash(&id);
+                // (Not `open_page`: that opens a page no tab shows in a new
+                // tab, and the tab it left stayed beside it, at Home.)
+                let shown = tab.is_some_and(|tab| self.ui.write().put_page_back_in(&tab, &id));
+                if shown {
+                    self.save_ui();
+                }
+            }
+            Back::Step { page, .. } => self.step_on(&page, true),
+            Back::Event { event, pages } => {
+                let id = event.id.clone();
+                self.events.write().insert(id.clone(), event);
+                self.save_event(&id);
+                self.change_repeat_pages(|own| own.extend(pages));
+            }
+            Back::Repeat { series, day } => {
+                if let Some(r) = self.events.write().get_mut(&series).and_then(|e| e.repeat.as_mut()) {
+                    r.skip.retain(|d| *d != day);
+                }
+                self.save_event(&series);
+            }
+            Back::Tab(_) => self.reopen_closed_tab(),
+        }
+    }
+
+    fn toast_for(self, message: String, show_ms: u64) {
+        self.toast_with(message, show_ms, None);
+    }
+
+    fn toast_with(mut self, message: String, show_ms: u64, back: Option<Back>) {
         let id = now_ms() as u64;
-        self.toast_msg.set(Some((id, message, false)));
+        self.toast_msg.set(Some((id, message, false, back)));
         // On the window, not the component that asked: that one is often
         // gone a moment later (the event panel after "Delete"), and its
         // tasks with it, which left the message on screen.
@@ -3643,14 +3906,18 @@ impl AppState {
     pub fn delete_event(mut self, id: &str) {
         let (series, _) = repeat::split_id(id);
         let series = series.to_string();
-        self.events.write().remove(&series);
+        let was = self.events.write().remove(&series);
         store::with(|s| s.delete_event(&series));
         // (The pages of its repeats stay, as pages; the list has no use for them.)
+        let pages: Vec<(String, Id)> = repeat_pages_kept().into_iter().filter(|(key, _)| repeat::split_id(key).0 == series).collect();
         self.change_repeat_pages(|own| own.retain(|key, _| repeat::split_id(key).0 != series));
         sync::others(self.win.key, SyncMsg::EventRemoved(series));
         crate::notify::mark_dirty();
         self.select_event(None);
-        self.toast("Event deleted");
+        match was {
+            Some(event) => self.toast_back("Event deleted", Back::Event { event, pages }),
+            None => self.toast("Event deleted"),
+        }
     }
 
     /// Delete one repeat of a repeating event, keeping the others.
@@ -3662,7 +3929,7 @@ impl AppState {
         }
         self.save_event(&series);
         self.select_event(None);
-        self.toast("Deleted this repeat");
+        self.toast_back("Deleted this repeat", Back::Repeat { series, day: when::date_value(day) });
     }
 
     /// Make one repeat an event of its own, so it can change without the
@@ -4047,6 +4314,17 @@ impl AppState {
 
     /// Put the caret in a block. Runs after the next render.
     pub fn focus(&self, caret: Caret) {
+        // A line under a folded heading is not on the page: the heading
+        // opens first. (So a line made or changed there shows: after Enter
+        // at the end of the heading, a paste, Undo, the "+" of the heading.)
+        let page = {
+            let ui = self.ui.peek();
+            let blocks = self.blocks.peek();
+            ui.folds.keys().find(|p| blocks.get(*p).is_some_and(|bs| bs.iter().any(|b| b.id == caret.id))).cloned()
+        };
+        if let Some(page) = page {
+            self.show_line(&page, &caret.id);
+        }
         let pos: i64 = if caret.pos == usize::MAX { -1 } else { caret.pos as i64 };
         let target = serde_json::to_string(&format!("blk-{}", caret.id)).unwrap_or_default();
         document::eval(&format!("window.__rune && window.__rune.focus({target}, {pos})"));
@@ -4096,6 +4374,7 @@ impl AppState {
             }
         }
         self.clear_slash();
+        let mut fresh = None;
         {
             let pages = self.pages.peek();
             let mut ui = self.ui.write();
@@ -4110,9 +4389,24 @@ impl AppState {
                 }
             }
             // Pages open in the pane that has focus.
-            ui.tab_mut().push(route);
+            let tab = ui.tab_mut();
+            if *tab.route() != route {
+                fresh = Some((tab.focused().id.clone(), route.place_key()));
+            }
+            tab.push(route);
+        }
+        if let Some((pane, place)) = fresh {
+            self.place_fresh(&pane, &place);
         }
         self.save_ui();
+    }
+
+    /// A pane goes to a page anew (from the sidebar, search, a link): the
+    /// page starts at its top. Back, Forward, another tab and a split come
+    /// back to the place the page was left at; the page script keeps it.
+    pub(crate) fn place_fresh(&self, pane: &str, place: &str) {
+        let (pane, place) = (serde_json::to_string(pane).unwrap_or_default(), serde_json::to_string(place).unwrap_or_default());
+        document::eval(&format!("window.__rune && window.__rune.placeFresh && window.__rune.placeFresh({pane}, {place})"));
     }
 
     // ----- dragging tabs ----------------------------------------------------
@@ -4128,6 +4422,11 @@ impl AppState {
             let ui = &mut *guard;
             let active_id = ui.tab().id.clone();
             let Some(fi) = ui.tabs.iter().position(|t| t.id == from) else { return };
+            // A pinned tab keeps to itself: it moves among the pinned ones
+            // only (`save_ui` puts it back among them from anywhere else).
+            if ui.tabs[fi].pinned && mode == "split" {
+                return;
+            }
             let tab = ui.tabs.remove(fi);
             match to.and_then(|id| ui.tabs.iter().position(|t| t.id == id)) {
                 None => ui.tabs.push(tab),
@@ -4165,6 +4464,10 @@ impl AppState {
                 return;
             }
             let Some(fi) = ui.tabs.iter().position(|t| t.id == from) else { return };
+            // (A pinned tab is not pulled into a pane.)
+            if ui.tabs[fi].pinned {
+                return;
+            }
             let tab = ui.tabs.remove(fi);
             let ai = ui.tabs.iter().position(|t| t.id == active_id).unwrap_or(0);
             ui.tabs[ai].add_tab(tab, Some(target), edge);
@@ -4607,19 +4910,39 @@ impl AppState {
         self.select_tab((active + delta).rem_euclid(len) as usize);
     }
 
-    pub fn close_tab(mut self, index: usize) {
+    /// Close a tab as the person asked (⌘W, its ×, its menu, a middle
+    /// click): the message says so, and can open the tab again. A pinned tab
+    /// stays (nothing happens: no sound, no shake); it closes once it is
+    /// unpinned.
+    pub fn close_tab(self, index: usize) {
+        if self.ui.peek().tabs.get(index).is_some_and(|t| t.pinned) {
+            return;
+        }
+        if let Some(id) = self.take_tab(index) {
+            self.toast_back("Tab closed", Back::Tab(id));
+        }
+    }
+
+    /// Take a tab out of the row, also a pinned one (it goes to a window of
+    /// its own); it is kept with the closed tabs. Gives the tab's id, unless
+    /// the window closed with it, or nothing went that a person saw (the
+    /// only tab, at Home: a new Home tab is in its place).
+    pub fn take_tab(mut self, index: usize) -> Option<Id> {
         self.clear_slash();
+        let id;
         {
             let mut ui = self.ui.write();
             if index >= ui.tabs.len() {
-                return;
+                return None;
             }
             if ui.tabs.len() == 1 && !self.win.primary && ui.parked.values().all(|set| set.0.is_empty()) {
                 drop(ui);
                 dioxus::desktop::window().close();
-                return;
+                return None;
             }
-            let closed = ui.tabs.remove(index);
+            let mut closed = ui.tabs.remove(index);
+            closed.pinned = false;
+            id = (!ui.tabs.is_empty() || closed.route() != &Route::Home).then(|| closed.id.clone());
             ui.closed.push(closed);
             trim_closed(&mut ui.closed);
             if ui.tabs.is_empty() {
@@ -4632,6 +4955,7 @@ impl AppState {
             ui.popover = None;
         }
         self.save_ui();
+        id
     }
 
     pub fn close_other_tabs(mut self, keep: usize) {
@@ -4640,13 +4964,20 @@ impl AppState {
             if keep >= ui.tabs.len() {
                 return;
             }
-            let kept = ui.tabs[keep].clone();
-            let others: Vec<Tab> = ui.tabs.drain(..).filter(|t| t.id != kept.id).collect();
+            let others = ui.close_others(keep);
             ui.closed.extend(others);
             trim_closed(&mut ui.closed);
-            ui.tabs = vec![kept];
-            ui.active = 0;
 
+            ui.popover = None;
+        }
+        self.save_ui();
+    }
+
+    /// Pin a tab, or unpin it ("Pin Tab" in the tab's menu).
+    pub fn pin_tab(mut self, index: usize, on: bool) {
+        {
+            let mut ui = self.ui.write();
+            ui.pin_tab(index, on);
             ui.popover = None;
         }
         self.save_ui();
@@ -4936,15 +5267,26 @@ impl AppState {
     }
 
     pub fn trash_page(self, id: &str) {
+        let tab = {
+            let ui = self.ui.peek();
+            let tab = ui.tab();
+            (tab.panes.len() == 1 && tab.route() == &Route::Page(id.to_string())).then(|| tab.id.clone())
+        };
         self.set_trashed(id, true);
         self.set_popover(None);
-        self.toast("Moved to Trash");
+        self.toast_back("Moved to Trash", Back::Page { id: id.to_string(), tab });
     }
 
     pub fn restore_page(self, id: &str) {
+        self.take_out_of_trash(id);
+        self.toast("Page restored");
+    }
+
+    /// A page comes out of the Trash ("Restore" there, and the "Undo" of
+    /// the message that said it went).
+    fn take_out_of_trash(self, id: &str) {
         self.set_trashed(id, false);
         self.unrow_if_lost(id);
-        self.toast("Page restored");
     }
 
     /// Move a page and everything under it to the Trash, or back.
@@ -5072,6 +5414,9 @@ impl AppState {
         if before == after {
             return result;
         }
+        self.drop_dead_folds(page_id, &after);
+        // (What the window showed is the page of before the other program's change.)
+        self.show_newly_hidden(page_id, on_screen.as_ref().unwrap_or(&before), &after);
         self.keep_version(page_id, Some(&before), false);
         // Nothing but this one block changed, and only its words (for a
         // table, its cells too): one row of the notes file is written, not
@@ -7773,6 +8118,13 @@ impl AppState {
                 }
             }
             Bridge::Backspace { page, id, value } => {
+                // The line above is under a folded heading (a heading
+                // nested in a toggle or a list ends with it): the heading
+                // opens, and the key joins or takes out nothing yet.
+                let above = self.blocks.peek().get(&page).and_then(|bs| index_of(bs, &id).and_then(|i| backspace_reaches(bs, i)).map(|j| bs[j].id.clone()));
+                if above.is_some_and(|line| self.show_line(&page, &line)) {
+                    return;
+                }
                 let caret = self.edit_blocks(&page, |bs| {
                     index_of(bs, &id).and_then(|i| press_backspace_at_start(bs, i, &value))
                 });
@@ -7781,6 +8133,11 @@ impl AppState {
                 }
             }
             Bridge::Delete { page, id, value } => {
+                // At the end of a folded heading the next line is not in
+                // view: the heading opens, and the key joins nothing yet.
+                if self.is_folded(&page, &id) {
+                    return self.set_fold(&page, &id, false);
+                }
                 let caret = self.edit_blocks(&page, |bs| index_of(bs, &id).and_then(|i| press_delete_at_end(bs, i, &value)));
                 if let Some(c) = caret {
                     self.focus(c);
@@ -7818,6 +8175,7 @@ impl AppState {
             Bridge::EventDraw { day, from, to } => self.draw_event(&day, from, to),
             Bridge::CalPress { minute } => CAL_PRESS.with(|p| p.set(Some((now_ms(), minute)))),
             Bridge::PagesFind { q, n, here } => self.find_pages_for_at(&q, n, &here),
+            Bridge::PagePreview { id, n } => self.preview_page(&id, n),
             Bridge::AskGivePage { id } => self.give_page_to_ai(&id),
             Bridge::EventCopy { id } => self.copy_event(&id),
             Bridge::EventPaste { day, minute } => self.paste_event(&day, minute),
@@ -7879,18 +8237,23 @@ impl AppState {
             Bridge::Nav { page, id, dir } => {
                 let blocks = self.blocks.peek().get(&page).cloned().unwrap_or_default();
                 let Some(i) = index_of(&blocks, &id) else { return };
+                // (Over the lines of a folded heading, as over those of a closed toggle.)
+                let vis = shown(&blocks, &self.folds_of(&page));
                 if dir == "up" {
-                    match prev_editable(&blocks, i) {
+                    match prev_editable_of(&blocks, i, &vis) {
                         Some(j) => self.focus(Caret::end(&blocks[j].id)),
                         None => self.focus_title(&page),
                     }
-                } else if let Some(j) = next_editable(&blocks, i) {
+                } else if let Some(j) = next_editable_of(&blocks, i, &vis) {
                     self.focus(Caret::start(&blocks[j].id));
                 }
             }
             Bridge::Menu { action } => self.slash_key(&action),
             Bridge::Move { page, from, to, after } => {
-                self.edit_blocks(&page, |bs| move_block(bs, &from, &to, after));
+                // A folded heading goes with the lines it hides. (A line let
+                // go under a folded heading opens it: `show_newly_hidden`.)
+                let section = self.is_folded(&page, &from);
+                self.edit_blocks(&page, |bs| move_lines(bs, &from, &to, after, section));
             }
             Bridge::Shortcut { name } => self.command(&name),
             Bridge::Focus { page, id } => {
@@ -7909,8 +8272,20 @@ impl AppState {
     }
 
     pub fn block_action(self, page: &str, id: &str, action: &str, pos: usize) {
+        // From the page script: open a folded heading (find in page came to
+        // words under it), or the headings that hide a line (the outline).
+        match action {
+            "unfold" => return self.set_fold(page, id, false),
+            "show" => {
+                self.show_line(page, id);
+                return;
+            }
+            _ => {}
+        }
         let mut refocus = Some(Caret { id: id.to_string(), pos });
         let mut opened = false;
+        let mut fold = false;
+        let folded = self.is_folded(page, id);
         self.edit_blocks(page, |bs| {
             let Some(i) = index_of(bs, id) else { return };
             match action {
@@ -7927,7 +8302,8 @@ impl AppState {
                     move_down(bs, i);
                 }
                 "duplicate" => {
-                    let copy = duplicate(bs, i);
+                    // (A folded heading: with the lines it hides, after them.)
+                    let copy = if folded { duplicate_lines(bs, i, section_end(bs, i).max(subtree_end(bs, i))) } else { duplicate(bs, i) };
                     refocus = Some(Caret::end(&copy));
                 }
                 "toggle" => match bs[i].kind {
@@ -7936,6 +8312,8 @@ impl AppState {
                         bs[i].collapsed = !bs[i].collapsed;
                         opened = !bs[i].collapsed;
                     }
+                    // (The same key folds a heading and opens it.)
+                    kind if heading_level(kind).is_some() => fold = true,
                     _ => {}
                 },
                 _ => refocus = None,
@@ -7943,6 +8321,9 @@ impl AppState {
         });
         if opened {
             self.show_reveal(page, id);
+        }
+        if fold {
+            self.toggle_fold(page, id);
         }
         if let Some(c) = refocus {
             self.focus(c);
@@ -8344,6 +8725,114 @@ impl AppState {
         }
     }
 
+    // ----- folded headings ------------------------------------------------
+
+    /// The headings folded on a page, in this window.
+    pub fn folds_of(&self, page: &str) -> HashSet<Id> {
+        self.ui.peek().folds.get(page).cloned().unwrap_or_default()
+    }
+
+    pub fn is_folded(&self, page: &str, id: &str) -> bool {
+        self.ui.peek().folds.get(page).is_some_and(|ids| ids.contains(id))
+    }
+
+    /// Fold a heading (its lines are hidden, up to the next heading of its
+    /// level or a higher one) or open it again. No line is changed: what is
+    /// folded is part of the window's layout. Entries of headings that are
+    /// gone from the page, or are headings no more, go at each change.
+    pub fn set_fold(mut self, page: &str, id: &str, on: bool) {
+        let live: Option<HashSet<Id>> = {
+            let all = self.blocks.peek();
+            // (The lines of a locked page that is not open cannot be seen.)
+            all.get(page).filter(|bs| crate::lock::sealed(bs).is_none()).map(|bs| bs.iter().filter(|b| heading_level(b.kind).is_some()).map(|b| b.id.clone()).collect())
+        };
+        let Some(live) = live else { return };
+        if on == self.is_folded(page, id) || (on && !live.contains(id)) {
+            return;
+        }
+        // (Only a fold can hide the line of an open "/" list. A heading that
+        // opens for the new "/" line of its "+" leaves that list open.)
+        if on {
+            self.clear_slash();
+        }
+        // The line with the caret goes out of sight: the heading is the
+        // line in use from now on, and the caret goes to its end when the
+        // keyboard is left with no line (`caretLeft` in bridge.js).
+        let lost = self.focus.peek().clone().filter(|(p, line)| {
+            on && p == page && self.blocks.peek().get(page).is_some_and(|bs| !folds_hiding(bs, &HashSet::from([id.to_string()]), line).is_empty())
+        });
+        if let Some((_, line)) = lost {
+            self.focus.set(Some((page.to_string(), id.to_string())));
+            let (gone, head) = (serde_json::to_string(&format!("blk-{line}")).unwrap_or_default(), serde_json::to_string(&format!("blk-{id}")).unwrap_or_default());
+            document::eval(&format!("window.__rune && window.__rune.caretLeft && window.__rune.caretLeft({gone}, {head})"));
+        }
+        {
+            let mut ui = self.ui.write();
+            let ids = ui.folds.entry(page.to_string()).or_default();
+            if on {
+                ids.insert(id.to_string());
+            } else {
+                ids.remove(id);
+            }
+            ids.retain(|h| live.contains(h));
+            if ids.is_empty() {
+                ui.folds.remove(page);
+            }
+        }
+        self.save_ui();
+        if !on {
+            self.show_reveal(page, id);
+        }
+    }
+
+    /// A page changed: a folded heading that is gone from it, or is a
+    /// heading no more, is folded no more. (Made a heading again later, the
+    /// line would fold by itself.)
+    fn drop_dead_folds(mut self, page: &str, bs: &[Block]) {
+        let live = |id: &Id| bs.iter().any(|b| b.id == *id && heading_level(b.kind).is_some());
+        let dead = self.ui.peek().folds.get(page).is_some_and(|ids| !ids.iter().all(live));
+        if !dead || crate::lock::sealed(bs).is_some() {
+            return;
+        }
+        {
+            let mut ui = self.ui.write();
+            if let Some(ids) = ui.folds.get_mut(page) {
+                ids.retain(live);
+                if ids.is_empty() {
+                    ui.folds.remove(page);
+                }
+            }
+        }
+        self.save_ui();
+    }
+
+    pub fn toggle_fold(self, page: &str, id: &str) {
+        self.set_fold(page, id, !self.is_folded(page, id));
+    }
+
+    /// Open every folded heading that hides this line. Says whether one did.
+    pub fn show_line(self, page: &str, id: &str) -> bool {
+        let hiding = {
+            let folds = self.folds_of(page);
+            self.blocks.peek().get(page).map(|bs| folds_hiding(bs, &folds, id)).unwrap_or_default()
+        };
+        for heading in &hiding {
+            self.set_fold(page, heading, false);
+        }
+        !hiding.is_empty()
+    }
+
+    /// An edit never puts a line out of sight that the person did not
+    /// hide: a line that showed before the edit and is under a folded
+    /// heading after it (a line moved there, a heading moved or made a
+    /// higher one over it) opens that heading.
+    fn show_newly_hidden(self, page: &str, before: &[Block], after: &[Block]) {
+        let folds = self.folds_of(page);
+        for id in newly_hidden(before, after, &folds) {
+            self.show_line(page, &id);
+        }
+    }
+
     /// Let the children of a toggle that just opened ease in.
     fn show_reveal(mut self, page: &str, id: &str) {
         let key = (page.to_string(), id.to_string());
@@ -8638,6 +9127,7 @@ impl AppState {
             let blocks = self.blocks.peek();
             blocks.get(page).and_then(|bs| index_of(bs, id).and_then(|i| prev_editable(bs, i).map(|j| bs[j].id.clone())))
         };
+        let step_was = self.history.peek().next_undo(page);
         let linked = self.edit_blocks(page, |bs| index_of(bs, id).map(|i| delete(bs, i)).unwrap_or_default());
         let mut trashed = Vec::new();
         for page_id in linked {
@@ -8651,7 +9141,7 @@ impl AppState {
         }
         if !trashed.is_empty() {
             self.history.write().attach(page, &trashed, &[]);
-            self.toast("Deleted the block and moved its page to Trash");
+            self.toast_step("Deleted the block and moved its page to Trash", page, step_was);
         }
         self.set_popover(None);
         if let Some(f) = focus {
@@ -8857,8 +9347,15 @@ impl AppState {
         self.step(false);
     }
 
-    fn step(mut self, undo: bool) {
+    fn step(self, undo: bool) {
         let Some(page) = self.current_page() else { return };
+        self.step_on(&page, undo);
+    }
+
+    /// One step back or forward on a page: the page in front (⌘Z), or the
+    /// page a message's "Undo" is about.
+    fn step_on(mut self, page: &str, undo: bool) {
+        let page = page.to_string();
         let entry = {
             let mut h = self.history.write();
             if undo { h.take_undo(&page) } else { h.take_redo(&page) }
@@ -8884,6 +9381,9 @@ impl AppState {
             e.rename_block(was, now);
         }
         self.set_blocks(&page, target.clone(), true);
+        // (Undo and Redo are edits too: see `show_newly_hidden`.)
+        self.drop_dead_folds(&page, &target);
+        self.show_newly_hidden(&page, &current, &target);
         // (The first cell of a row is the name of the row's page, and a row
         // that this step takes out takes its page along.)
         self.name_row_pages_of(&page);
@@ -9315,7 +9815,7 @@ impl AppState {
     fn last_shown_block(&self, page: &str) -> Id {
         let all = self.blocks.peek();
         let Some(bs) = all.get(page) else { return Id::default() };
-        let shown = visibility(bs);
+        let shown = shown(bs, &self.folds_of(page));
         (0..bs.len()).rev().find(|&i| shown[i]).map(|i| bs[i].id.clone()).unwrap_or_default()
     }
 
@@ -9495,6 +9995,23 @@ impl AppState {
                 .collect()
         };
         document::eval(&format!("window.__rune && window.__rune.pagesFound && window.__rune.pagesFound({n}, {})", serde_json::Value::Array(found)));
+    }
+
+    /// What the card over a link to a page says, handed to the page script
+    /// (`pagePreview` in bridge.js), which draws it. `null` for a page that
+    /// has no card (see `page_preview`).
+    fn preview_page(self, id: &str, n: u32) {
+        let card = page_preview(&self.pages.peek(), &self.blocks.peek(), &self.spaces.peek(), id).map(|p| {
+            serde_json::json!({
+                "id": id,
+                "title": p.title,
+                "icon": crate::ui::icons::page_icon_html(p.icon.as_deref(), 16),
+                "place": p.place,
+                "lines": p.lines,
+                "locked": p.locked,
+            })
+        });
+        document::eval(&format!("window.__rune && window.__rune.pagePreview && window.__rune.pagePreview({n}, {})", card.unwrap_or(serde_json::Value::Null)));
     }
 
     /// A page chosen with "@" in the Ask box: it goes with the question, as
@@ -10216,7 +10733,16 @@ impl AppState {
             "listen_stop" => self.stop_listening(),
             "picked_copy" => self.copy_picked(false),
             "picked_cut" => self.copy_picked(true),
-            "picked_delete" => self.delete_picked(),
+            "picked_delete" => {
+                let Some(picked) = self.picked.peek().clone() else { return };
+                let step_was = self.history.peek().next_undo(&picked.page);
+                self.delete_picked();
+                // (Said only when they went: a locked page keeps its lines.)
+                if self.history.peek().next_undo(&picked.page) != step_was {
+                    let n = picked.ids.len();
+                    self.toast_step(if n == 1 { "Deleted 1 block".to_string() } else { format!("Deleted {n} blocks") }, &picked.page, step_was);
+                }
+            }
             "meeting_recap" => {
                 if let Some(page) = self.current_page() {
                     self.ai_recap(&page);
@@ -10404,6 +10930,13 @@ impl AppState {
                     ui.popover = None;
                     ui.modal = None;
                 }
+            }
+            // The thing an open menu hangs on went out of sight (bridge.js,
+            // "an open menu stays at its thing"): the menu closes, and
+            // nothing else does.
+            "close_menu" => {
+                self.clear_slash();
+                self.set_popover(None);
             }
             other => {
                 if let Some(n) = other.strip_prefix("tab_").and_then(|n| n.parse::<usize>().ok()) {
@@ -10601,6 +11134,7 @@ mod tests {
             history: None,
             voice: VoiceFor::NewPage,
             focus_mode: false,
+            folds: HashMap::new(),
         }
     }
 
@@ -10628,14 +11162,123 @@ mod tests {
     }
 
     #[test]
+    fn pinned_tabs_stand_first_and_stay_when_the_others_close() {
+        let tab = |id: &str| Tab::new(Route::Page(id.into()));
+        let mut ui = ui_with(vec![tab("a"), tab("b"), tab("c"), tab("d")], "one");
+        let pins = |ui: &Ui| ui.tabs.iter().filter(|t| t.pinned).count();
+        let names = |tabs: &[Tab]| titles(tabs).join(" ");
+        // A pinned tab goes to the left, after the ones pinned before it; the tab in front stays in front.
+        ui.active = 3;
+        ui.pin_tab(2, true);
+        assert_eq!((names(&ui.tabs).as_str(), pins(&ui), ui.active), ("c a b d", 1, 3));
+        ui.pin_tab(3, true);
+        assert_eq!((names(&ui.tabs).as_str(), pins(&ui), ui.active), ("c d a b", 2, 1));
+        // Unpinned, it is the first of the tabs that are not pinned.
+        ui.pin_tab(0, false);
+        assert_eq!((names(&ui.tabs).as_str(), pins(&ui), ui.active), ("d c a b", 1, 0));
+        ui.pin_tab(9, true);
+        assert_eq!(pins(&ui), 1, "no such tab: nothing changes");
+        // A tab put before a pinned one (a drop, a page that changed its space) goes back behind them.
+        ui.tabs.swap(0, 3);
+        ui.active = 0;
+        assert!(pins_first(&mut ui.tabs, &mut ui.active));
+        assert_eq!((names(&ui.tabs).as_str(), ui.active), ("d b c a", 1));
+        assert!(!pins_first(&mut ui.tabs, &mut ui.active), "in order: nothing moves");
+        // "Close Other Tabs" keeps the tab it was asked on and every pinned one.
+        let gone = ui.close_others(3);
+        assert_eq!((names(&ui.tabs).as_str(), ui.active, names(&gone).as_str()), ("d a", 1, "b c"));
+        // The pages of a pinned tab, each in a tab of its own: the first one keeps the pin.
+        let mut two = tab("x");
+        two.pinned = true;
+        two.add_pane(Pane::new(Route::Page("y".into())), None, Edge::Right);
+        assert_eq!(two.split_apart().iter().map(|t| t.pinned).collect::<Vec<_>>(), [true, false]);
+    }
+
+    #[test]
+    fn a_pinned_tab_whose_page_goes_to_the_trash_is_pinned_no_more() {
+        let pin = |id: &str| {
+            let mut t = Tab::new(Route::Page(id.into()));
+            t.pinned = true;
+            t
+        };
+        let mut two = pin("x");
+        two.add_pane(Pane::new(Route::Page("y".into())), None, Edge::Right);
+        let mut ui = ui_with(vec![pin("a"), pin("b"), two, Tab::new(Route::Page("c".into()))], "one");
+        ui.active = 1;
+        ui.leave_pages(&["a".to_string(), "y".to_string()]);
+        // The tab of "a" shows Home and is a plain tab, behind the pinned
+        // ones. A pinned tab that keeps a page keeps its pin. The tab in
+        // front is still in front.
+        let row: Vec<String> = ui.tabs.iter().zip(titles(&ui.tabs)).map(|(t, name)| format!("{}{name}", if t.pinned { "*" } else { "" })).collect();
+        assert_eq!(row.join(" "), "*b *x home c");
+        assert_eq!(titles(&ui.tabs)[ui.active], "b");
+        // In a space that is not in front too.
+        ui.parked.insert("two".into(), (vec![pin("p")], 0));
+        ui.leave_pages(&["p".to_string()]);
+        assert!(!ui.parked["two"].0[0].pinned);
+    }
+
+    #[test]
+    fn a_pin_is_saved_with_its_tab_and_an_older_rune_reads_the_tabs_all_the_same() {
+        // The tab as every Rune before pins reads it (`SavedTab` of 0.1.20).
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct TabBeforePins {
+            id: Id,
+            #[serde(default)]
+            panes: Vec<Pane>,
+            #[serde(default)]
+            layout: Option<Layout>,
+            #[serde(default)]
+            focus: Option<Id>,
+            #[serde(default)]
+            history: Vec<Route>,
+            #[serde(default)]
+            cursor: usize,
+            #[serde(default)]
+            split: Option<Route>,
+            #[serde(default)]
+            folded: Vec<Id>,
+        }
+        let plain = Tab::new(Route::Page("a".into()));
+        let mut pinned = Tab::new(Route::Page("b".into()));
+        pinned.pinned = true;
+        // A tab that is not pinned is written as before, to the letter: no new word in it.
+        let old_words = serde_json::to_string(&plain).unwrap();
+        assert!(!old_words.contains("pinned"), "{old_words}");
+        assert!(old_words.starts_with("{\"id\":") && old_words.ends_with("\"folded\":[]}"), "{old_words}");
+        // What an older Rune wrote reads as tabs with no pin.
+        let read: Tab = serde_json::from_str(&old_words).unwrap();
+        assert_eq!(read, plain);
+        let oldest: Tab = serde_json::from_str(&format!("{{\"id\":\"t\",\"history\":[{}],\"cursor\":0}}", serde_json::to_string(&Route::Page("z".into())).unwrap())).unwrap();
+        assert!(!oldest.pinned && oldest.route() == &Route::Page("z".into()));
+        // The row of tabs and the tabs of the other spaces, with a pin: it comes back…
+        let row = serde_json::to_string(&(vec![pinned.clone(), plain.clone()], 1usize)).unwrap();
+        let (tabs, active): (Vec<Tab>, usize) = serde_json::from_str(&row).unwrap();
+        assert_eq!((tabs, active), (vec![pinned.clone(), plain.clone()], 1));
+        let sets: HashMap<Id, TabSet> = [("two".to_string(), (vec![pinned.clone()], 0))].into_iter().collect();
+        let back: HashMap<Id, TabSet> = serde_json::from_str(&serde_json::to_string(&sets).unwrap()).unwrap();
+        assert!(back["two"].0[0].pinned);
+        // …and an older Rune reads the same words as plain tabs, each with its page.
+        let (old, front): (Vec<TabBeforePins>, usize) = serde_json::from_str(&row).unwrap();
+        assert_eq!((old.len(), front, old[0].id.as_str(), old[0].panes.len()), (2, 1, pinned.id.as_str(), 1));
+        assert_eq!(old[0].panes[0].route(), &Route::Page("b".into()));
+        assert!(serde_json::from_str::<HashMap<Id, (Vec<TabBeforePins>, usize)>>(&serde_json::to_string(&sets).unwrap()).is_ok());
+    }
+
+    #[test]
     fn only_the_first_window_keeps_its_folds_recent_pages_and_zoom() {
         let mut ui = ui_with(vec![Tab::new(Route::Home)], "one");
         ui.zoom = 1.5;
         ui.expanded.insert("a".into());
         let keys = |primary: bool| ui_settings(&ui, primary).into_iter().map(|(k, _)| k).collect::<Vec<_>>();
         assert_eq!(keys(false), ["theme"], "a second window would write its old copy over the first window's");
-        assert_eq!(keys(true), ["theme", "expanded", "recent", "sidebar_open", "sidebar_width", "zoom", "tabs", "space_tabs"]);
+        assert_eq!(keys(true), ["theme", "expanded", "recent", "sidebar_open", "sidebar_width", "zoom", "tabs", "space_tabs", "folds"]);
         assert!(ui_settings(&ui, true).contains(&("zoom", "1.5".to_string())));
+        // The folded headings: by page, then by heading; read back as they were written.
+        ui.folds.insert("p".into(), ["h1".to_string(), "h2".to_string()].into_iter().collect());
+        let kept = ui_settings(&ui, true).into_iter().find(|(k, _)| *k == "folds").map(|(_, v)| v).unwrap_or_default();
+        assert_eq!(serde_json::from_str::<HashMap<Id, HashSet<Id>>>(&kept).ok(), Some(ui.folds.clone()));
     }
 
     #[test]
@@ -10683,6 +11326,49 @@ mod tests {
         let mut ui = ui_with(vec![tab], "one");
         ui.leave_pages(&["x".to_string()]);
         assert_eq!((titles(&ui.tabs), ui.tabs[0].can_back()), (vec!["y".to_string()], false));
+    }
+
+    #[test]
+    fn undo_of_the_trash_shows_the_page_in_the_tab_it_left_and_makes_no_tab() {
+        let page = |id: &str| Route::Page(id.to_string());
+        // One tab, with the page "x" after "w": it goes to the Trash.
+        let mut one = Tab::new(page("w"));
+        one.focused_mut().push(page("x"));
+        let left = one.id.clone();
+        let mut ui = ui_with(vec![one], "s1");
+        ui.leave_pages(&["x".to_string()]);
+        assert_eq!(ui.tabs.len(), 1);
+        assert_eq!(ui.tabs[0].route(), &Route::Home, "the Trash leaves Home in its place");
+        // Undo: the same tab shows it again. (It was opened in a new tab,
+        // and this one stayed beside it at Home: two tabs for one.)
+        assert!(ui.put_page_back_in(&left, "x"));
+        assert_eq!(ui.tabs.len(), 1, "no tab is made");
+        assert_eq!(ui.tabs[0].route(), &page("x"));
+        assert!(!ui.tabs.iter().any(|t| t.route() == &Route::Home), "no Home tab is left over");
+        // …and Back goes where it went before the Trash: to "w", not to Home.
+        let pane = ui.tabs[0].focused_mut();
+        assert_eq!(pane.history[pane.cursor - 1], page("w"));
+        // From another tab, the tab it left comes to the front.
+        ui.leave_pages(&["x".to_string()]);
+        ui.tabs.push(Tab::new(page("y")));
+        ui.active = 1;
+        assert!(ui.put_page_back_in(&left, "x"));
+        assert_eq!((ui.active, ui.tabs.len()), (0, 2));
+        // The tab shows something else by now, or is gone: nothing changes.
+        assert!(!ui.put_page_back_in(&left, "x"), "it shows the page, not Home");
+        ui.leave_pages(&["x".to_string()]);
+        ui.tabs[0].focused_mut().push(page("z"));
+        let before = ui.clone();
+        assert!(!ui.put_page_back_in(&left, "x"));
+        assert!(!ui.put_page_back_in("no such tab", "x"));
+        assert!(ui == before);
+        // A page in one pane of a split tab closed its pane: no Home stands
+        // for it, and a Home the person opened there is not taken.
+        let mut home = Tab::new(Route::Home);
+        home.panes.push(Pane::new(page("y")));
+        let split = home.id.clone();
+        let mut ui = ui_with(vec![home], "s1");
+        assert!(!ui.put_page_back_in(&split, "x"));
     }
 
     #[test]
@@ -11128,6 +11814,69 @@ mod tests {
         let r = day_ribbon(&over, day, at(12, 0));
         assert_eq!((r.first_hour, r.last_hour, r.events[0].left), (0, 24, 0.0));
         assert!(r.events.iter().all(|e| e.left >= 0.0 && e.left + e.width <= 100.0001));
+    }
+
+    #[test]
+    fn the_card_of_a_link_says_what_the_page_is_and_keeps_what_is_locked() {
+        let space = Space::new("Work", "blue", 1.0);
+        let mut pages: HashMap<Id, Page> = HashMap::new();
+        let mut add = |id: &str, title: &str, parent: Option<&str>| {
+            let mut p = Page::new(parent.map(str::to_string), 1.0);
+            p.id = id.into();
+            p.title = title.into();
+            p.space_id = space.id.clone();
+            pages.insert(id.to_string(), p);
+        };
+        add("plan", "Plan", None);
+        add("trip", "Trip <to> Rome & back", Some("plan"));
+        add("days", "Day by day", Some("trip"));
+        add("bin", "Old", None);
+        add("safe", "Diary", None);
+        add("bare", "", None);
+        pages.get_mut("bin").unwrap().trashed = true;
+        pages.get_mut("trip").unwrap().icon = Some("plane:blue".into());
+        let mut picture = Block::new(BlockKind::Image, "");
+        picture.data = "a.png".into();
+        let mut blocks: HashMap<Id, Vec<Block>> = HashMap::new();
+        blocks.insert(
+            "trip".into(),
+            vec![
+                Block::text(""),
+                Block::new(BlockKind::Heading1, "What to **pack**"),
+                picture,
+                Block::new(BlockKind::Table, "a b c"),
+                Block::new(BlockKind::Divider, ""),
+                Block::page_link("days".into()),
+                Block::page_link("bin".into()),
+                Block::new(BlockKind::Code, "let x = 1;"),
+                Block::new(BlockKind::Todo, "Passport"),
+                Block::text("Charger"),
+                Block::text("The sixth line is not sent"),
+            ],
+        );
+        blocks.insert("safe".into(), vec![Block::new(BlockKind::Locked, "")]);
+        blocks.insert("bin".into(), vec![Block::text("gone words")]);
+        let spaces = [space];
+        let card = |id: &str| page_preview(&pages, &blocks, &spaces, id);
+        // The name, the icon, the pages it is inside, and its first lines as plain words.
+        let trip = card("trip").unwrap();
+        assert_eq!((trip.title.as_str(), trip.icon.as_deref(), trip.place.as_str(), trip.locked), ("Trip <to> Rome & back", Some("plane:blue"), "Plan", false));
+        assert_eq!(trip.lines, ["What to pack", "Table", "Day by day", "Passport", "Charger"]);
+        assert_eq!(card("days").unwrap().place, "Plan / Trip <to> Rome & back");
+        // A page at the top is in its space; one with no name and no lines still has a card.
+        assert_eq!(card("plan").unwrap().place, "Work");
+        let bare = card("bare").unwrap();
+        assert_eq!((bare.title.as_str(), bare.lines.len()), ("Untitled", 0));
+        // In the Trash, or gone: no card.
+        assert_eq!(card("bin"), None);
+        assert_eq!(card("never"), None);
+        // Locked: the name, and none of its words.
+        let safe = card("safe").unwrap();
+        assert!(safe.locked && safe.lines.is_empty() && safe.title == "Diary");
+        // A long line is cut, with the sign that there is more.
+        blocks.insert("plan".into(), vec![Block::text("word ".repeat(80).trim())]);
+        let long = page_preview(&pages, &blocks, &spaces, "plan").unwrap();
+        assert!(long.lines.len() == 1 && long.lines[0].ends_with('…') && long.lines[0].chars().count() <= 201, "{:?}", long.lines);
     }
 
     #[test]

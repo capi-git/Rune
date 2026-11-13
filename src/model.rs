@@ -693,6 +693,74 @@ pub fn visibility(blocks: &[Block]) -> Vec<bool> {
     out
 }
 
+/// The level of a heading (1 to 3); none for a block that is no heading.
+pub fn heading_level(kind: BlockKind) -> Option<u8> {
+    match kind {
+        BlockKind::Heading1 => Some(1),
+        BlockKind::Heading2 => Some(2),
+        BlockKind::Heading3 => Some(3),
+        _ => None,
+    }
+}
+
+/// Exclusive end of the lines under the heading at `idx`: up to the next
+/// heading of the same or a higher level, or to the end of what the heading
+/// is nested in. (For a block that is no heading: the block alone.)
+pub fn section_end(blocks: &[Block], idx: usize) -> usize {
+    let Some(level) = heading_level(blocks[idx].kind) else { return idx + 1 };
+    let indent = blocks[idx].indent;
+    let mut end = idx + 1;
+    while end < blocks.len() {
+        let b = &blocks[end];
+        if b.indent < indent || (b.indent == indent && heading_level(b.kind).is_some_and(|l| l <= level)) {
+            break;
+        }
+        end += 1;
+    }
+    end
+}
+
+/// Which blocks show: not inside a closed toggle, and not under a folded
+/// heading. `folded` holds the ids of the headings folded in the window
+/// (see `Ui::folds`): the lines under them are hidden, never changed. An id
+/// of a line that is no heading (any more) folds nothing.
+pub fn shown(blocks: &[Block], folded: &std::collections::HashSet<Id>) -> Vec<bool> {
+    let mut out = visibility(blocks);
+    if folded.is_empty() {
+        return out;
+    }
+    for i in 0..blocks.len() {
+        if heading_level(blocks[i].kind).is_some() && folded.contains(&blocks[i].id) {
+            for slot in &mut out[i + 1..section_end(blocks, i)] {
+                *slot = false;
+            }
+        }
+    }
+    out
+}
+
+/// The folded headings that hide the block `id` (the outer ones first).
+pub fn folds_hiding(blocks: &[Block], folded: &std::collections::HashSet<Id>, id: &str) -> Vec<Id> {
+    let Some(at) = index_of(blocks, id).filter(|_| !folded.is_empty()) else { return Vec::new() };
+    (0..at)
+        .filter(|&i| heading_level(blocks[i].kind).is_some() && folded.contains(&blocks[i].id) && section_end(blocks, i) > at)
+        .map(|i| blocks[i].id.clone())
+        .collect()
+}
+
+/// The lines that an edit put out of sight: they showed before it, and are
+/// now under a folded heading (in no closed toggle). The window opens what
+/// hides them: an edit never hides a line that the person did not hide.
+pub fn newly_hidden(before: &[Block], after: &[Block], folded: &std::collections::HashSet<Id>) -> Vec<Id> {
+    if folded.is_empty() {
+        return Vec::new();
+    }
+    let was = shown(before, folded);
+    let showed: std::collections::HashSet<&str> = before.iter().zip(was).filter(|(_, v)| *v).map(|(b, _)| b.id.as_str()).collect();
+    let (now, open) = (shown(after, folded), visibility(after));
+    (0..after.len()).filter(|&i| !now[i] && open[i] && showed.contains(after[i].id.as_str())).map(|i| after[i].id.clone()).collect()
+}
+
 /// The number shown on each numbered-list block (None for other blocks).
 pub fn list_numbers(blocks: &[Block]) -> Vec<Option<usize>> {
     let mut counters = [0usize; MAX_INDENT as usize + 1];
@@ -793,6 +861,20 @@ pub fn press_enter(blocks: &mut Vec<Block>, idx: usize, pos: usize, value: &str)
     Caret::start(&new_id)
 }
 
+/// The line above that Backspace at the very start of block `idx` joins
+/// with or takes out; none when the key only changes the line itself (its
+/// kind, its nesting). The line is one that no closed toggle hides; it can
+/// be under a folded heading, and the window then opens that heading first.
+pub fn backspace_reaches(blocks: &[Block], idx: usize) -> Option<usize> {
+    let current = &blocks[idx];
+    if (current.kind != BlockKind::Text && current.kind.is_editable()) || current.indent > 0 {
+        return None;
+    }
+    let vis = visibility(blocks);
+    // A free picture is not a line: Backspace joins with the line before it.
+    (0..idx).rev().find(|&i| vis[i] && !blocks[i].floats())
+}
+
 /// Backspace pressed with the caret at the very start of block `idx`.
 pub fn press_backspace_at_start(blocks: &mut Vec<Block>, idx: usize, value: &str) -> Option<Caret> {
     blocks[idx].text = value.to_string();
@@ -808,8 +890,7 @@ pub fn press_backspace_at_start(blocks: &mut Vec<Block>, idx: usize, value: &str
     }
 
     let vis = visibility(blocks);
-    // A free picture is not a line: Backspace joins with the line before it.
-    let prev = (0..idx).rev().find(|&i| vis[i] && !blocks[i].floats())?;
+    let prev = backspace_reaches(blocks, idx)?;
     match blocks[prev].kind {
         BlockKind::Divider => {
             blocks.remove(prev);
@@ -915,8 +996,15 @@ pub fn outdent(blocks: &mut [Block], idx: usize) -> bool {
 
 /// Move a block with its children before or after another block.
 pub fn move_block(blocks: &mut Vec<Block>, from_id: &str, to_id: &str, after: bool) -> bool {
+    move_lines(blocks, from_id, to_id, after, false)
+}
+
+/// `move_block`; with `section`, a heading goes with all the lines under it
+/// (see `section_end`): a folded heading that is moved takes the lines it
+/// hides along.
+pub fn move_lines(blocks: &mut Vec<Block>, from_id: &str, to_id: &str, after: bool, section: bool) -> bool {
     let Some(from) = index_of(blocks, from_id) else { return false };
-    let from_end = subtree_end(blocks, from);
+    let from_end = if section { section_end(blocks, from).max(subtree_end(blocks, from)) } else { subtree_end(blocks, from) };
     let Some(to) = index_of(blocks, to_id) else { return false };
     if to >= from && to < from_end {
         return false; // can't drop a block inside itself
@@ -1116,7 +1204,12 @@ pub fn place_picture(blocks: &mut Vec<Block>, id: &str, place: Place, to: Option
 
 /// Copy a block and its children right after the original. Returns the copy's id.
 pub fn duplicate(blocks: &mut Vec<Block>, idx: usize) -> Id {
-    let end = subtree_end(blocks, idx);
+    duplicate_lines(blocks, idx, subtree_end(blocks, idx))
+}
+
+/// Copy the lines `idx..end` right after them (a folded heading with the
+/// lines it hides: the copy stands after those lines, not among them).
+pub fn duplicate_lines(blocks: &mut Vec<Block>, idx: usize, end: usize) -> Id {
     let copies: Vec<Block> = blocks[idx..end]
         .iter()
         .cloned()
@@ -1149,13 +1242,21 @@ pub fn ensure_not_empty(blocks: &mut Vec<Block>) {
 
 /// Previous visible block that can take the caret.
 pub fn prev_editable(blocks: &[Block], idx: usize) -> Option<usize> {
-    let vis = visibility(blocks);
-    (0..idx).rev().find(|&i| vis[i] && blocks[i].kind.is_editable())
+    prev_editable_of(blocks, idx, &visibility(blocks))
 }
 
 /// Next visible block that can take the caret.
 pub fn next_editable(blocks: &[Block], idx: usize) -> Option<usize> {
-    let vis = visibility(blocks);
+    next_editable_of(blocks, idx, &visibility(blocks))
+}
+
+/// The same two, among the lines that `vis` says show (see `shown`: a page
+/// with folded headings).
+pub fn prev_editable_of(blocks: &[Block], idx: usize, vis: &[bool]) -> Option<usize> {
+    (0..idx).rev().find(|&i| vis[i] && blocks[i].kind.is_editable())
+}
+
+pub fn next_editable_of(blocks: &[Block], idx: usize, vis: &[bool]) -> Option<usize> {
     (idx + 1..blocks.len()).find(|&i| vis[i] && blocks[i].kind.is_editable())
 }
 
@@ -1165,6 +1266,202 @@ mod tests {
 
     fn kinds(blocks: &[Block]) -> Vec<(BlockKind, &str, u8)> {
         blocks.iter().map(|b| (b.kind, b.text.as_str(), b.indent)).collect()
+    }
+
+    /// A page for the folded headings: an H1, text, an H2 with two lines,
+    /// an H3 with one, a second H2 with one, a second H1 with one.
+    fn headed() -> Vec<Block> {
+        let mut out = Vec::new();
+        for (id, kind, text) in [
+            ("a", BlockKind::Heading1, "One"),
+            ("a1", BlockKind::Text, "under one"),
+            ("b", BlockKind::Heading2, "One point one"),
+            ("b1", BlockKind::Text, "first"),
+            ("b2", BlockKind::Bulleted, "second"),
+            ("c", BlockKind::Heading3, "Deep"),
+            ("c1", BlockKind::Text, "deep line"),
+            ("d", BlockKind::Heading2, "One point two"),
+            ("d1", BlockKind::Text, "third"),
+            ("e", BlockKind::Heading1, "Two"),
+            ("e1", BlockKind::Text, "last"),
+        ] {
+            let mut b = Block::new(kind, text);
+            b.id = id.into();
+            out.push(b);
+        }
+        out
+    }
+
+    fn folded(ids: &[&str]) -> std::collections::HashSet<Id> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn showing(blocks: &[Block], ids: &[&str]) -> String {
+        let vis = shown(blocks, &folded(ids));
+        blocks.iter().zip(vis).filter(|(_, v)| *v).map(|(b, _)| b.id.as_str()).collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn a_folded_heading_hides_up_to_the_next_heading_of_its_level_or_higher() {
+        let page = headed();
+        assert_eq!(showing(&page, &[]), "a a1 b b1 b2 c c1 d d1 e e1");
+        // An H2: its lines and the H3 under it, up to the next H2.
+        assert_eq!(showing(&page, &["b"]), "a a1 b d d1 e e1");
+        // An H3: up to the next heading of any level here.
+        assert_eq!(showing(&page, &["c"]), "a a1 b b1 b2 c d d1 e e1");
+        // An H1: all under it, the lower headings too, up to the next H1.
+        assert_eq!(showing(&page, &["a"]), "a e e1");
+        // The last heading: to the end of the page.
+        assert_eq!(showing(&page, &["e"]), "a a1 b b1 b2 c c1 d d1 e");
+        // Two at once; one inside the other changes nothing while the outer one is folded.
+        assert_eq!(showing(&page, &["b", "d"]), "a a1 b d e e1");
+        assert_eq!(showing(&page, &["a", "c"]), "a e e1");
+        // The id of a line that is no heading, or that is gone, folds nothing.
+        assert_eq!(showing(&page, &["a1", "gone"]), "a a1 b b1 b2 c c1 d d1 e e1");
+        // No line is changed by any of it.
+        assert_eq!(page, headed());
+    }
+
+    #[test]
+    fn a_folded_heading_in_a_toggle_ends_with_the_toggle() {
+        let mut page = vec![Block::new(BlockKind::Toggle, "t"), Block::new(BlockKind::Heading2, "h").with_indent(1), Block::text("in").with_indent(1), Block::text("deeper").with_indent(2), Block::text("out")];
+        for (b, id) in page.iter_mut().zip(["t", "h", "in", "deeper", "out"]) {
+            b.id = id.into();
+        }
+        assert_eq!(section_end(&page, 1), 4);
+        assert_eq!(showing(&page, &["h"]), "t h out");
+        // A closed toggle still hides its lines, folded heading or not.
+        page[0].collapsed = true;
+        assert_eq!(showing(&page, &["h"]), "t out");
+        assert_eq!(showing(&page, &[]), "t out");
+    }
+
+    #[test]
+    fn the_folded_headings_that_hide_a_line_are_found() {
+        let page = headed();
+        let all = folded(&["a", "b", "c", "e"]);
+        assert_eq!(folds_hiding(&page, &all, "c1"), ["a", "b", "c"]);
+        assert_eq!(folds_hiding(&page, &all, "d1"), ["a"]);
+        assert_eq!(folds_hiding(&page, &all, "a"), Vec::<Id>::new());
+        assert_eq!(folds_hiding(&page, &all, "e"), Vec::<Id>::new());
+        assert_eq!(folds_hiding(&page, &folded(&[]), "c1"), Vec::<Id>::new());
+        assert_eq!(folds_hiding(&page, &all, "gone"), Vec::<Id>::new());
+    }
+
+    #[test]
+    fn enter_in_a_folded_heading_makes_its_first_line() {
+        // (A line after the hidden ones would still be under the heading,
+        // and hidden: the new line is the first under it, and the window
+        // opens the heading for the caret: see `AppState::focus`.)
+        let mut page = headed();
+        let caret = press_enter(&mut page, 2, 13, "One point one");
+        assert_eq!((page[3].id.as_str(), page[3].kind, page[3].text.as_str()), (caret.id.as_str(), BlockKind::Text, ""));
+        assert_eq!(folds_hiding(&page, &folded(&["b"]), &caret.id), ["b"]);
+        // The lines it hid are as they were, after the new one.
+        let rest: Vec<&str> = page[4..].iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(rest, ["b1", "b2", "c", "c1", "d", "d1", "e", "e1"]);
+    }
+
+    fn ids(blocks: &[Block]) -> String {
+        blocks.iter().map(|b| b.id.as_str()).collect::<Vec<_>>().join(" ")
+    }
+
+    fn page_of(lines: &[(&str, BlockKind, u8)]) -> Vec<Block> {
+        lines
+            .iter()
+            .map(|(id, kind, indent)| {
+                let mut b = Block::new(*kind, *id).with_indent(*indent);
+                b.id = id.to_string();
+                b
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_edit_that_puts_a_line_under_a_folded_heading_is_seen() {
+        use BlockKind::{Heading1 as H1, Heading2 as H2, Text};
+        // A folded heading moved alone above a line: that line is now under it.
+        let before = page_of(&[("intro", Text, 0), ("p1", Text, 0), ("a", H2, 0), ("a1", Text, 0), ("b", H2, 0)]);
+        let mut after = before.clone();
+        assert!(move_block(&mut after, "a", "intro", true));
+        assert_eq!(ids(&after), "intro a p1 a1 b");
+        assert_eq!(newly_hidden(&before, &after, &folded(&["a"])), ["p1"]);
+        // A heading 1 moved down below its line: the line falls under the folded heading above.
+        let before = page_of(&[("a", H2, 0), ("a1", Text, 0), ("b", H1, 0), ("b1", Text, 0)]);
+        let mut after = before.clone();
+        assert!(move_down(&mut after, 2));
+        assert_eq!(ids(&after), "a a1 b1 b");
+        assert_eq!(newly_hidden(&before, &after, &folded(&["a"])), ["b1"]);
+        // A folded heading 2 made a heading 1: the next heading 2 and its line are under it.
+        let before = page_of(&[("a", H2, 0), ("a1", Text, 0), ("b", H2, 0), ("b1", Text, 0), ("c", H1, 0)]);
+        let mut after = before.clone();
+        after[0].turn_into(H1);
+        assert_eq!(newly_hidden(&before, &after, &folded(&["a"])), ["b", "b1"]);
+        // A line that was hidden before, a new line, and a line in a closed toggle are not named.
+        let before = page_of(&[("a", H2, 0), ("a1", Text, 0), ("b", H2, 0)]);
+        let mut after = before.clone();
+        after.insert(1, Block::text("new"));
+        assert_eq!(newly_hidden(&before, &after, &folded(&["a"])), Vec::<Id>::new());
+        assert_eq!(newly_hidden(&before, &before, &folded(&["a"])), Vec::<Id>::new());
+        assert_eq!(newly_hidden(&before, &after, &folded(&[])), Vec::<Id>::new());
+    }
+
+    #[test]
+    fn a_folded_heading_moves_and_is_copied_with_the_lines_it_hides() {
+        use BlockKind::{Heading2 as H2, Text};
+        let page = page_of(&[("intro", Text, 0), ("a", H2, 0), ("a1", Text, 0), ("a2", Text, 0), ("b", H2, 0), ("b1", Text, 0), ("c", H2, 0)]);
+        // Before another heading: all of its section goes, and it hides the same lines there.
+        let mut moved = page.clone();
+        assert!(move_lines(&mut moved, "b", "a", false, true));
+        assert_eq!(ids(&moved), "intro b b1 a a1 a2 c");
+        assert_eq!(newly_hidden(&page, &moved, &folded(&["b"])), Vec::<Id>::new());
+        // After the last heading.
+        let mut moved = page.clone();
+        assert!(move_lines(&mut moved, "a", "c", true, true));
+        assert_eq!(ids(&moved), "intro b b1 c a a1 a2");
+        // Not into itself; and without `section` the heading goes alone, as before.
+        let mut same = page.clone();
+        assert!(!move_lines(&mut same, "a", "a2", true, true));
+        let mut alone = page.clone();
+        assert!(move_block(&mut alone, "a", "c", true));
+        assert_eq!(ids(&alone), "intro a1 a2 b b1 c a");
+        // A copy of the section stands after the section, with new ids and the same words.
+        let mut copied = page.clone();
+        let first = duplicate_lines(&mut copied, 1, section_end(&page, 1));
+        let words: Vec<&str> = copied.iter().map(|b| b.text.as_str()).collect();
+        assert_eq!(words, ["intro", "a", "a1", "a2", "a", "a1", "a2", "b", "b1", "c"]);
+        assert_eq!((copied[4].id.as_str(), ids(&copied[..4]).as_str()), (first.as_str(), "intro a a1 a2"));
+        assert!(copied[4..7].iter().all(|b| !["a", "a1", "a2"].contains(&b.id.as_str())));
+        // The folded heading still hides its own lines only.
+        assert_eq!(newly_hidden(&page, &copied, &folded(&["a"])), Vec::<Id>::new());
+        assert_eq!(shown(&copied, &folded(&["a"])), [true, true, false, false, true, true, true, true, true, true]);
+    }
+
+    #[test]
+    fn backspace_names_the_line_above_it_would_change() {
+        use BlockKind::{Bulleted, Divider, Heading2 as H2, Text, Toggle};
+        // A toggle with a folded heading and a divider in it, then a line outside.
+        let mut page = page_of(&[("t", Toggle, 0), ("h", H2, 1), ("d", Divider, 1), ("out", Text, 0), ("li", Bulleted, 0), ("in", Text, 1)]);
+        // The line outside reaches the divider, which the folded heading hides.
+        assert_eq!(backspace_reaches(&page, 3), Some(2));
+        assert_eq!(folds_hiding(&page, &folded(&["h"]), "d"), ["h"]);
+        // A list item becomes plain text, a nested line steps out: no line above is changed.
+        assert_eq!((backspace_reaches(&page, 4), backspace_reaches(&page, 5)), (None, None));
+        // The key itself is as it was: it takes the divider out.
+        let caret = press_backspace_at_start(&mut page, 3, "out");
+        assert_eq!((caret.map(|c| c.id), ids(&page).as_str()), (Some("out".to_string()), "t h out li in"));
+    }
+
+    #[test]
+    fn the_arrows_step_over_the_lines_a_folded_heading_hides() {
+        let page = headed();
+        let vis = shown(&page, &folded(&["b"]));
+        // Down from the folded heading: the next heading in view.
+        assert_eq!(next_editable_of(&page, 2, &vis), Some(7));
+        // Up from that one: the folded heading, not its last hidden line.
+        assert_eq!(prev_editable_of(&page, 7, &vis), Some(2));
+        // With nothing folded they are the lines next to it.
+        assert_eq!((next_editable(&page, 2), prev_editable(&page, 7)), (Some(3), Some(6)));
     }
 
     #[test]

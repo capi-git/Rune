@@ -528,9 +528,32 @@ pub fn PageIcon(
     }
 }
 
+/// A page's icon as markup, as `PageIcon` draws it: for what the page
+/// script draws itself (the card over a link to a page). It holds no word
+/// of the person's: the name and the colour are ones the app knows.
+pub fn page_icon_html(icon: Option<&str>, size: u32) -> String {
+    match icon.filter(|stored| !stored.trim().is_empty()) {
+        Some(stored) => {
+            let (name, color) = parse_icon(stored);
+            format!("<span class=\"page-ico\" style=\"--c: var(--icon-{color}); --c-soft: var(--icon-{color}-soft);\">{}</span>", svg(&name, size))
+        }
+        None => format!("<span class=\"page-ico none\">{}</span>", svg("file", size)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_page_icon_as_markup_holds_only_names_the_app_knows() {
+        let html = page_icon_html(Some("plane:blue"), 16);
+        assert!(html.starts_with("<span class=\"page-ico\" style=\"--c: var(--icon-blue);") && html.contains("width=\"16\""), "{html}");
+        assert!(page_icon_html(None, 16).contains("page-ico none") && page_icon_html(Some("  "), 16).contains("page-ico none"));
+        // A stored icon that is not one of the app's is the plain page, in the first colour: its letters never reach the markup.
+        let odd = page_icon_html(Some("\"><script>x</script>:red;}"), 16);
+        assert!(!odd.contains("script") && odd.contains(&format!("var(--icon-{DEFAULT_COLOR})")), "{odd}");
+    }
 
     #[test]
     fn every_listed_icon_has_paths() {

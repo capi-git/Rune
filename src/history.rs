@@ -27,6 +27,9 @@ pub struct Entry {
     pub trashed: Vec<Id>,
     /// Pages created by this step (moved to the trash on undo).
     pub created: Vec<Id>,
+    /// The number of this step: no other step of this window has it. A
+    /// message that offers to undo one step knows that step by it.
+    pub id: u64,
 }
 
 impl Entry {
@@ -44,6 +47,8 @@ impl Entry {
 pub struct History {
     undo: Vec<Entry>,
     redo: Vec<Entry>,
+    /// How many steps were recorded (the next step's number).
+    made: u64,
 }
 
 impl History {
@@ -68,7 +73,9 @@ impl History {
             since: now,
             trashed: Vec::new(),
             created: Vec::new(),
+            id: self.made,
         });
+        self.made += 1;
         if self.undo.len() > LIMIT {
             self.undo.remove(0);
         }
@@ -98,6 +105,14 @@ impl History {
     /// The pages that the step Undo would take back on `page` made.
     pub fn last_created(&self, page: &str) -> &[Id] {
         self.undo.iter().rfind(|e| e.page == page).map(|e| e.created.as_slice()).unwrap_or(&[])
+    }
+
+    /// The number of the step that Undo would take back on `page` now.
+    /// While this is the number a message got when its step was made, the
+    /// "Undo" of that message takes back that step and no other: a later
+    /// change of the page is a later step, with another number.
+    pub fn next_undo(&self, page: &str) -> Option<u64> {
+        self.undo.iter().rfind(|e| e.page == page).map(|e| e.id)
     }
 
     pub fn take_undo(&mut self, page: &str) -> Option<Entry> {
@@ -247,6 +262,45 @@ mod tests {
         h.record("p", a, b, None, 10);
         assert!(h.take_redo("p").is_none());
         assert!(h.take_undo("q").is_some());
+    }
+
+    #[test]
+    fn a_message_knows_its_step_and_no_later_one() {
+        let mut h = History::default();
+        let (a, b, c) = (vec![Block::text("a")], vec![Block::text("b")], vec![Block::text("c")]);
+        assert_eq!(h.next_undo("p"), None);
+        // Rows are deleted: the message gets the number of that step.
+        h.record("p", a.clone(), b.clone(), None, 0);
+        h.seal();
+        let step = h.next_undo("p");
+        assert!(step.is_some());
+        // A step on another page changes nothing for this page.
+        h.record("q", a.clone(), b.clone(), None, 5);
+        assert_eq!(h.next_undo("p"), step);
+        // The person types: Undo would take the typing back now, not the
+        // rows. The message must not offer its "Undo" for that.
+        let id = b[0].id.clone();
+        h.record("p", b.clone(), c.clone(), Some(&id), 10);
+        assert!(h.next_undo("p").is_some() && h.next_undo("p") != step);
+        // ⌘Z takes the typing back: the step of the rows is the next again.
+        let typed = h.take_undo("p").unwrap();
+        h.push_redo(typed);
+        assert_eq!(h.next_undo("p"), step);
+        // ⌘Z again takes the step of the rows: nothing is left for the message.
+        let rows = h.take_undo("p").unwrap();
+        assert_eq!(Some(rows.id), step);
+        h.push_redo(rows);
+        assert_eq!(h.next_undo("p"), None);
+        // Redo brings that step back, with its number.
+        let again = h.take_redo("p").unwrap();
+        h.push_undo(again);
+        assert_eq!(h.next_undo("p"), step);
+        // Another program changed the page: its steps are dropped.
+        h.forget("p");
+        assert_eq!(h.next_undo("p"), None);
+        // Each step has its own number, also the first after that.
+        h.record("p", a, b, None, 20);
+        assert!(h.next_undo("p").is_some() && h.next_undo("p") != step);
     }
 
     #[test]

@@ -195,7 +195,15 @@ pub fn CalendarView() -> Element {
                         }
                     }
                     div { class: "cal-nav",
-                        button { class: "secondary-btn small", onclick: move |_| state.cal_today(), "Today" }
+                        button {
+                            class: "secondary-btn small",
+                            onclick: move |_| {
+                                state.cal_today();
+                                // "Today" also brings the hour of now in sight.
+                                document::eval(&open_hours(Some(when::today())));
+                            },
+                            "Today"
+                        }
                         button { class: "icon-btn", title: "Previous", onclick: move |_| state.cal_step(-1), Icon { name: "chevron-left", size: 16 } }
                         button { class: "icon-btn", title: "Next", onclick: move |_| state.cal_step(1), Icon { name: "chevron-right", size: 16 } }
                     }
@@ -560,6 +568,14 @@ fn TodoChip(todo: OpenTodo, late: bool) -> Element {
     }
 }
 
+/// The page script's call that puts the hours where they open: at the line
+/// of now when today is in sight, else at 8 AM (`calOpen` in bridge.js).
+/// With a day, it is done again for the hours that show that day ("Today").
+fn open_hours(day: Option<NaiveDate>) -> String {
+    let day = day.map(|d| format!("'{d}'")).unwrap_or_else(|| "null".into());
+    format!("window.__rune && window.__rune.calOpen && window.__rune.calOpen({}, {day})", 8.0 * HOUR_PX - 8.0)
+}
+
 /// The hours of some days side by side: the seven of a week, or one day
 /// (the day view). `panel_open` says that an event's panel is open, so a
 /// click on the grid closes it and adds nothing.
@@ -624,8 +640,10 @@ fn WeekGrid(days: Vec<NaiveDate>, events: Vec<Event>, selected: Option<String>, 
             div {
                 class: "cal-scroll",
                 onmounted: move |_| async move {
-                    // Start the day at 8 AM.
-                    document::eval(&format!("const s=document.querySelector('.cal-scroll');if(s)s.scrollTop={}", 8.0 * HOUR_PX - 8.0));
+                    // Where this pane's calendar was left (see "a page keeps its
+                    // scroll place" in bridge.js); else at now, when today is
+                    // in sight; else at 8 AM.
+                    document::eval(&format!("const s=document.querySelector('.cal-scroll');if(!(s&&window.__rune&&window.__rune.placeKept&&window.__rune.placeKept(s))){{{}}}", open_hours(None)));
                 },
                 div { class: "cal-hours", style: "height: {total}px",
                     // (Before the days, so that the days lie over them.)

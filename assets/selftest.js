@@ -138,6 +138,16 @@ const centre = (el, fx = 0.5) => {
   const r = el.getBoundingClientRect();
   return [el, r.left + r.width * fx, r.top + r.height / 2];
 };
+// The pointer comes onto something and rests there (a link to a page shows
+// its card then: `.link-card`). `restOff` takes it to the top row.
+const restOn = (el) => {
+  const r = el.getBoundingClientRect();
+  el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true, clientX: r.left + Math.min(r.width / 2, 20), clientY: r.top + r.height / 2 }));
+};
+const restOff = async () => {
+  restOn($('.toprow'));
+  await until(() => !$('.link-card'), 1000);
+};
 // Down to a single tab showing Home.
 const oneTab = async () => {
   while ($$('.tab').length > 1) {
@@ -230,12 +240,28 @@ await run('Sidebar menu: Move to Trash', async () => {
   check('Sidebar menu opens', menu);
   check('Sidebar menu is lifted out of the scroll area', menu?.classList.contains('anchored'));
   const item = menuItem(menu, 'Move to Trash');
+  const tabsWere = $$('.tab .tab-title').map((t) => t.textContent).join(' | ');
   check('Sidebar menu item is clickable (not covered)', item && onTop(item), item && document.elementFromPoint(item.getBoundingClientRect().left + 20, item.getBoundingClientRect().top + 8)?.className);
   item.click();
   const gone = await until(() => !treeItem('Trash me'));
   check('Sidebar "Move to Trash" trashes the page', gone);
   check('Toast says it moved', (await until(() => $('.toast')))?.textContent.includes('Trash'), $('.toast')?.textContent);
-  check('The "Moved to Trash" message goes away on its own', await until(() => !$('.toast'), 2500));
+  // The message has an "Undo" in it: the page comes back, and the message
+  // goes at once. The press is no stop of the Tab key.
+  const undo = await until(() => $('#toast-undo'));
+  check('The message has an "Undo" in it, apart from its words', undo?.textContent === 'Undo' && undo.tabIndex === -1 && $('.toast .toast-text')?.textContent === 'Moved to Trash', `${undo?.textContent} | ${$('.toast .toast-text')?.textContent}`);
+  undo?.click();
+  check('"Undo" puts the page back, and the message goes at once', (await until(() => treeItem('Trash me'), 1500)) && !$('.toast'), `${!!treeItem('Trash me')} ${$('.toast')?.textContent}`);
+  check('…and the page that was in front shows again', await until(() => $$('.pane .title-input').some((t) => t.value === 'Trash me'), 1500), $$('.pane .title-input').map((t) => t.value).join(' | '));
+  // (It was opened in a new tab, and the tab it left stayed beside it at Home.)
+  check('…in the tab it left: the tabs are as they were, with no Home tab more', $$('.tab .tab-title').map((t) => t.textContent).join(' | ') === tabsWere && $('.tab.active .tab-title')?.textContent === 'Trash me', `${tabsWere} → ${$$('.tab .tab-title').map((t) => t.textContent).join(' | ')}`);
+  // Left alone, the message stays longer than a plain one, and then goes.
+  treeItem('Trash me').querySelector('.tree-actions .row-btn').click();
+  menuItem(await until(() => $('.sidebar-menu')), 'Move to Trash').click();
+  await until(() => !treeItem('Trash me'));
+  await wait(1600);
+  check('A message with an "Undo" stays long enough to press it', $('#toast-undo') && $('.toast:not(.leaving)'), $('.toast')?.className);
+  check('The "Moved to Trash" message goes away on its own', await until(() => !$('.toast'), 7000));
 });
 
 await run('Page menu: Move to Trash', async () => {
@@ -244,8 +270,17 @@ await run('Page menu: Move to Trash', async () => {
   const menu = await until(() => $('.page-menu'));
   const item = menu && menuItem(menu, 'Move to Trash');
   check('Page menu item is clickable (not covered)', item && onTop(item));
+  const tabWas = $('.tab.active')?.dataset.tab;
   item.click();
   check('Page menu "Move to Trash" trashes the page', await until(() => !treeItem('Trash me too')));
+  (await until(() => $('#toast-undo')))?.click();
+  // (Here a Home tab is open beside it: the page is in its own tab again,
+  // not in a new one with its old tab left at Home.)
+  check('"Undo" in its message shows the page in the tab it left, and makes no tab', (await until(() => $$('.pane .title-input').some((t) => t.value === 'Trash me too'), 2000)) && !!tabWas && $('.tab.active')?.dataset.tab === tabWas && $('.tab.active .tab-title')?.textContent === 'Trash me too', $$('.tab .tab-title').map((t) => t.textContent).join(' | '));
+  check('"Undo" in its message puts the page back in front', (await until(() => treeItem('Trash me too') && $$('.pane .title-input').some((t) => t.value === 'Trash me too'), 2000)) && !$('.toast'), $$('.pane .title-input').map((t) => t.value).join(' | '));
+  $('.pagebar .icon-btn[title="Page options"]').click();
+  menuItem(await until(() => $('.page-menu')), 'Move to Trash').click();
+  await until(() => !treeItem('Trash me too'));
   // Back led to the page in the Trash again, to be typed in.
   await until(() => !$$('.pane .title-input').some((t) => t.value === 'Trash me too'), 1500);
   T().command('back');
@@ -456,6 +491,29 @@ await run('Slash menu', async () => {
 
 await run('Block menu', async () => {
   const row = $('.block-row');
+  // With no menu open, a scroll of the page does not look through the page
+  // for menus to move (it did, four times for each picture drawn).
+  {
+    const scroller = row.closest('.scroller');
+    const column = row.closest('.page');
+    column.style.paddingBottom = '600px';
+    let looked = 0;
+    const own = document.querySelectorAll;
+    document.querySelectorAll = function (sel) {
+      if (String(sel).includes('.block-menu.anchored')) looked += 1;
+      return own.call(this, sel);
+    };
+    for (let i = 1; i <= 5; i++) {
+      scroller.scrollTop = i * 20;
+      await wait(40);
+    }
+    await wait(120);
+    document.querySelectorAll = own;
+    check('With no menu open, a scroll of the page looks for no menu to move', scroller.scrollTop === 100 && looked === 0, `scrolled to ${scroller.scrollTop}, looked ${looked} times`);
+    column.style.paddingBottom = '';
+    scroller.scrollTop = 0;
+    await wait(100);
+  }
   row.querySelector('.handle').click();
   const menu = await until(() => $('.block-menu'));
   const item = menu && menuItem(menu, 'Duplicate');
@@ -473,6 +531,35 @@ await run('Block menu', async () => {
   }
   key(document.body, 'Escape');
   await until(() => !$('.block-menu'));
+  // The page moves under an open menu in another way than by the wheel (a
+  // key or the app scrolls it): the menu goes with its line. When its line
+  // is out of sight, the menu closes.
+  // (The page is given room to scroll, and its line is brought near the
+  // top: there the tall menu has room under its line, so its place is its
+  // line's and not the foot of the window.)
+  {
+    const scroller = row.closest('.scroller');
+    const column = row.closest('.page');
+    column.style.paddingBottom = '1500px';
+    const lineAt = () => Math.round(row.getBoundingClientRect().top);
+    scroller.scrollTop = lineAt() - scroller.getBoundingClientRect().top - 40;
+    await wait(150);
+    row.querySelector('.handle').click();
+    const open = await until(() => $('.block-menu.anchored'));
+    await wait(200);
+    const gap = () => Math.round($('.block-menu').getBoundingClientRect().top - row.getBoundingClientRect().top);
+    const was = { gap: open && gap(), line: lineAt() };
+    scroller.scrollTop += 20;
+    await wait(200);
+    check('The page moves under an open menu: the menu goes with its line', open && $('.block-menu') && lineAt() === was.line - 20 && gap() === was.gap && was.gap > 0, `line ${was.line} to ${lineAt()}, menu ${was.gap} to ${$('.block-menu') ? gap() : 'gone'} under it`);
+    scroller.scrollTop += 600;
+    check('…and when its line is out of sight, the menu closes', await until(() => !$('.block-menu'), 2000), `line at ${lineAt()}, page from ${Math.round(scroller.getBoundingClientRect().top)}`);
+    key(document.body, 'Escape');
+    await until(() => !$('.block-menu'));
+    column.style.paddingBottom = '';
+    scroller.scrollTop = 0;
+    await wait(100);
+  }
   // The menu of a line at the foot of the window opens where all of it is seen.
   const rows = $$('.pane .blocks > .block-row').filter((r) => r.querySelector('.handle'));
   const low = rows[rows.length - 1];
@@ -533,6 +620,13 @@ await run('Tabs and the sliding highlight', async () => {
   check('Tab menu is lifted out and clickable', menu?.classList.contains('anchored') && item && onTop(item));
   item.click();
   check('Close Tab from the menu works', await until(() => $$('.tab').length === 1));
+  // The message can open the tab again, as ⌘⇧T does.
+  const reopen = await until(() => $('#toast-undo'), 1500);
+  check('A closed tab says so, with "Reopen" in the message', reopen?.textContent === 'Reopen' && $('.toast .toast-text')?.textContent === 'Tab closed', $('.toast')?.textContent);
+  reopen?.click();
+  check('"Reopen" opens that tab again, and the message goes', (await until(() => $$('.tab').length === 2 && $('.tab.active .tab-title')?.textContent === 'Getting Started', 2000)) && !$('.toast'), $$('.tab .tab-title').map((t) => t.textContent).join(' | '));
+  $('.tab.active .tab-close').click();
+  await until(() => $$('.tab').length === 1);
 });
 
 await run('Pages open in their own tab', async () => {
@@ -924,6 +1018,147 @@ await run('Move a tab to a new window', async () => {
   await oneTab();
 });
 
+await run('Pin a tab', async () => {
+  await oneTab();
+  treeItem('Getting Started').click();
+  await until(() => $$('.tab').length === 2);
+  treeItem('Reading List').click();
+  await until(() => $$('.tab').length === 3 && $('.tab.active')?.title === 'Reading List');
+  const tabOf = (name) => $$('.tab').find((t) => t.title === name);
+  const order = () => $$('.tab').map((t) => (t.classList.contains('pinned') ? '*' : '') + t.title).join(' | ');
+  const menuOf = async (tab) => {
+    tab.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    return until(() => $('.tab-menu'));
+  };
+  const says = (menu) => $$('.menu-item', menu).map((m) => m.querySelector('span').textContent);
+  const choose = async (name, words) => {
+    const menu = await menuOf(tabOf(name));
+    menuItem(menu, words).click();
+    await until(() => !$('.tab-menu'));
+  };
+  const other = (el, button) => el.dispatchEvent(new PointerEvent('auxclick', { bubbles: true, cancelable: true, button, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+  const paneOf = (name) => $$('.pane').find((p) => p.querySelector('.title-input')?.value === name && p.offsetParent);
+  try {
+  let menu = await menuOf(tabOf('Reading List'));
+  check('The menu of a tab has "Pin Tab"', menu && says(menu).includes('Pin Tab') && (await until(() => onTop(menuItem(menu, 'Pin Tab')), 1000)), menu && says(menu).join(' | '));
+  menuItem(menu, 'Pin Tab').click();
+  check('A pinned tab stands at the left of the row', await until(() => order() === '*Reading List | Home | Getting Started'), order());
+  const pin = () => tabOf('Reading List');
+  const wide = pin().getBoundingClientRect().width;
+  check('It is narrow: its icon only, its name on a rest of the pointer, no button to close it', pin().querySelector('.tab-icon .page-ico') && !pin().querySelector('.tab-title') && !pin().querySelector('.tab-close') && wide > 28 && wide < 40 && wide < tabOf('Home').getBoundingClientRect().width / 2, `${wide} wide; ${pin().textContent}`);
+  await wait(300);
+  const g = $('.tab-glider');
+  const gx = parseFloat((g.style.transform.match(/translateX\(([-\d.]+)px/) || [])[1]);
+  check('The highlight sits under the pinned tab in front', pin().classList.contains('active') && Math.abs(gx - pin().offsetLeft) < 1.5 && Math.abs(g.offsetWidth - pin().offsetWidth) < 1.5, `${gx} and ${g.offsetWidth} against ${pin().offsetLeft} and ${pin().offsetWidth}`);
+  snap('pinned-tab');
+  // It does not close: not by a middle press, not by ⌘W, not with the others.
+  other(pin(), 1);
+  await wait(300);
+  check('A middle press does not close a pinned tab', order() === '*Reading List | Home | Getting Started', order());
+  T().command('close_tab');
+  await wait(300);
+  check('⌘W on a pinned tab closes nothing', order() === '*Reading List | Home | Getting Started' && pin().classList.contains('active'), order());
+  menu = await menuOf(pin());
+  check('Its menu says "Unpin Tab", and has no "Close Tab"', menu && says(menu).includes('Unpin Tab') && !says(menu).includes('Pin Tab') && !says(menu).includes('Close Tab'), menu && says(menu).join(' | '));
+  pin().click();
+  await until(() => !$('.tab-menu'));
+  await choose('Getting Started', 'Close Other Tabs');
+  check('"Close Other Tabs" keeps the pinned tab', await until(() => order() === '*Reading List | Getting Started'), order());
+  // A drag: a pinned tab moves among the pinned ones only, and no other tab goes before one.
+  await choose('Getting Started', 'Pin Tab');
+  await until(() => order() === '*Reading List | *Getting Started' && paneOf('Getting Started'));
+  // A link in the page of a pinned tab opens as links do: in a tab of its own.
+  const sub = await until(() => $$('.page-link:not(.missing)', paneOf('Getting Started')).find((l) => l.textContent.includes('Ideas')), 2000);
+  sub?.click();
+  check('A page opened by a link from a pinned tab gets a tab of its own, after the pinned ones', sub && (await until(() => order() === '*Reading List | *Getting Started | Ideas' && $('.tab.active')?.title === 'Ideas', 2000)), order());
+  $('.new-tab').click();
+  check('A new tab opens after the pinned ones too', await until(() => order() === '*Reading List | *Getting Started | Ideas | Home'), order());
+  await dragTab(tabOf('Getting Started'), tabOf('Reading List'), 'before');
+  check('A pinned tab dragged onto another pinned one takes its place', await until(() => order() === '*Getting Started | *Reading List | Ideas | Home'), order());
+  await dragTab(tabOf('Home'), tabOf('Getting Started'), 'before');
+  check('A tab that is not pinned, let go before a pinned one, lands after the pinned ones', await until(() => order() === '*Getting Started | *Reading List | Home | Ideas'), order());
+  await dragTab(tabOf('Ideas'), tabOf('Reading List'), 'middle');
+  await wait(200);
+  check('…and let go on a pinned one it does not join it', order() === '*Getting Started | *Reading List | Ideas | Home' && !$('.tab.split') && !$('.panes.split'), order());
+  await dragTab(tabOf('Getting Started'), tabOf('Home'), 'after');
+  check('A pinned tab let go among the other tabs stays with the pinned ones', await until(() => order() === '*Reading List | *Getting Started | Ideas | Home'), order());
+  {
+    // Over the page: a tab that is not pinned would open beside it; a pinned one does not.
+    tabOf('Home').click();
+    await until(() => $('.home-hero'));
+    const card = $('.work-card').getBoundingClientRect();
+    const [x, y] = [card.left + card.width * 0.75, card.top + card.height / 2];
+    const under = document.elementFromPoint(x, y);
+    // (The half of the pane that a drop would take shows for a tab that can go there.)
+    const over = (from, drop) => {
+      const dt = new DataTransfer();
+      from.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: dt }));
+      under.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, clientX: x, clientY: y, dataTransfer: dt }));
+      const offered = !!$('.pane-drop.show');
+      if (drop) under.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, clientX: x, clientY: y, dataTransfer: dt }));
+      from.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: dt }));
+      return offered;
+    };
+    const plain = over(tabOf('Ideas'), false);
+    const offered = over(tabOf('Getting Started'), true);
+    await wait(250);
+    check('A pinned tab is not pulled into a pane by a drag', plain && !offered && !$('.panes.split') && order() === '*Reading List | *Getting Started | Ideas | Home', `a place was offered to a plain tab: ${plain}, to the pinned one: ${offered}; ${order()}`);
+  }
+  other(tabOf('Ideas'), 1);
+  await until(() => $$('.tab').length === 3);
+  // Several pages in a pinned tab: one icon, of the first page.
+  await choose('Getting Started', 'Unpin Tab');
+  await choose('Reading List', 'Unpin Tab');
+  check('Unpinned, a tab has its name and its close button again', await until(() => order() === 'Reading List | Getting Started | Home') && tabOf('Reading List').querySelector('.tab-title') && tabOf('Reading List').querySelector('.tab-close'), order());
+  await dragTab(tabOf('Getting Started'), tabOf('Reading List'), 'middle');
+  const both = await until(() => $('.tab.split'));
+  const names = 'Reading List | Getting Started';
+  if (both) await choose(names, 'Pin Tab');
+  const one = await until(() => $('.tab.pinned'));
+  const ico = (el) => el?.querySelector('.page-ico svg')?.innerHTML;
+  check('A pinned tab of several pages shows the icon of its first page, and names them all', both && one && one.title === names && $$('.tab-icon', one).length === 1 && !one.querySelector('.tab-seg') && ico(one) && ico(one) === ico(treeItem('Reading List')) && ico(one) !== ico(treeItem('Getting Started')) && $$('.pane .page').length === 2, one ? `${one.title}: ${$$('.tab-icon', one).length} icons` : 'no pinned tab');
+  await wait(300);
+  const gx2 = parseFloat((g.style.transform.match(/translateX\(([-\d.]+)px/) || [])[1]);
+  check('…with the highlight under it', one && Math.abs(gx2 - one.offsetLeft) < 1.5 && Math.abs(g.offsetWidth - one.offsetWidth) < 1.5, `${gx2} and ${g.offsetWidth}`);
+  menu = one && (await menuOf(one));
+  check('Its menu still separates the pages', menu && says(menu).includes('Separate Pages') && says(menu).includes('Unpin Tab'), menu && says(menu).join(' | '));
+  if (menu) menuItem(menu, 'Unpin Tab').click();
+  check('Unpinned, it shows each page again', await until(() => $$('.tab.split .tab-seg').length === 2 && !$('.tab.pinned')), order());
+  if ($('.tab.split')) await choose(names, 'Separate Pages');
+  await until(() => !$('.tab.split'));
+  // "Move to New Window" is asked for by name: it takes a pinned tab too.
+  await choose('Getting Started', 'Pin Tab');
+  await until(() => order() === '*Getting Started | Reading List | Home');
+  await choose('Getting Started', 'Move to New Window');
+  check('"Move to New Window" takes a pinned tab out of the row', await until(() => order() === 'Reading List | Home', 2000), order());
+  await wait(1500);
+  // A page with no icon: its pinned tab shows the first letter of its name
+  // (all such tabs had the same grey sign).
+  await newPage('quiet page');
+  await until(() => tabOf('quiet page'));
+  await choose('quiet page', 'Pin Tab');
+  const lettered = await until(() => $('.tab.pinned'));
+  check('A pinned tab of a page with no icon shows the first letter of its name', lettered && lettered.title === 'quiet page' && lettered.querySelector('.tab-letter')?.textContent === 'Q' && !lettered.querySelector('.page-ico'), lettered ? lettered.innerHTML.slice(0, 160) : 'no pinned tab');
+  await wait(250);
+  snap('pinned-letter');
+  // Its page goes to the Trash: the tab shows Home, and is a plain tab again.
+  treeItem('quiet page').querySelector('.tree-actions .row-btn').click();
+  menuItem(await until(() => $('.sidebar-menu')), 'Move to Trash').click();
+  await until(() => !treeItem('quiet page'));
+  await wait(300);
+  check('A pinned tab whose page goes to the Trash is a plain Home tab: nothing stays pinned', !$('.tab.pinned') && $$('.tab').filter((t) => t.title === 'Home').length === 1 && !!tabOf('Home')?.querySelector('.tab-close') && !tabOf('quiet page'), order());
+  } finally {
+    // (Whatever went wrong above: no pinned tab stays for the groups after this one.)
+    if ($('.tab-menu')) $('.tab.active').click();
+    while ($('.tab.pinned')) {
+      const n = $$('.tab.pinned').length;
+      menuItem(await menuOf($('.tab.pinned')), 'Unpin Tab').click();
+      await until(() => $$('.tab.pinned').length < n);
+    }
+  }
+  await oneTab();
+});
+
 await run('Spaces', async () => {
   $('.ws-name').click();
   const menu = await until(() => $('.space-menu'));
@@ -943,6 +1178,30 @@ await run('Spaces', async () => {
   const menu2 = await until(() => $('.space-menu'));
   menuItem(menu2, 'My Space').click();
   check('Switching back shows the first space', await until(() => treeItem('Getting Started') && !treeItem('Only in space two')));
+
+  // A pin belongs to the tabs of its space: the other space has none of it,
+  // and it is there on the way back.
+  {
+    const toSpace = async (name) => {
+      $('.ws-name').click();
+      menuItem(await until(() => $('.space-menu')), name).click();
+      await until(() => $('.ws-label')?.textContent === name);
+      await wait(450);
+    };
+    const tabMenu = async (tab) => {
+      tab.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+      return until(() => $('.tab-menu'));
+    };
+    await wait(450);
+    menuItem(await tabMenu($('.tab.active')), 'Pin Tab').click();
+    const pinned = (await until(() => $('.tab.pinned')))?.dataset.tab;
+    await toSpace('Second space');
+    const there = $$('.tab.pinned').length;
+    await toSpace('My Space');
+    check('A tab is pinned in its own space only, and is still pinned on the way back', pinned && there === 0 && (await until(() => $('.tab.pinned')?.dataset.tab === pinned)), `${there} pinned in the other space; ${$$('.tab.pinned').length} here`);
+    if ($('.tab.pinned')) menuItem(await tabMenu($('.tab.pinned')), 'Unpin Tab').click();
+    await until(() => !$('.tab.pinned'));
+  }
 
   // The order of the spaces: a space dragged in the menu takes its new place.
   {
@@ -1298,6 +1557,35 @@ await run('Model names carry version numbers', async () => {
 await run('Calendar', async () => {
   $$('.tile').find((t) => t.title.startsWith('Calendar')).click();
   check('Calendar opens in week view', await until(() => $('.calendar .cal-week')));
+  // The hours open at now: the line of now a third of the way down (or the
+  // hours at their start or their end, when the day is young or old).
+  const hours = $('.cal-scroll');
+  const most = () => hours.scrollHeight - hours.clientHeight;
+  const atNow = () => {
+    const line = $('.cal-now', hours);
+    return !!line && Math.abs(hours.scrollTop - Math.max(0, Math.min(parseFloat(line.style.top) - hours.clientHeight / 3, most()))) <= 2;
+  };
+  const hoursSay = () => `at ${hours.scrollTop} of ${most()}, line ${$('.cal-now', hours)?.style.top}`;
+  check('The week opens with the line of now in sight, a third of the way down', await until(atNow), hoursSay());
+  const calView = async (name) => {
+    $$('.cal-toolbar .segmented button').find((b) => b.textContent === name).click();
+    await until(() => (name === 'Month' ? !$('.cal-scroll') : $('.cal-scroll')));
+  };
+  hours.scrollTop = 96;
+  $('.cal-nav .icon-btn[title="Next"]').click();
+  await until(() => !$('.cal-now'));
+  await wait(120);
+  check('Another week keeps the hours where the person left them', $('.cal-scroll') === hours && hours.scrollTop === 96, String($('.cal-scroll')?.scrollTop));
+  await calView('Month');
+  await calView('Week');
+  const other = $('.cal-scroll');
+  // (The calendar keeps its scroll place as a page does: back from the month,
+  // the hours are where the person left them. A week without today that is
+  // opened with no place kept starts at 8 AM: `calOpen`, proven on the hidden page.)
+  check('Back from the month view, the hours are where the person left them', await until(() => !$('.cal-now') && Math.abs(other.scrollTop - 96) <= 1), String(other?.scrollTop));
+  other.scrollTop = 0;
+  $('.cal-nav .secondary-btn').click();
+  check('“Today” brings the line of now in sight again', await until(() => $('.cal-now') && Math.abs($('.cal-scroll').scrollTop - Math.max(0, Math.min(parseFloat($('.cal-now').style.top) - $('.cal-scroll').clientHeight / 3, $('.cal-scroll').scrollHeight - $('.cal-scroll').clientHeight))) <= 2), String($('.cal-scroll')?.scrollTop));
   $('.cal-toolbar .primary-btn').click();
   key(await until(() => $('#cal-quick')), 'Enter');
   const title = await until(() => $('.cal-editor .ed-title'));
@@ -1391,8 +1679,15 @@ await run('Calendar', async () => {
   check('The panel shows the 15 minutes', /6:15.*6:30|06:15.*06:30/.test(times), times);
   $('#ev-delete').click();
   check('Delete removes it', await until(() => $$('.cal-event').length === before));
-  check('It says "Event deleted"', await until(() => $('.toast')?.textContent === 'Event deleted'));
-  check('The message goes away on its own', await until(() => !$('.toast'), 2500));
+  check('It says "Event deleted"', await until(() => $('.toast .toast-text')?.textContent === 'Event deleted'));
+  // "Undo" in the message: the event is there again, as it was.
+  $('#toast-undo')?.click();
+  const again = await until(() => $$('.cal-event:not(.draft)').find((e) => e.querySelector('.ev-title')?.textContent === 'Gym'), 2000);
+  check('"Undo" in the message puts the event back at its time', again && again.style.top === '300px' && $$('.cal-event').length === before + 1 && !$('.toast'), `${again?.style.top} ${$$('.cal-event').length - before}`);
+  again?.click();
+  (await until(() => $('.cal-editor .ed-title')?.value === 'Gym' && $('#ev-delete')))?.click();
+  await until(() => $$('.cal-event').length === before);
+  check('The message goes away on its own', await until(() => !$('.toast'), 8000));
   $$('.cal-toolbar .segmented button').find((b) => b.textContent === 'Month').click();
   check('Month view shows the event', await until(() => $('.cal-month') && $$('.cal-chip .chip-title').some((t) => t.textContent === 'Team sync')));
   await wait(200);
@@ -1451,6 +1746,16 @@ await run('Repeating events', async () => {
   if (!only) return;
   only.click();
   check('Deleting only that repeat removes it from its week', await until(() => !shown()));
+  // "Undo" in the message puts that one repeat back; then it is deleted again.
+  (await until(() => $('.toast .toast-text')?.textContent === 'Deleted this repeat' && $('#toast-undo'), 1500))?.click();
+  const putBack = await until(shown, 2000);
+  check('"Undo" in the message puts that repeat back in its week', putBack && !$('.toast'), `${!!putBack} ${$('.toast')?.textContent}`);
+  if (putBack) {
+    putBack.click();
+    (await until(() => $('#ev-delete'))).click();
+    (await until(() => $('.ed-menu [data-value="one"]'))).click();
+    await until(() => !shown());
+  }
   next();
   await wait(120);
   const later = await until(shown);
@@ -1980,6 +2285,576 @@ await run('Split view', async () => {
   check('Closing the split leaves one page', await until(() => !$('.panes.split') && $$('.pane').length === 1));
 });
 
+await run('A code block has a copy button', async () => {
+  await oneTab();
+  const title = await newPage('Code copy');
+  key(title, 'Enter');
+  const first = await until(() => document.activeElement?.classList.contains('blk') && document.activeElement);
+  // A tab, an empty line, two spaces at the start of a line, no line end at the end.
+  const code = 'fn main() {\n\tlet a = 1;\n\n  two();\n}';
+  const clip = new DataTransfer();
+  clip.setData('text/plain', ['Before.', '', '```', code, '```', '', 'After.'].join('\n'));
+  first.dispatchEvent(new ClipboardEvent('paste', { clipboardData: clip, bubbles: true, cancelable: true }));
+  const pane = () => $$('.pane').find((p) => p.querySelector('.title-input')?.value === 'Code copy' && p.offsetParent);
+  const wrap = await until(() => $('.kind-code .code-wrap:not(.diagram-wrap)', pane()), 3000);
+  const blk = wrap && $('.blk', wrap);
+  const btn = wrap && $('.code-copy', wrap);
+  check('A code block has a copy button', btn && btn.tagName === 'BUTTON' && btn.getAttribute('aria-label') === 'Copy code');
+  if (!btn) return;
+  const w = wrap.getBoundingClientRect();
+  const b = btn.getBoundingClientRect();
+  const c = blk.getBoundingClientRect();
+  check('It is at the top right of the block, above the code', b.right <= w.right && w.right - b.right <= 12 && b.top - w.top <= 10 && b.bottom <= c.top + 1 && b.width === 22, `${Math.round(w.right - b.right)} from the right, ${Math.round(b.top - w.top)} from the top, ends ${Math.round(c.top - b.bottom)} above the code`);
+  check('It takes no room: the code is where the block puts it', getComputedStyle(btn).position === 'absolute' && Math.round(c.top - w.top) === 34, Math.round(c.top - w.top));
+  check('At rest it does not show', getComputedStyle(btn).opacity === '0', getComputedStyle(btn).opacity);
+  check('It has no words, and is no part of what is selected', btn.textContent === '' && getComputedStyle(btn).webkitUserSelect === 'none' && !blk.contains(btn));
+  // A press leaves the caret in the code.
+  blk.focus();
+  T().setSel(blk, 4);
+  const down = new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 });
+  btn.dispatchEvent(down);
+  delete document.body.dataset.copied;
+  btn.click();
+  const copied = await until(() => document.body.dataset.copied);
+  check('A press copies the code as it is: its tab, its empty line, no line end added', copied === code, JSON.stringify(copied));
+  check('…and the app says so', (await until(() => $('.toast')))?.textContent === 'Copied the code', $('.toast')?.textContent);
+  check('The press leaves the caret in the code', down.defaultPrevented && document.activeElement === blk && T().selIn(blk)?.start === 4, `${down.defaultPrevented} ${document.activeElement?.className} ${JSON.stringify(T().selIn(blk))}`);
+  check('The code is not changed by it', blk.textContent.replace(/\n$/, '') === code, JSON.stringify(blk.textContent));
+  // What is typed since is copied too.
+  T().setSel(blk, code.length);
+  typeIn(blk, ' // end');
+  await wait(200);
+  delete document.body.dataset.copied;
+  btn.click();
+  check('What was typed a moment ago is in the copy', (await until(() => document.body.dataset.copied)) === code + ' // end', JSON.stringify(document.body.dataset.copied));
+  await wait(150);
+  snap('code-copy');
+});
+
+await run('A heading folds', async () => {
+  await oneTab();
+  T().command('zoom_reset');
+  const title = await newPage('Fold test');
+  key(title, 'Enter');
+  const first = await until(() => document.activeElement?.classList.contains('blk') && document.activeElement);
+  const clip = new DataTransfer();
+  clip.setData('text/plain', ['Intro line.', '# Alpha', 'alpha one', '## Beta', 'beta one zebra', '- beta two', '### Gamma', 'gamma one', '## Delta', 'delta one', '# Omega', 'omega one'].join('\n'));
+  first.dispatchEvent(new ClipboardEvent('paste', { clipboardData: clip, bubbles: true, cancelable: true }));
+  const pane = () => $$('.pane').find((p) => p.querySelector('.title-input')?.value === 'Fold test' && p.offsetParent);
+  const rows = () => $$('.block-row', pane());
+  const words = (row) => row.querySelector('.blk')?.textContent.replace(/​/g, '') ?? '';
+  // (The lines in view that have words, in their order.)
+  const seen = () => rows().map(words).filter(Boolean).join('|');
+  const rowOf = (text) => rows().find((r) => words(r) === text);
+  const blkOf = (text) => rowOf(text)?.querySelector('.blk');
+  const arrow = (text) => rowOf(text)?.querySelector(':scope > .block-inner > .fold-arrow');
+  const folded = (text) => !!rowOf(text)?.classList.contains('folded');
+  const press = async (text) => {
+    arrow(text).click();
+    await wait(200);
+  };
+  const ALL = 'Intro line.|Alpha|alpha one|Beta|beta one zebra|beta two|Gamma|gamma one|Delta|delta one|Omega|omega one';
+  check('The test page has its headings and lines', await until(() => seen() === ALL, 4000), seen());
+
+  // The arrow: beside each heading that has lines under it, and it takes no room.
+  check('Each heading with lines under it has an arrow, and a plain line has none', ['Alpha', 'Beta', 'Gamma', 'Delta', 'Omega'].every((h) => arrow(h)) && !rowOf('alpha one').querySelector('.fold-arrow') && $$('.fold-arrow', pane()).length === 5, $$('.fold-arrow', pane()).length);
+  {
+    const a = arrow('Beta');
+    const ar = a.getBoundingClientRect();
+    const head = blkOf('Beta').getBoundingClientRect();
+    const line = blkOf('alpha one').getBoundingClientRect();
+    const grip = (text) => rowOf(text).querySelector('.gutter').getBoundingClientRect();
+    check('The arrow stands right before the words of the heading and moves them by nothing', getComputedStyle(a).position === 'absolute' && Math.abs(head.left - line.left) < 0.5 && ar.right <= head.left && head.left - ar.right <= 4 && ar.top >= head.top && ar.bottom <= head.bottom, `words at ${head.left} and ${line.left}; arrow ${ar.left}–${ar.right}, ${Math.round(ar.top - head.top)} down in a line of ${Math.round(head.height)}`);
+    check('The "+" and the handle of such a heading stand clear of it, at its left', grip('Beta').right <= ar.left && Math.round(grip('alpha one').left - grip('Beta').left) === 20, `${grip('Beta').right} then ${ar.left}; ${grip('alpha one').left - grip('Beta').left} further left`);
+    check('It has the look of a toggle’s arrow, and does not show at rest', a.classList.contains('toggle-arrow') && !!a.querySelector('svg') && getComputedStyle(a).opacity === '0' && a.getAttribute('aria-expanded') === 'true', getComputedStyle(a).opacity);
+  }
+
+  // A press hides the lines up to the next heading of the same or a higher level.
+  await press('Beta');
+  check('A press on the arrow of a heading 2 hides its lines and the heading 3 under it, up to the next heading 2', seen() === 'Intro line.|Alpha|alpha one|Beta|Delta|delta one|Omega|omega one', seen());
+  {
+    const a = arrow('Beta');
+    const turned = () => getComputedStyle(a).transform;
+    check('The arrow then stays in view, turned', folded('Beta') && a.classList.contains('closed') && getComputedStyle(a).opacity === '1' && a.getAttribute('aria-expanded') === 'false' && turned() !== getComputedStyle(arrow('Delta')).transform, `${getComputedStyle(a).opacity} ${turned()}`);
+  }
+  await wait(150);
+  snap('heading-folded');
+  check('The outline of the page still lists the headings that are folded away', ['Beta', 'Gamma'].every((h) => $$('.page-outline .outline-item', pane()).some((i) => i.textContent.trim() === h)), $$('.page-outline .outline-item', pane()).map((i) => i.textContent.trim()).join('|'));
+  // Copy the page, and select all and copy: the hidden lines are in both.
+  treeItem('Fold test').querySelector('.tree-actions .row-btn').click();
+  delete document.body.dataset.copied;
+  menuItem(await until(() => $('.sidebar-menu')), 'Copy as Markdown').click();
+  const page = await until(() => document.body.dataset.copied);
+  check('The page copied as Markdown has the hidden lines', ['beta one zebra', '- beta two', '### Gamma', 'gamma one'].every((l) => (page || '').includes(l)), page);
+  {
+    const blk = blkOf('Intro line.');
+    blk.focus();
+    T().setSel(blk, 0, 11);
+    key(blk, 'a', { metaKey: true });
+    await until(() => $$('.block-row.picked', pane()).length > 0, 3000);
+    delete document.body.dataset.copied;
+    key(document.body, 'c', { metaKey: true });
+    const all = await until(() => document.body.dataset.copied, 3000);
+    check('Select all and copy takes the hidden lines too', ['Alpha', 'beta one zebra', 'beta two', 'Gamma', 'gamma one', 'omega one'].every((l) => (all || '').includes(l)), all);
+    key(document.body, 'Escape');
+    await until(() => !$$('.block-row.picked', pane()).length, 3000);
+  }
+  // Another tab and back: still folded.
+  $$('.tab')[0].click();
+  await until(() => !pane());
+  $$('.tab').find((t) => t.textContent.includes('Fold test')).click();
+  await until(() => pane() && rowOf('Beta'));
+  check('After another tab, the heading is still folded', folded('Beta') && !rowOf('beta one zebra') && seen().startsWith('Intro line.|Alpha|alpha one|Beta|Delta'), seen());
+
+  // A second press shows the lines again, with the motion of a toggle.
+  arrow('Beta').click();
+  check('A second press shows the lines again, and they ease in as those of a toggle', (await until(() => rowOf('gamma one')?.classList.contains('appear') && rowOf('beta one zebra')?.classList.contains('appear'), 1500)) && !rowOf('Delta').classList.contains('appear'));
+  await wait(250);
+  check('…all of them, as they were', seen() === ALL && !folded('Beta'), seen());
+
+  // The key that opens and closes a toggle (⌘Return), with the caret in the heading.
+  {
+    const blk = blkOf('Gamma');
+    blk.focus();
+    T().setSel(blk, 2);
+    key(blk, 'Enter', { metaKey: true });
+    check('⌘Return in a heading folds it', await until(() => folded('Gamma') && !rowOf('gamma one'), 1500), seen());
+    check('…and the caret stays in the heading', await until(() => document.activeElement === blkOf('Gamma') && T().selIn(blkOf('Gamma'))?.start === 2, 1500), document.activeElement?.className);
+    key(blkOf('Gamma'), 'Enter', { metaKey: true });
+    check('⌘Return again opens it', await until(() => !folded('Gamma') && rowOf('gamma one'), 1500), seen());
+  }
+
+  // A heading 1 hides the lower headings too; one folded inside it stays folded.
+  await press('Beta');
+  await press('Alpha');
+  check('A folded heading 1 hides all up to the next heading 1', seen() === 'Intro line.|Alpha|Omega|omega one', seen());
+  // The arrows step over what is hidden.
+  {
+    const blk = blkOf('Alpha');
+    blk.focus();
+    T().setSel(blk, 5);
+    key(blk, 'ArrowDown');
+    check('Down from a folded heading goes to the next line in view', await until(() => document.activeElement === blkOf('Omega'), 1500), document.activeElement?.textContent);
+    T().setSel(blkOf('Omega'), 0);
+    key(blkOf('Omega'), 'ArrowUp');
+    check('…and Up comes back to the heading, which stays folded', (await until(() => document.activeElement === blkOf('Alpha'), 1500)) && folded('Alpha'), document.activeElement?.textContent);
+  }
+  await press('Alpha');
+  check('Opened again, the heading inside it is still folded', seen() === 'Intro line.|Alpha|alpha one|Beta|Delta|delta one|Omega|omega one' && folded('Beta'), seen());
+
+  // Find in page opens the heading that hides the words.
+  window.__rune.find();
+  const input = await until(() => $('#find-bar.show') && $('#find-input'));
+  input.value = 'zebra';
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  check('Find in page counts words under a folded heading', $('#find-count')?.textContent === '1 of 1', $('#find-count')?.textContent);
+  check('…and opens the heading to show them', await until(() => rowOf('beta one zebra') && !folded('Beta'), 2000), seen());
+  check('…the match is then marked in the line', await until(() => $('#find-count')?.textContent === '1 of 1' && typeof CSS !== 'undefined' && CSS.highlights?.has('rune-find-current'), 1500), $('#find-count')?.textContent);
+  key(input, 'Escape');
+  await until(() => !$('#find-bar.show'));
+  check('The other lines are as they were', seen() === ALL, seen());
+
+  // The outline goes to a heading under a folded heading: that one opens first.
+  await press('Alpha');
+  $$('.page-outline .outline-item', pane()).find((i) => i.textContent.trim() === 'Gamma').click();
+  check('A press on a hidden heading in the outline opens the heading that hides it', await until(() => rowOf('Gamma') && !folded('Alpha'), 2000), seen());
+
+  // Enter at the end of a folded heading: the new line is the first under it, and it shows.
+  await press('Delta');
+  {
+    const blk = blkOf('Delta');
+    const count = rows().length + 1;
+    blk.focus();
+    T().setSel(blk, 5);
+    key(blk, 'Enter');
+    const line = await until(() => document.activeElement?.classList.contains('blk') && document.activeElement !== blk && document.activeElement, 1500);
+    check('Enter at the end of a folded heading opens it, with the new line first under it', line && line.closest('.block-row').previousElementSibling === rowOf('Delta') && line.closest('.block-row').nextElementSibling === rowOf('delta one') && !folded('Delta'), seen());
+    typeIn(line, 'typed here');
+    await wait(150);
+    check('…and what is typed there is in view', seen() === ALL.replace('Delta|', 'Delta|typed here|'), seen());
+    for (let i = 0; i < 3 && rows().length > count; i++) {
+      T().command('undo');
+      await wait(300);
+    }
+    check('Undo takes the new line away and leaves the others', seen() === ALL && rows().length === count, `${rows().length} of ${count}: ${seen()}`);
+  }
+
+  // Delete at the end of a folded heading joins nothing that is hidden.
+  await until(() => arrow('Delta'));
+  await press('Delta');
+  {
+    const blk = blkOf('Delta');
+    blk.focus();
+    T().setSel(blk, 5);
+    key(blk, 'Delete');
+    check('Delete at the end of a folded heading opens it and joins nothing', (await until(() => !folded('Delta') && rowOf('delta one'), 1500)) && seen() === ALL, seen());
+  }
+
+  // A paste of lines in a folded heading: they show, and Undo takes them away.
+  await press('Beta');
+  {
+    const blk = blkOf('Beta');
+    const count = rows().length + 4;
+    blk.focus();
+    T().setSel(blk, 4);
+    const lines = new DataTransfer();
+    lines.setData('text/plain', 'pasted one\npasted two');
+    blk.dispatchEvent(new ClipboardEvent('paste', { clipboardData: lines, bubbles: true, cancelable: true }));
+    check('Lines pasted at a folded heading show (the heading opens)', await until(() => rowOf('pasted two') && !folded('Beta'), 2000), seen());
+    check('…and no line that was hidden is lost', ['beta one zebra', 'beta two', 'Gamma', 'gamma one'].every((l) => rowOf(l)), seen());
+    for (let i = 0; i < 3 && rows().length > count; i++) {
+      T().command('undo');
+      await wait(300);
+    }
+    check('Undo takes the pasted lines away and leaves the others', seen() === ALL && rows().length === count, `${rows().length} of ${count}: ${seen()}`);
+  }
+
+  // A heading that is a heading no more is folded no more.
+  await until(() => arrow('Delta'));
+  await press('Delta');
+  {
+    const blk = blkOf('Delta');
+    blk.focus();
+    T().setSel(blk, 0);
+    key(blk, 'Backspace');
+    check('A folded heading made plain text shows its lines', await until(() => rowOf('delta one') && rowOf('Delta')?.classList.contains('kind-text'), 1500), seen());
+    T().command('undo');
+    check('Undo makes it a heading again, with its lines in view', await until(() => rowOf('Delta')?.classList.contains('kind-heading2') && rowOf('delta one') && !folded('Delta'), 1500), seen());
+  }
+  check('At the end every line is as it was at the start', seen() === ALL, seen());
+
+  // An edit never hides a line that showed. A folded heading that is
+  // dragged takes the lines it hides along, and stays folded.
+  const handle = (text) => rowOf(text).querySelector('.gutter [data-drag]');
+  const upperHalf = (text) => {
+    const r = rowOf(text).getBoundingClientRect();
+    return [rowOf(text), r.left + 60, r.top + 3];
+  };
+  const fold = async (text, on) => {
+    await until(() => arrow(text));
+    if (folded(text) !== on) await press(text);
+  };
+  await fold('Delta', true);
+  await dragAlong(handle('Delta'), [upperHalf('Beta')]);
+  check('A folded heading dragged above another heading stays folded, and hides no other line', await until(() => seen() === 'Intro line.|Alpha|alpha one|Delta|Beta|beta one zebra|beta two|Gamma|gamma one|Omega|omega one' && folded('Delta'), 2000), seen());
+  await press('Delta');
+  check('…and the line it hid went with it', seen() === 'Intro line.|Alpha|alpha one|Delta|delta one|Beta|beta one zebra|beta two|Gamma|gamma one|Omega|omega one', seen());
+  T().command('undo');
+  check('Undo puts the heading and its line back', await until(() => seen() === ALL, 2000), seen());
+  // Dragged to where a line that shows would come under it, it opens.
+  await fold('Delta', true);
+  await dragAlong(handle('Delta'), [upperHalf('alpha one')]);
+  check('A folded heading dragged above a plain line opens: that line would be hidden', await until(() => seen() === 'Intro line.|Alpha|Delta|delta one|alpha one|Beta|beta one zebra|beta two|Gamma|gamma one|Omega|omega one' && !folded('Delta'), 2000), `${folded('Delta')} ${seen()}`);
+  T().command('undo');
+  check('…and Undo puts it back', await until(() => seen() === ALL, 2000), seen());
+  // A heading moved down below its own line: the line falls under the folded heading above, which opens.
+  await fold('Delta', true);
+  {
+    const blk = blkOf('Omega');
+    blk.focus();
+    T().setSel(blk, 2);
+    key(blk, 'ArrowDown', { metaKey: true, shiftKey: true });
+    check('A line that comes under a folded heading by a move of another line opens the heading', await until(() => seen() === 'Intro line.|Alpha|alpha one|Beta|beta one zebra|beta two|Gamma|gamma one|Delta|delta one|omega one|Omega' && !folded('Delta'), 2000), `${folded('Delta')} ${seen()}`);
+    T().command('undo');
+    check('…and Undo puts the lines back', await until(() => seen() === ALL, 2000), seen());
+  }
+
+  // The "+" of a folded heading: the heading opens, and the list stays open on the new line.
+  await fold('Delta', true);
+  {
+    const count = rows().length + 1;
+    rowOf('Delta').querySelector('.gutter .g-btn').click();
+    const list = await until(() => $('.slash-menu', pane()), 2000);
+    await wait(250);
+    const line = document.activeElement;
+    check('The "+" of a folded heading opens the heading and leaves its list open', list && $('.slash-menu', pane()) && !folded('Delta') && line?.classList.contains('blk') && line.closest('.block-row').previousElementSibling === rowOf('Delta') && !!rowOf('delta one'), `${!!list} ${!!$('.slash-menu', pane())} ${folded('Delta')} ${seen()}`);
+    if (line?.classList.contains('blk')) key(line, 'Escape');
+    check('Escape shuts the list and takes the "/" out of the new line', (await until(() => !$('.slash-menu') && line.textContent.replace(/\u200b/g, '') === '', 2000)) && seen() === ALL, `${JSON.stringify(line?.textContent)}: ${seen()}`);
+    // (The empty line goes with a Backspace, as any empty line.)
+    line.focus();
+    T().setSel(line, 0);
+    key(line, 'Backspace');
+    await until(() => rows().length === count, 1500);
+  }
+
+  // A copy of a folded heading: the heading and its lines, after them.
+  await fold('Delta', true);
+  {
+    const blk = blkOf('Delta');
+    blk.focus();
+    T().setSel(blk, 2);
+    key(blk, 'd', { metaKey: true });
+    const copies = () => rows().filter((r) => words(r) === 'Delta');
+    check('⌘D on a folded heading makes a copy with its lines, after the lines it hides', await until(() => copies().length === 2 && copies()[0].classList.contains('folded') && !copies()[1].classList.contains('folded') && seen() === ALL.replace('Delta|delta one', 'Delta|Delta|delta one'), 2000), seen());
+    for (let i = 0; i < 3 && copies().length > 1; i++) {
+      T().command('undo');
+      await wait(300);
+    }
+    await fold('Delta', false);
+    check('…and Undo takes the copy away', copies().length === 1 && seen() === ALL, seen());
+  }
+
+  // A fold that hides the line with the caret: the caret goes to the end of the heading.
+  await fold('Delta', false);
+  {
+    const blk = blkOf('delta one');
+    blk.focus();
+    T().setSel(blk, 3);
+    await wait(120);
+    arrow('Delta').click();
+    check('A fold over the line with the caret puts the caret at the end of the heading', await until(() => folded('Delta') && document.activeElement === blkOf('Delta') && T().selIn(blkOf('Delta'))?.start === 5, 2000), `${document.activeElement?.className} ${JSON.stringify(T().selIn(blkOf('Delta')))}`);
+    await fold('Delta', false);
+    // With the keyboard in another box (the name of the page), it stays there.
+    blkOf('omega one').focus();
+    await wait(120);
+    const name = $('.title-input', pane());
+    name.focus();
+    arrow('Omega').click();
+    await until(() => folded('Omega'), 1500);
+    await wait(300);
+    check('…and takes the keyboard from no other box', document.activeElement === name, document.activeElement?.className);
+    await fold('Omega', false);
+  }
+  check('After these, every line is as it was at the start', seen() === ALL, seen());
+  // (Left folded for the next group.)
+  await until(() => arrow('Omega'));
+  await press('Omega');
+  check('The last heading of the page folds to the end of the page', seen() === ALL.replace('|omega one', '') && folded('Omega'), seen());
+});
+
+await run('A folded heading in a list keeps what it hides', async () => {
+  await oneTab();
+  const title = await newPage('Fold nest');
+  key(title, 'Enter');
+  const first = await until(() => document.activeElement?.classList.contains('blk') && document.activeElement);
+  const clip = new DataTransfer();
+  clip.setData('text/plain', ['- item', '## Nest', 'm', 'out'].join('\n'));
+  first.dispatchEvent(new ClipboardEvent('paste', { clipboardData: clip, bubbles: true, cancelable: true }));
+  const pane = () => $$('.pane').find((p) => p.querySelector('.title-input')?.value === 'Fold nest' && p.offsetParent);
+  const rows = () => $$('.block-row', pane());
+  const words = (row) => row.querySelector('.blk')?.textContent.replace(/​/g, '') ?? '';
+  const rowOf = (text) => rows().find((r) => words(r) === text);
+  const kinds = () => rows().map((r) => `${[...r.classList].find((c) => c.startsWith('kind-')).slice(5)}${parseInt(r.style.paddingLeft, 10) > 0 ? '>' : ''}`).join(' ');
+  await until(() => rowOf('out'));
+  // The heading and the line under it step into the list item; the line becomes a divider.
+  for (const text of ['Nest', 'm']) {
+    const blk = rowOf(text).querySelector('.blk');
+    blk.focus();
+    T().setSel(blk, 0);
+    key(blk, 'Tab');
+    await until(() => parseInt(rowOf(text).style.paddingLeft, 10) > 0, 1500);
+  }
+  const mid = rowOf('m').querySelector('.blk');
+  mid.focus();
+  T().setSel(mid, 0, 1);
+  typeIn(mid, '---');
+  const under = await until(() => $('.kind-divider', pane()) && document.activeElement?.classList.contains('blk') && document.activeElement !== mid && document.activeElement, 2000);
+  // The empty line after the divider steps out of the list item.
+  if (under && parseInt(under.closest('.block-row').style.paddingLeft, 10) > 0) {
+    T().setSel(under, 0);
+    key(under, 'Backspace');
+    await until(() => !(parseInt(under.closest('.block-row')?.style.paddingLeft, 10) > 0), 1500);
+  }
+  check('The test page: a list item with a heading and a divider in it, then lines outside', kinds().startsWith('bulleted heading2> divider> text'), kinds());
+  rowOf('Nest').querySelector('.fold-arrow').click();
+  check('The folded heading in the list item hides the divider, and not the lines outside', await until(() => !$('.kind-divider', pane()) && kinds().startsWith('bulleted heading2> text'), 1500), kinds());
+  const line = rows()[2].querySelector('.blk');
+  line.focus();
+  T().setSel(line, 0);
+  key(line, 'Backspace');
+  check('Backspace under it opens the heading and takes nothing out', await until(() => !rowOf('Nest').classList.contains('folded') && $('.kind-divider', pane()), 1500) && kinds().startsWith('bulleted heading2> divider> text'), kinds());
+});
+
+// (Run by itself on the notes file of an earlier run, this is the check of a
+// restart: the heading was folded before the app was started.)
+await run('A folded heading stays folded', async () => {
+  if (!treeItem('Fold test')) return check('A folded heading stays folded: the page of "A heading folds" is there', false, 'run that group first');
+  await oneTab();
+  treeItem('Fold test').click();
+  const pane = await until(() => $$('.pane').find((p) => p.querySelector('.title-input')?.value === 'Fold test' && p.offsetParent));
+  const rowOf = (text) => $$('.block-row', pane).find((r) => (r.querySelector('.blk')?.textContent.replace(/​/g, '') ?? '') === text);
+  await until(() => rowOf('Omega'));
+  await wait(200);
+  check('With its tab closed and the page opened again, the heading is still folded', rowOf('Omega')?.classList.contains('folded') && !rowOf('omega one') && rowOf('Omega').querySelector('.fold-arrow.closed') && !!rowOf('delta one'), $$('.block-row', pane).length);
+  rowOf('Omega').querySelector('.fold-arrow').click();
+  check('…and its lines are there when it is opened', await until(() => rowOf('omega one') && !rowOf('Omega').classList.contains('folded'), 1500));
+  rowOf('Omega').querySelector('.fold-arrow').click();
+  await until(() => !rowOf('omega one'), 1500);
+});
+
+await run('A page keeps its scroll place', async () => {
+  await oneTab();
+  T().command('zoom_reset');
+  // (The pane in view with this page.)
+  const paneNamed = (title) => $$('.pane').find((p) => p.querySelector('.title-input')?.value === title && p.offsetParent);
+  // Two pages long enough to scroll, each in a tab of its own.
+  const longPage = async (name) => {
+    const title = await newPage(name);
+    key(title, 'Enter');
+    const first = await until(() => document.activeElement?.classList.contains('blk') && document.activeElement);
+    const clip = new DataTransfer();
+    clip.setData('text/plain', Array.from({ length: 120 }, (_, i) => `${name} line ${i + 1}`).join('\n'));
+    first.dispatchEvent(new ClipboardEvent('paste', { clipboardData: clip, bubbles: true, cancelable: true }));
+    await until(() => $$('.block-row', paneNamed(name)).length >= 120, 4000);
+    // (The caret went to the last line, and the page with it: back to the top.)
+    await wait(200);
+    paneNamed(name).querySelector(':scope > .scroller').scrollTop = 0;
+    await wait(120);
+  };
+  await longPage('Place one');
+  await longPage('Place two');
+  const box = (name) => paneNamed(name)?.querySelector(':scope > .scroller');
+  const at = (name) => Math.round(box(name)?.scrollTop ?? -1);
+  const tabOf = (name) => $$('.tab').find((t) => t.textContent.includes(name));
+  const show = async (name) => {
+    tabOf(name).click();
+    return until(() => box(name));
+  };
+  // (A scroll is noted when the window tells of it, a frame later.)
+  const scrollTo = async (name, top) => {
+    box(name).scrollTop = top;
+    await wait(120);
+  };
+  await show('Place one');
+  await scrollTo('Place one', 900);
+  check('The test page is long enough to scroll', at('Place one') === 900, at('Place one'));
+  await show('Place two');
+  check('The other page is at its own place, not at that of the first', at('Place two') === 0, at('Place two'));
+  await scrollTo('Place two', 400);
+  await show('Place one');
+  check('Back on its tab, a page is where it was left', at('Place one') === 900, at('Place one'));
+  await wait(250);
+  check('…and it stays there', at('Place one') === 900, at('Place one'));
+  await show('Place two');
+  check('…and the other page is where it was left too', at('Place two') === 400, at('Place two'));
+
+  // On a zoomed page (the place is in the units of the box that scrolls).
+  for (let i = 0; i < 3; i++) T().command('zoom_in');
+  await wait(350);
+  await scrollTo('Place two', 600);
+  await show('Place one');
+  await show('Place two');
+  check('On a zoomed page too', at('Place two') === 600, at('Place two'));
+  T().command('zoom_reset');
+  await wait(250);
+
+  // Back and Forward in one pane.
+  await show('Place one');
+  const pane = paneNamed('Place one').dataset.pane;
+  $$('.tile').find((t) => t.title.startsWith('Graph')).click();
+  await until(() => $(`.pane[data-pane="${pane}"] .graph`));
+  T().command('back');
+  await until(() => box('Place one'));
+  check('Back comes to the place the page was left at', at('Place one') === 900 && paneNamed('Place one').dataset.pane === pane, at('Place one'));
+  T().command('forward');
+  await until(() => $(`.pane[data-pane="${pane}"] .graph`));
+  T().command('back');
+  await until(() => box('Place one'));
+  check('…and so does Back after Forward', at('Place one') === 900, at('Place one'));
+
+  // Settings over the page and away again.
+  await openSettings();
+  $('.settings-back').click();
+  await until(() => !$('.settings-view'));
+  await wait(120);
+  check('Settings opened and closed leaves the page where it was', at('Place one') === 900, at('Place one'));
+
+  // Another space and back (when the workspace has two).
+  const dots = () => $$('.side-foot .space-dot');
+  if (dots().length >= 2) {
+    const here = Math.max(0, dots().findIndex((d) => d.classList.contains('current')));
+    dots()[here === 0 ? 1 : 0].click();
+    await until(() => !box('Place one'), 2000);
+    await wait(500);
+    dots()[here].click();
+    await until(() => box('Place one'), 3000);
+    check('Another space and back leaves the page where it was', at('Place one') === 900, at('Place one'));
+  }
+
+  // A page opened anew in a pane starts at its top: from a sub-page, the
+  // name of its parent in the bar of the page opens the parent in that pane.
+  treeItem('Place one').querySelector('[title="Add a page inside"]').click();
+  const child = await until(() => {
+    const a = document.activeElement;
+    return a?.classList.contains('title-input') && a.value === '' && a.offsetParent && a;
+  }, 2000);
+  child.value = 'Place child';
+  child.dispatchEvent(new Event('input', { bubbles: true }));
+  await until(() => treeItem('Place child'));
+  const childPane = paneNamed('Place child').dataset.pane;
+  const up = () => $$(`.pane[data-pane="${childPane}"] .crumb`).find((c) => c.textContent.trim() === 'Place one');
+  up().click();
+  await until(() => paneNamed('Place one')?.dataset.pane === childPane);
+  check('A page a pane goes to for the first time is at its top', at('Place one') === 0, at('Place one'));
+  await scrollTo('Place one', 700);
+  T().command('back');
+  await until(() => paneNamed('Place child'));
+  T().command('forward');
+  await until(() => paneNamed('Place one')?.dataset.pane === childPane);
+  check('Forward comes to the place the page was left at', at('Place one') === 700, at('Place one'));
+  T().command('back');
+  await until(() => paneNamed('Place child'));
+  up().click();
+  await until(() => paneNamed('Place one')?.dataset.pane === childPane);
+  await wait(200);
+  check('Opened anew from the bar of the page, it starts at its top', at('Place one') === 0, at('Place one'));
+
+  // A split makes the pane anew; in focus mode the other pane is not drawn.
+  await show('Place two');
+  await scrollTo('Place two', 500);
+  treeItem('Getting Started').querySelector('.tree-actions .row-btn').click();
+  menuItem(await until(() => $('.sidebar-menu')), 'Open in split view').click();
+  await until(() => $('.panes.split') && $$('.pane').length === 2);
+  check('In a split, the page is where it was left', at('Place two') === 500, at('Place two'));
+  T().command('focus_mode');
+  await until(() => $('.app.focus-mode'), 1500);
+  await wait(300);
+  T().command('focus_mode');
+  await until(() => !$('.app.focus-mode'), 1500);
+  await wait(150);
+  check('After focus mode, the pane that was put away is where it was left', at('Place two') === 500, at('Place two'));
+  $$('.pane')[1].querySelector('.pagebar .icon-btn[title="Close pane"]').click();
+  await until(() => !$('.panes.split') && $$('.pane').length === 1);
+  check('…and with the split closed', at('Place two') === 500, at('Place two'));
+
+  // The hours of the calendar keep their place the same way.
+  $$('.tile').find((t) => t.title.startsWith('Calendar')).click();
+  const hours = await until(() => $('.pane .cal-scroll'));
+  if (hours) {
+    // (It opens at the line of now, or at 8 AM: `calOpen`.)
+    await until(() => hours.scrollTop > 0, 1500);
+    const start = Math.round(hours.scrollTop);
+    hours.scrollTop = start >= 80 ? start - 80 : start + 80;
+    await wait(120);
+    const left = Math.round(hours.scrollTop);
+    const away = async () => {
+      tabOf('Place one').click();
+      await until(() => box('Place one') || box('Place child'));
+    };
+    await away();
+    T().command('calendar');
+    const again = await until(() => $('.pane .cal-scroll'));
+    await wait(300);
+    check('The hours of the calendar are where they were left after another tab', left !== start && Math.round(again?.scrollTop ?? -1) === left, `opened at ${start}, left at ${left}, back at ${Math.round(again?.scrollTop ?? -1)}`);
+    // That place holds for a short time only: half an hour later the
+    // calendar opens at now again, not at the hours of this morning.
+    await away();
+    T().ageHours(31 * 60 * 1000);
+    T().command('calendar');
+    const later = await until(() => $('.pane .cal-scroll'));
+    check('Opened again more than half an hour later, the calendar opens as at first (at now)', await until(() => later && Math.abs(later.scrollTop - start) <= 2, 1500), `opened at ${start}, left at ${left}, later at ${Math.round(later?.scrollTop ?? -1)}`);
+    // …and from then on the place the person sets is kept again.
+    later.scrollTop = left;
+    await wait(120);
+    await away();
+    T().command('calendar');
+    const third = await until(() => $('.pane .cal-scroll'));
+    await wait(300);
+    check('…and a place set after that is kept again', Math.round(third?.scrollTop ?? -1) === left, `${Math.round(third?.scrollTop ?? -1)} of ${left}`);
+  }
+  await oneTab();
+});
+
 await run('Find in page', async () => {
   await oneTab();
   treeItem('Getting Started').click();
@@ -2292,9 +3167,11 @@ await run('Zoom keeps the page in the middle', async () => {
   };
   const normal = where();
   // As at the normal size: the box as big as its card, the column as far
-  // from the middle of its pane (a few points, for the scroll bar), drawn
-  // `zoom` times as big.
-  const inPlace = (w, zoom = 1) => Math.abs(w.wider - normal.wider) <= 3 && Math.abs(w.taller - normal.taller) <= 3 && Math.abs(w.off - normal.off * zoom) <= 4 && w.paneOver <= 1;
+  // from the middle of its pane, drawn `zoom` times as big. (A column with
+  // room at its sides is in the middle, with a scroll bar or without. One
+  // that fills its pane ends where the scroll bar begins: half the bar's
+  // 10 points from the middle, times the zoom.)
+  const inPlace = (w, zoom = 1) => Math.abs(w.wider - normal.wider) <= 3 && Math.abs(w.taller - normal.taller) <= 3 && Math.abs(w.off - normal.off * zoom) <= 4 + 5 * zoom && w.paneOver <= 1;
   check('At the normal size the page is in the middle of its pane', Math.abs(normal.wider) <= 3 && Math.abs(normal.taller) <= 3 && Math.abs(normal.off) <= 8 && normal.paneOver <= 1, JSON.stringify(normal));
   for (let i = 0; i < 3; i++) T().command('zoom_out');
   await wait(350);
@@ -2311,6 +3188,25 @@ await run('Zoom keeps the page in the middle', async () => {
   T().command('zoom_reset');
   await wait(200);
   check('Back at the normal size, it is as it was', JSON.stringify(where()) === JSON.stringify(normal), JSON.stringify(where()));
+  // A scroll bar that comes or goes does not move the page sideways: the
+  // column is where it is with no bar. (The page is cut short, and let long
+  // again; at each size, zoomed too.)
+  const column = $('.page', pane);
+  const box = column.parentElement;
+  const titleAt = async (short) => {
+    column.style.cssText = short ? 'height: 120px; overflow: hidden' : '';
+    await until(() => (box.offsetWidth > box.clientWidth) === !short && box.style.getPropertyValue('--bar') === `${box.offsetWidth - box.clientWidth}px`, 1500);
+    await wait(60);
+    return { bar: box.offsetWidth - box.clientWidth, said: box.style.getPropertyValue('--bar'), left: Math.round($('.title-input', pane).getBoundingClientRect().left * 10) / 10 };
+  };
+  for (const steps of [0, 3]) {
+    for (let i = 0; i < steps; i++) T().command('zoom_out');
+    await wait(steps ? 350 : 0);
+    const seen = [await titleAt(false), await titleAt(true), await titleAt(false)];
+    check(`A scroll bar that comes or goes does not move the page sideways${steps ? ', zoomed out' : ''}`, seen[0].bar > 0 && seen[1].bar === 0 && seen[0].left === seen[1].left && seen[2].left === seen[1].left, JSON.stringify(seen));
+  }
+  T().command('zoom_reset');
+  await wait(200);
 });
 
 await run('Pictures, tables and covers', async () => {
@@ -2840,6 +3736,15 @@ await run('Tables as databases', async () => {
     const names = () => $$('tr[data-r]', grid()).slice(1).map((tr) => $('.cell[data-c="0"]', tr).value).join(',');
     check('A cell with a link to a page sorts by the name of the page', linked && (await until(() => names() === 'Two,One,Three', 3000)), `${names()} (page ${linked})`);
     check('…and the cell shows the name, with the link under it', $('tr[data-r="1"] .linked-page', grid())?.textContent === 'Mango plan' && $('tr[data-r="1"] .cell[data-c="1"]', grid())?.value.includes('rune://page/'), $('tr[data-r="1"] .linked-text', grid())?.textContent);
+    {
+      const name = $('tr[data-r="1"] .linked-page', grid());
+      restOn(name);
+      const card = await until(() => $('.link-card'), 2000);
+      const box = card?.getBoundingClientRect();
+      const at = name.getBoundingClientRect();
+      check('The name in the cell shows the card of its page when the pointer rests on it, clear of the name', card && $('.link-card-name', card).textContent === 'Mango plan' && !name.title && (box.top >= at.bottom || box.bottom <= at.top), card ? `${card.textContent} at ${Math.round(box.top)} to ${Math.round(box.bottom)}, the name at ${Math.round(at.top)} to ${Math.round(at.bottom)}` : 'no card');
+      await restOff();
+    }
     // (The box under the name holds the link as it is written, and was as
     // tall as that long line needs: a row of two or three lines for one name.)
     const rowHeight = (r) => Math.round($(`tr[data-r="${r}"]`, grid()).getBoundingClientRect().height);
@@ -3404,7 +4309,26 @@ await run('Table menus, handles and picking', async () => {
   await wait(100);
   press('Backspace');
   check('The Delete key takes the picked rows out', await until(() => names() === 'Alpha,Gamma,Epsilon,Eta' && picked() === '' && !$('.picked-bar', wrap())), `${names()} | ${state()}`);
-  check('…and a message says how many went', await until(() => $('.toast')?.textContent === '3 rows deleted'), $('.toast')?.textContent);
+  check('…and a message says how many went', await until(() => $('.toast .toast-text')?.textContent === '3 rows deleted'), $('.toast')?.textContent);
+  // The "Undo" in that message takes back that step, and never a later
+  // one: after another change of the page it is gone (the words stay), and
+  // it is there again when that change is taken back.
+  check('…with an "Undo" in it', $('#toast-undo')?.textContent === 'Undo');
+  {
+    const other = cell(1, 2);
+    const held = other.value;
+    other.focus();
+    document.execCommand('selectAll');
+    document.execCommand('insertText', false, 'typed after');
+    check('After another change of the page, the message has no "Undo" (it would take back the wrong thing)', (await until(() => $('.toast') && !$('#toast-undo'), 1500)) && names() === 'Alpha,Gamma,Epsilon,Eta', `${!!$('.toast')} ${!!$('#toast-undo')} ${names()}`);
+    other.blur();
+    T().command('undo');
+    check('That change taken back, the "Undo" is in the message again', (await until(() => $('#toast-undo') && cell(1, 2).value === held, 2000)) && names() === 'Alpha,Gamma,Epsilon,Eta', `${!!$('#toast-undo')} "${cell(1, 2).value}" ${names()}`);
+    $('#toast-undo')?.click();
+    check('…and its press brings the rows back, each in its place, and the message goes', (await until(() => names() === ALL_NAMES, 3000)) && !$('.toast') && cell(1, 2).value === held, `${names()} | ${$('.toast')?.textContent}`);
+    T().command('redo');
+    await until(() => names() === 'Alpha,Gamma,Epsilon,Eta', 3000);
+  }
   T().command('undo');
   check('…and one Undo brings them all back, each in its place', await until(() => names() === ALL_NAMES, 3000), names());
   await clickHandle(1, { metaKey: true });
@@ -3472,7 +4396,7 @@ await run('Table menus, handles and picking', async () => {
   headClick(9, { shiftKey: true });
   await until(() => cols() === '8,9');
   press('Delete');
-  check('The Delete key takes the picked columns out', await until(() => heads() === 'Name,Side,Notes,Qty,Setup,P1,P2,P3' && cols() === '' && $('.toast')?.textContent === '2 columns deleted'), `${heads()} | ${colState()} | ${$('.toast')?.textContent}`);
+  check('The Delete key takes the picked columns out', await until(() => heads() === 'Name,Side,Notes,Qty,Setup,P1,P2,P3' && cols() === '' && $('.toast .toast-text')?.textContent === '2 columns deleted'), `${heads()} | ${colState()} | ${$('.toast')?.textContent}`);
   T().command('undo');
   check('…and one Undo brings them back', await until(() => heads() === ALL_HEADS && cell(3, 9)?.value === '35', 3000), heads());
   headClick(4, { metaKey: true });
@@ -3596,6 +4520,19 @@ await run('Cell editors, row boxes and row search', async () => {
   check('A click on it opens the day picker: the box with its day, its month, today marked', p && field && document.activeElement === field && field.value === date.textContent.trim() && /\d{4}$/.test(date.value) && $('.date-month', p)?.textContent === 'November 2026' && $('.date-day.on', p)?.dataset.day === '2026-11-03' && $('.date-day.today', p)?.dataset.day === (() => { const t = new Date(); return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`; })(), p && `${field?.value} | ${$('.date-month', p)?.textContent} | on ${$('.date-day.on', p)?.dataset.day} | today ${$('.date-day.today', p)?.dataset.day} | keys in ${document.activeElement?.className}`);
   check('…all of it in the window, on top, under its cell', p && inWindow(p) && onTopAt($('.date-day', p)) && onTopAt($('[data-item="clear"]', p)) && (Math.abs(rect(p).top - (rect(date.closest('td')).bottom + 4)) < 3 || (rect(p).bottom >= innerHeight - 10 && rect(p).top < rect(date.closest('td')).bottom + 4)), p && `${[rect(p).left, rect(p).top, rect(p).right, rect(p).bottom].map(Math.round)} under ${Math.round(rect(date.closest('td')).bottom)}`);
   snap('date-picker');
+  // The page moves under the open picker (a key or the app scrolls it, not
+  // the wheel, which closes a menu): the picker goes with its cell.
+  {
+    const pane = date.closest('.scroller');
+    const under = () => rect(date.closest('td')).bottom;
+    const was = { top: pane.scrollTop, cell: under() };
+    pane.scrollTop = was.top + 24;
+    await wait(200);
+    const moved = was.cell - under();
+    check('The page moves under the open day picker: the picker stays at its cell', picker() === p && (moved < 1 || Math.abs(rect(p).top - (under() + 4)) < 3 || (rect(p).bottom >= innerHeight - 10 && rect(p).top < under() + 4)), `cell moved ${Math.round(moved)}, picker at ${Math.round(rect(p).top)}, cell ends at ${Math.round(under())}`);
+    pane.scrollTop = was.top;
+    await wait(200);
+  }
   $('.date-step[aria-label="Next month"]', p).click();
   await until(() => $('.date-month', p)?.textContent === 'December 2026');
   $('.date-day[data-day="2026-12-09"]', p).click();
@@ -4528,6 +5465,20 @@ await run('Screenshots in a picture cell', async () => {
   check('A picture dropped on the cell goes in beside the first', await until(() => pics() === 2, 4000), pics());
   check('The mark goes when the picture is in', !$('[data-pic-cell].pic-drop', pane));
   await wait(200);
+  // A picture cell that is chosen has ONE ring, that of the table's cell.
+  // (The box of the pictures had a ring of its own: in a row made tall by
+  // words in another cell, two boxes showed, one over the other.)
+  {
+    const box = $('[data-pic-cell]', pane);
+    box.focus();
+    await wait(60);
+    const ring = (el) => getComputedStyle(el).boxShadow;
+    const td = box.closest('td');
+    // (Only in a window that has the keyboard does :focus hold; the quiet test window has not.)
+    const held = document.hasFocus() && document.activeElement === box;
+    check('A chosen picture cell has one ring, the cell\'s own', !held || (ring(td) !== 'none' && ring(box) === 'none'), `${held} | cell: ${ring(td)} | pictures: ${ring(box)}`);
+    box.blur();
+  }
   snap('cell-screenshots');
   // A press on a picture in the cell shows it large; the arrows go to the next.
   const small = $$('[data-pic-cell] .cell-pic img', pane);
@@ -5089,6 +6040,24 @@ await run('Select all, copy and delete', async () => {
   check('A press on a divider picks it', await until(() => picked().length === 1 && picked()[0].classList.contains('kind-divider'), 3000), String(picked().length));
   key(document.body, 'Delete');
   check('Delete takes the picked block out', await until(() => texts() === 'text:First line|text:Last line', 3000), texts());
+  check('…and a message says so, with an "Undo" in it', (await until(() => $('.toast .toast-text')?.textContent === 'Deleted 1 block' && $('#toast-undo'), 1500)), $('.toast')?.textContent);
+  snap('toast-undo');
+  // The message sits clear of the AI's box, which opens under it.
+  {
+    const over = (x, y) => x.right > y.left && x.left < y.right && x.bottom > y.top && x.top < y.bottom;
+    const box = (el) => el.getBoundingClientRect();
+    askAi();
+    const dock = await until(() => $('.pane .ai-dock.open'), 2000);
+    dock?.getAnimations().forEach((m) => m.finish());
+    const clear = await until(() => $('.toast') && dock && !over(box($('.toast')), box(dock)), 1500);
+    check('The message sits clear of the AI\'s box at the foot of the page', clear && $('#toast-undo'), $('.toast') && dock ? `message ${Math.round(box($('.toast')).top)}..${Math.round(box($('.toast')).bottom)} (${Math.round(box($('.toast')).left)}..${Math.round(box($('.toast')).right)}), box ${Math.round(box(dock).top)}..${Math.round(box(dock).bottom)} (${Math.round(box(dock).left)}..${Math.round(box(dock).right)}), foot "${$('.toast').style.bottom}"` : 'no message or no box');
+    if ($('#ai-input')) key($('#ai-input'), 'Escape');
+    await until(() => !$('.pane .ai-dock.open'), 1500);
+  }
+  $('#toast-undo')?.click();
+  check('"Undo" in the message brings the block back', (await until(() => texts() === 'text:First line|divider:|text:Last line', 3000)) && !$('.toast'), texts());
+  T().command('redo');
+  await until(() => texts() === 'text:First line|text:Last line', 3000);
   T().command('undo');
   check('Undo brings it back', await until(() => texts() === 'text:First line|divider:|text:Last line', 3000), texts());
   // With Shift, a press picks up to there.
@@ -5459,6 +6428,173 @@ await run('Links between notes', async () => {
   check('The link has the page’s new name', again, $$('a[href^="rune://page/"]', pane('Link Source')).map((a) => a.textContent).join('|'));
   check('A page with no links to it shows no such line', !$('.backlinks', pane('Link Source')));
   snap('page-link');
+});
+
+await run('A card on a link to a page', async () => {
+  await oneTab();
+  const blkNow = (not) => until(() => document.activeElement !== not && document.activeElement?.classList.contains('blk') && document.activeElement, 3000);
+  const title = await newPage('Card Target');
+  key(title, 'Enter');
+  let line = await blkNow();
+  const says = ['Bring the tent & the <stove>', 'Two nights by the lake', 'Maps are in the blue folder', 'Call the ranger first', 'Leave on Friday', 'Back on Sunday'];
+  for (const [i, words] of says.entries()) {
+    typeIn(line, words);
+    if (i + 1 < says.length) {
+      key(line, 'Enter');
+      line = await blkNow(line);
+    }
+  }
+  await wait(200);
+  const from = await newPage('Card Source');
+  key(from, 'Enter');
+  const first = await blkNow(line);
+  typeIn(first, 'Plan: @Card Tar');
+  await until(() => $$('.page-links .menu-item .link-title').some((t) => t.textContent === 'Card Target'), 3000);
+  key(first, 'Enter');
+  const link = await until(() => $('a[href^="rune://page/"]', first), 3000);
+  const card = () => $('.link-card');
+  const words = (part) => $(`.link-card ${part}`)?.textContent;
+  const apart = (a, b) => a.bottom <= b.top || b.bottom <= a.top || a.right <= b.left || b.right <= a.left;
+  const inside = (r) => r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight;
+  const again = async (el = link) => {
+    await restOff();
+    await wait(350);
+    restOn(el);
+    return until(card, 2000);
+  };
+
+  // The line is being typed in (Return made the link a moment ago): no card.
+  restOn(link);
+  await wait(800);
+  check('No card over a link in the line that is being typed in', link && !card());
+  await restOff();
+  await wait(1500);
+  // A rest of the pointer, not a pass over the link.
+  restOn(link);
+  await wait(150);
+  const early = !!card();
+  const shown = await until(card, 2000);
+  check('A card shows when the pointer rests on a link to a page, after a moment', shown && !early, `early ${early}, shown ${!!shown}`);
+  check('It says the name of the page, with its icon, and where the page is', words('.link-card-name') === 'Card Target' && !!$('.link-card-icon svg') && words('.link-card-place') === $('.ws-label').textContent, shown?.textContent);
+  const lines = $('.link-card-lines');
+  const tall = lines ? lines.getBoundingClientRect().height / parseFloat(getComputedStyle(lines).lineHeight) : 0;
+  check('…and its first lines as plain words, four at most', lines && lines.textContent.startsWith(says.slice(0, 4).join('\n')) && !lines.textContent.includes(says[5]) && !lines.firstElementChild && tall > 3.5 && tall < 4.2, `${tall} lines: ${lines?.textContent}`);
+  await wait(220);
+  const placed = () => {
+    const [box, at] = [card().getBoundingClientRect(), link.getBoundingClientRect()];
+    return { ok: apart(box, at) && inside(box) && box.top >= at.bottom && box.top - at.bottom < 12, say: `card ${Math.round(box.left)},${Math.round(box.top)} to ${Math.round(box.right)},${Math.round(box.bottom)}; link ${Math.round(at.left)},${Math.round(at.top)} to ${Math.round(at.right)},${Math.round(at.bottom)}` };
+  };
+  check('The card is right under the link, not over it, and inside the window', placed().ok, placed().say);
+  snap('link-card');
+
+  // The card takes no press and no pointer: what lies under it is still
+  // what the pointer is on. It goes when the pointer leaves the link.
+  const boxNow = shown.getBoundingClientRect();
+  const through = document.elementFromPoint(boxNow.left + boxNow.width / 2, boxNow.top + boxNow.height / 2);
+  check('The card does not take the pointer: what is under it is still under the pointer', through && !shown.contains(through) && getComputedStyle(shown).pointerEvents === 'none', `${through?.className} / ${getComputedStyle(shown).pointerEvents}`);
+  restOn($('.toprow'));
+  check('…and it goes when the pointer has left the link', await until(() => !card(), 1000));
+  restOn(link);
+  const quick = await until(card, 250);
+  check('Right after one card, the next one shows at once', quick);
+
+  // A scroll, a box that opens, a key and a press put it away.
+  link.closest('.pane').dispatchEvent(new Event('scroll'));
+  check('A scroll puts the card away', quick && !card());
+  const back0 = await again();
+  T().command('quick_find');
+  check('A box that opens puts the card away', back0 && (await until(() => $('.qf-input'), 2000)) && (await until(() => !card(), 1000)));
+  if ($('.qf-input')) key($('.qf-input'), 'Escape');
+  await until(() => !$('.modal'));
+  await wait(1600);
+  const back1 = await again();
+  key(document.body, 'Shift');
+  check('A key puts the card away', back1 && !card());
+  await wait(1600);
+
+  // On a zoomed page the card is in its place all the same.
+  T().command('zoom_in');
+  T().command('zoom_in');
+  await wait(500);
+  const zoom = getComputedStyle($('.app')).getPropertyValue('--zoom').trim();
+  const zoomed = await again();
+  await wait(220);
+  check('On a zoomed page the card is under the link too', zoomed && Number(zoom) > 1.1 && placed().ok, zoomed ? `zoom ${zoom}: ${placed().say}` : `no card at zoom ${zoom}`);
+  T().command('zoom_reset');
+  await wait(300);
+
+  // Links one under the other (lines that are sub-pages, a column of page
+  // names): the card of one lies over the next, and the next is still what
+  // the pointer is on there. (The card took the pointer: a press on the
+  // second name, through the card, put the card away and opened nothing.)
+  {
+    const idOf = (name) => treeItem(name)?.dataset.page;
+    const paste = (el, text) => {
+      const data = new DataTransfer();
+      data.setData('text/plain', text);
+      el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+    };
+    const emptyNow = (not) => until(() => {
+      const a = document.activeElement;
+      return a !== not && a?.classList.contains('blk') && a.textContent.replace(/\u200b/g, '') === '' && a;
+    }, 3000);
+    const lineTo = (name) => $(`.page-link[data-preview="${idOf(name)}"]`, shownPane('Card Source'));
+    first.focus();
+    T().setSel(first, first.textContent.replace(/\u200b/g, '').length);
+    key(first, 'Enter');
+    const empty = await emptyNow(first);
+    if (empty) paste(empty, `rune://page/${idOf('Card Target')}`);
+    const one = await until(() => lineTo('Card Target'), 3000);
+    const after = one && (await emptyNow(null));
+    await wait(150);
+    if (after) paste(after, `rune://page/${idOf('Getting Started')}`);
+    const two = await until(() => lineTo('Getting Started'), 3000);
+    const over = one && two && (await again(one));
+    await wait(220);
+    const box = over?.getBoundingClientRect();
+    const at = two?.getBoundingClientRect();
+    const [x, y] = at ? [at.left + 30, at.top + at.height / 2] : [0, 0];
+    const covered = !!box && x > box.left && x < box.right && y > box.top && y < box.bottom;
+    const under = document.elementFromPoint(x, y);
+    check('Under the card of one link, the next link is still what the pointer is on', over && covered && two.contains(under), over ? `the card lies over the next link: ${covered}; under the pointer there: ${under?.className}` : `no card (lines ${!!one}, ${!!two})`);
+    if (two) restOn(two);
+    check('…and from one link straight onto the next, the card of the next shows at once', two && (await until(() => words('.link-card-name') === 'Getting Started', 300)), card()?.textContent);
+    await restOff();
+  }
+
+  // A press does what it did: the page opens. The card is gone.
+  const back2 = await again();
+  link.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+  const gone = !card();
+  link.click();
+  check('A press puts the card away, and the link opens its page as before', back2 && gone && (await until(() => shownPane('Card Target'), 3000)));
+
+  // The other links to pages: a row of "Linked from", and a line that is a sub-page.
+  const row = await until(() => $('.backlinks .backlink', shownPane('Card Target')), 3000);
+  if (row) restOn(row);
+  const second = row && (await until(card, 2000));
+  await wait(220);
+  check('A row of "Linked from" shows the card of its page', second && words('.link-card-name') === 'Card Source' && words('.link-card-lines')?.startsWith('Plan: Card Target') && apart(second.getBoundingClientRect(), row.getBoundingClientRect()) && inside(second.getBoundingClientRect()), second ? second.textContent : 'no card');
+  await restOff();
+  treeItem('Getting Started').click();
+  const sub = await until(() => $$('.page-link[data-preview]', shownPane('Getting Started') || document.createElement('i')).find((l) => l.textContent.includes('Ideas')), 3000);
+  if (sub) restOn(sub);
+  const third = sub && (await until(card, 2000));
+  check('A line that is a sub-page shows its card, with the page it is inside', third && words('.link-card-name') === 'Ideas' && words('.link-card-place') === 'Getting Started', third ? third.textContent : 'no card');
+  await restOff();
+
+  // A page in the Trash has no card.
+  treeItem('Card Target').querySelector('.tree-actions .row-btn').click();
+  menuItem(await until(() => $('.sidebar-menu')), 'Move to Trash').click();
+  await until(() => !treeItem('Card Target'));
+  treeItem('Card Source').click();
+  const dead = await until(() => shownPane('Card Source') && $$('.blk', shownPane('Card Source')).find((b) => b.textContent.includes('Plan:')), 3000);
+  const old = dead && $('a[href^="rune://page/"]', dead);
+  if (old) restOn(old);
+  await wait(1200);
+  check('A link to a page in the Trash shows no card', dead && !card(), old ? 'the link is there' : 'the line has no link now');
+  await restOff();
+  await oneTab();
 });
 
 await run('A screenshot added in the middle of text', async () => {
@@ -8459,12 +9595,33 @@ await run('Search runs commands and makes pages', async () => {
   await oneTab();
   await newPage('Quire call notes');
   await newPage('Quire Database');
+  await newPage('Quire R&D <b>plan</b>');
+  typeIn(await until(() => $('.pane.focused .blk') || $('.pane .blk')), 'The kettle is in the Blue cupboard');
+  await wait(200);
   T().command('quick_find');
   const input = await until(() => $('.qf-input'));
   const items = () => $$('.qf-item').map((i) => i.textContent.trim()).join(' | ');
   setBox(input, 'dark');
   check('Search lists a command that fits', await until(() => $$('.qf-item .qf-cmd').some((c) => /^(Dark|Light) mode$/.test(c.textContent.trim()))), items());
   check('…with its keys at the right', $$('.qf-item').some((i) => i.querySelector('.qf-keys')?.textContent === '⌘⇧L'), items());
+  // The typed words are marked where they are, so that a result shows why
+  // it fits: in the name, and in the line of the page that holds them.
+  {
+    const signs = () => $$('.qf-item').find((i) => i.querySelector('.qf-title')?.textContent === 'Quire R&D <b>plan</b>');
+    const marks = (part) => $$(`${part} .qf-mark`, signs() || document.createElement('i')).map((m) => m.textContent).join('|');
+    check('A command in the list has no marks', !$('.qf-cmd .qf-mark'));
+    setBox(input, 'quire <B> &d');
+    check('The typed words are marked in the name of a result, each by itself, large and small letters alike', await until(() => marks('.qf-title') === 'Quire|&D|<b>', 2000), `${marks('.qf-title')} in ${items()}`);
+    check('…and a name with signs in it shows as it is', signs() && !signs().querySelector('b') && signs().querySelector('.qf-title').textContent === 'Quire R&D <b>plan</b>');
+    setBox(input, 'KETTLE cupboard');
+    check('A page that fits by its text shows the line that fits, with the typed words marked', (await until(() => marks('.qf-snippet') === 'kettle|cupboard', 2000)) && marks('.qf-title') === '' && signs().querySelector('.qf-snippet').textContent === 'The kettle is in the Blue cupboard', signs()?.textContent || items());
+    const mark = $('.qf-snippet .qf-mark');
+    const soft = getComputedStyle($('.app')).getPropertyValue('--accent-soft').replace(/\s+/g, '');
+    check('The marks are the accent, pale', mark && getComputedStyle(mark).backgroundColor.replace(/\s+/g, '') === soft, mark && `${getComputedStyle(mark).backgroundColor} against ${soft}`);
+    check('…and the first result is the chosen one, as before', $$('.qf-item')[0]?.classList.contains('selected') && $$('.qf-item.selected').length === 1);
+    await wait(120);
+    snap('search-marks');
+  }
   setBox(input, 'zzqx nothing fits');
   check('Words that fit nothing give only a new page by that name', await until(() => $$('.qf-item').length === 1 && $('.qf-item').textContent.includes('New page'), 1500), items());
   setBox(input, 'Quire Trip / Packing list');
@@ -8639,6 +9796,24 @@ await run('Lock a page with a password', async () => {
     await until(() => !$('#ask-notes-input'), 2000);
   } else {
     check('The box that asks all the notes opens', false, 'no box');
+  }
+  // The card over a link to it says its name and that it is locked, and
+  // none of its words: here it is open (its lines are in plain in the window).
+  {
+    const reader = shownPane('Quire Reader');
+    const line = reader && $('.blk', reader);
+    const secret = treeItem('Quire Secret')?.dataset.page;
+    if (line && secret) {
+      line.focus();
+      const data = new DataTransfer();
+      data.setData('text/plain', `rune://page/${secret}`);
+      line.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+    }
+    const own = await until(() => $(`.page-link[data-preview="${secret}"]`, reader), 3000);
+    if (own) restOn(own);
+    const card = own && (await until(() => $('.link-card'), 2500));
+    check('The card over a link to a locked page says its name and "Locked", and none of its words', card && $('.link-card-name', card).textContent === 'Quire Secret' && $('.link-card-lines', card)?.textContent === 'Locked' && !card.textContent.includes('4711'), card ? card.textContent : `no card (line ${!!line}, link ${!!own})`);
+    await restOff();
   }
   // When no tab shows it (its tab is closed, or goes Home), it locks by itself.
   await oneTab();

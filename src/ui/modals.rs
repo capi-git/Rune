@@ -74,6 +74,70 @@ fn search_fit(typed: &str, name: &str, lines: &[String]) -> Option<(u8, Option<S
     Some((rank, shown))
 }
 
+/// A name or a line of a search result in parts, for the marks that show
+/// why the page fits: (marked, the letters). Marked is each place where a
+/// typed word is, as search finds it: small and large letters alike, each
+/// word by itself. `typed` in small letters.
+fn marked(text: &str, typed: &str) -> Vec<(bool, String)> {
+    let lower = text.to_lowercase();
+    // For each byte of the small letters, where its letter starts in `text`
+    // (a few letters become longer when they are made small).
+    let mut from: Vec<usize> = Vec::with_capacity(lower.len() + 1);
+    for (at, c) in text.char_indices() {
+        from.extend(std::iter::repeat_n(at, c.to_lowercase().map(char::len_utf8).sum()));
+    }
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    if from.len() == lower.len() {
+        for word in typed.split_whitespace() {
+            let mut at = 0;
+            while let Some(found) = lower[at..].find(word) {
+                let (start, end) = (at + found, at + found + word.len());
+                let last = from[end - 1];
+                spans.push((from[start], last + text[last..].chars().next().map_or(0, char::len_utf8)));
+                at = end;
+            }
+        }
+    }
+    spans.sort_unstable();
+    let mut out: Vec<(bool, String)> = Vec::new();
+    let mut done = 0;
+    for (start, end) in spans {
+        // (Two typed words can be in the same letters: one mark for both.)
+        if end <= done {
+            continue;
+        }
+        let start = start.max(done);
+        match out.last_mut() {
+            Some((true, s)) if start == done => s.push_str(&text[start..end]),
+            _ => {
+                if start > done {
+                    out.push((false, text[done..start].to_string()));
+                }
+                out.push((true, text[start..end].to_string()));
+            }
+        }
+        done = end;
+    }
+    if done < text.len() || out.is_empty() {
+        out.push((false, text[done..].to_string()));
+    }
+    out
+}
+
+/// The words of a search result with their marks (see `marked`). The parts
+/// are text of the page, never markup: a name with "<" or "&" shows as it is.
+fn marked_words(text: &str, typed: &str) -> Element {
+    rsx! {
+        for (i, (on, part)) in marked(text, typed).into_iter().enumerate() {
+            if on {
+                span { key: "{i}", class: "qf-mark", "{part}" }
+            } else {
+                span { key: "{i}", "{part}" }
+            }
+        }
+    }
+}
+
 /// A command that search can run: the name of `AppState::command`, what it
 /// says, its keys, and other words that find it.
 #[derive(Clone, PartialEq)]
@@ -270,6 +334,7 @@ pub fn QuickFind() -> Element {
     (false, out)
     });
     let (no_query, hits) = found();
+    let typed = query.read().trim().to_lowercase();
     let count = hits.len();
     let sel = (*selected.read()).min(count.saturating_sub(1));
     let hits_for_keys = hits.clone();
@@ -354,9 +419,9 @@ pub fn QuickFind() -> Element {
                                 Found::Page(hit) => rsx! {
                                     span { class: "qf-icon", PageIcon { icon: Some(hit.icon.clone()), size: 18 } }
                                     div { class: "qf-text",
-                                        div { class: "qf-title", "{hit.title}" }
+                                        div { class: "qf-title", {marked_words(&hit.title, &typed)} }
                                         if let Some(s) = &hit.snippet {
-                                            div { class: "qf-snippet", "{s}" }
+                                            div { class: "qf-snippet", {marked_words(s, &typed)} }
                                         }
                                     }
                                     if !hit.path.is_empty() {
@@ -2360,6 +2425,45 @@ mod tests {
         assert_eq!(lines("space", &[("Workspace plans", ""), ("Diary", "more space")]), ["> Next space", "Workspace plans", "Diary"]);
         // The words in another order in a name are still the name.
         assert_eq!(lines("notes meeting", &[("Meeting room notes", "")]), ["Meeting room notes", "> New meeting notes"]);
+    }
+
+    #[test]
+    fn search_marks_the_typed_words_where_they_are() {
+        let parts = |text: &str, typed: &str| marked(text, typed).into_iter().map(|(on, s)| if on { format!("[{s}]") } else { s }).collect::<String>();
+        // Small and large letters alike, each typed word by itself, every place.
+        assert_eq!(parts("Project Notes", "notes"), "Project [Notes]");
+        assert_eq!(parts("Trip to Italy", "italy trip"), "[Trip] to [Italy]");
+        assert_eq!(parts("Banana", "an"), "B[anan]a");
+        assert_eq!(parts("…the train tickets and the train", "train"), "…the [train] tickets and the [train]");
+        // Two words in the same letters make one mark; no word there, no mark.
+        assert_eq!(parts("Notebook", "note book teb"), "[Notebook]");
+        assert_eq!(parts("Diary", "plan"), "Diary");
+        assert_eq!(parts("Diary", ""), "Diary");
+        assert_eq!(parts("", "a"), "");
+        // Signs stay as they are, and the letters put together are the text again.
+        assert_eq!(parts("R&D <plan> & more", "plan &"), "R[&]D <[plan]> [&] more");
+        for (text, typed) in [("İstanbul İİ notes", "i"), ("Straße ΣΑΣ déjà", "σ s"), ("ǅungla", "ǆ"), ("日本語のノート", "ノ")] {
+            let joined: String = marked(text, typed).into_iter().map(|p| p.1).collect();
+            assert_eq!(joined, text, "{typed}");
+        }
+        assert_eq!(parts("ÉCOLE d'été", "é"), "[É]COLE d'[é]t[é]");
+    }
+
+    #[test]
+    fn the_marks_of_a_full_list_cost_no_time_that_a_person_sees() {
+        // The list shows 30 results at most (a name and a line each), however
+        // many pages there are: the marks of one list, made a hundred times.
+        let name = "Notes of the weekly call about the trip to Rome & back";
+        let line = "…the tickets for the train are in the blue folder, and the folder is in the car with the rest…";
+        let started = std::time::Instant::now();
+        let mut parts = 0;
+        for _ in 0..100 {
+            for _ in 0..30 {
+                parts += marked(name, "the trip rome tick").len() + marked(line, "the trip rome tick").len();
+            }
+        }
+        assert!(parts > 0);
+        assert!(started.elapsed().as_millis() < 500, "{:?} for a hundred lists", started.elapsed());
     }
 
     #[test]

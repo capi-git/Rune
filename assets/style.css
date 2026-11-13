@@ -531,7 +531,11 @@ button {
 .tab {
   animation: tab-in 180ms var(--ease-out);
 }
-.tab:active {
+/* (Not while the tab's menu is open: the menu is inside the tab and fixed
+   to the window, and a pressed tab is the box it is placed in. A press on
+   "Pin Tab" pressed the tab too: the menu jumped away from under the
+   pointer, and the press reached nothing.) */
+.tab:active:not(:has(.tab-menu)) {
   transform: var(--press);
 }
 @media (prefers-reduced-motion: reduce) {
@@ -591,6 +595,22 @@ button {
 }
 .new-tab {
   margin-left: 2px;
+}
+/* A pinned tab: its icon only, at the left of the row, with no button to
+   close it. Its name shows when the pointer rests on it. */
+.tabs .tab.pinned {
+  flex: 0 0 34px;
+  min-width: 34px;
+  padding: 0;
+}
+/* A page with no icon: the first letter of its name, in the look of a
+   space's letter, grey (pinned tabs of such pages all had the same sign). */
+.tab-letter.space-badge {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  font-size: 10px;
+  --c: var(--icon-gray);
 }
 .tab-menu {
   top: 30px;
@@ -1068,6 +1088,20 @@ body[data-resizing="rows"] * {
   margin: 0 auto;
   padding: 64px 96px 0 108px;
 }
+/* A scroll bar that comes takes its 10 points from the width of what
+   scrolls, and a column in the middle of it moved 5 points to the left.
+   The page script says how much room the bar takes at this moment (--bar,
+   see `barRoom` in bridge.js): the column stays where it is with no bar.
+   (With no bar this is the place that `margin: 0 auto` gives.) */
+.scroller > .page {
+  margin-left: max(0px, calc((100% + var(--bar, 0px) - 900px) / 2));
+}
+.scroller > .home.today {
+  margin-left: max(0px, calc((100% + var(--bar, 0px) - 1040px) / 2));
+}
+.settings-scroll > .settings-content {
+  margin-left: max(0px, calc((100% + var(--bar, 0px) - 700px) / 2));
+}
 
 @media (max-width: 1000px) {
   .page {
@@ -1371,6 +1405,71 @@ body[data-resizing="rows"] * {
   color: var(--text);
   outline: none;
 }
+/* The card over a link to a page, when the pointer rests on the link (drawn
+   by bridge.js): the page's icon and name, where it is, its first lines.
+   It has the look of the app's other small lists. It takes no pointer: the
+   next link of a list is under it, and a press there is for that link. */
+.link-card {
+  position: fixed;
+  z-index: 400;
+  pointer-events: none;
+  width: max-content;
+  min-width: 170px;
+  max-width: 300px;
+  padding: 10px 12px;
+  background: var(--popover);
+  border: 1px solid var(--float-edge);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  color: var(--text);
+  font-size: 13.5px;
+  line-height: 1.4;
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
+  animation: pop-in 150ms var(--ease-out);
+  transform-origin: 0 0;
+}
+.link-card.above {
+  transform-origin: 0 100%;
+}
+.link-card-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 500;
+}
+.link-card-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+.link-card-name,
+.link-card-place {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.link-card-place {
+  margin-top: 1px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+/* Four lines at most; what does not fit ends in "…". */
+.link-card-lines {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
+  margin-top: 7px;
+  font-size: 12.5px;
+  color: var(--text-2);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+.link-card-lines.locked {
+  color: var(--text-3);
+}
 .blk ::selection {
   background: var(--accent-soft);
 }
@@ -1569,6 +1668,37 @@ body[data-resizing="rows"] * {
 .toggle-arrow:hover {
   background: var(--hover);
 }
+/* A heading folds: the arrow of a toggle (its look, its turn), in the grey
+   of the "+" and the handle. It shows beside the heading while the pointer
+   is over that line, and stays in view, turned, while the heading is
+   folded. It stands right before the words and takes no room, so the
+   heading does not move; the "+" and the handle of such a heading stand one
+   step further left. */
+.fold-arrow {
+  position: absolute;
+  left: -22px;
+  top: 3px;
+  width: 20px;
+  margin-top: 0;
+  color: var(--text-3);
+  opacity: 0;
+  transition: transform 160ms var(--ease-out), opacity 0.1s;
+}
+.kind-heading1 > .block-inner > .fold-arrow {
+  top: 11px;
+}
+.kind-heading2 > .block-inner > .fold-arrow {
+  top: 7px;
+}
+.block-row:hover > .block-inner > .fold-arrow,
+.block-row.menu-open > .block-inner > .fold-arrow,
+.fold-arrow.closed,
+.fold-arrow:focus-visible {
+  opacity: 1;
+}
+.block-row:has(> .block-inner > .fold-arrow) > .block-inner > .gutter {
+  left: -70px;
+}
 
 .kind-quote > .block-inner {
   border-left: 3px solid currentColor;
@@ -1695,6 +1825,23 @@ body[data-resizing="rows"] * {
 }
 .code-lang:hover {
   background: var(--hover);
+}
+/* Copy the code: at the top right of the block, while the pointer is over
+   the block or the keyboard is in it. It lies over the block's own room
+   above the code, so the code does not move. */
+.code-copy {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  opacity: 0;
+  transition: opacity 120ms ease, transform 120ms var(--ease-out), background-color 120ms ease, color 120ms ease;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.code-wrap:hover > .code-copy,
+.code-wrap:focus-within > .code-copy,
+.code-copy:focus-visible {
+  opacity: 1;
 }
 
 .divider {
@@ -2383,6 +2530,16 @@ body[data-resizing="rows"] * {
   white-space: nowrap;
   text-overflow: ellipsis;
 }
+/* The typed words in a result, so that it shows why the page fits: the
+   accent, pale. */
+.qf-mark {
+  background: var(--accent-soft);
+  border-radius: 3px;
+  box-shadow: 0 0 0 1px var(--accent-soft);
+}
+.qf-snippet .qf-mark {
+  color: var(--text-2);
+}
 .qf-path {
   font-size: 12px;
   color: var(--text-3);
@@ -2515,6 +2672,46 @@ body[data-resizing="rows"] * {
 }
 .toast.leaving {
   animation: toast-out 160ms var(--ease-out) forwards;
+}
+/* After something was taken away the message has an "Undo" in it (for a
+   closed tab: "Reopen"): the words, then the one press. The press alone
+   answers to the pointer; the rest of the message lets it through, as
+   every message does. */
+.toast:has(.toast-undo) {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-right: 8px;
+}
+.toast-undo {
+  pointer-events: auto;
+  flex-shrink: 0;
+  margin: -3px 0;
+  padding: 3px 8px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  cursor: default;
+  transition: background 120ms ease-out;
+}
+.toast-undo:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+.toast-undo:active {
+  background: rgba(255, 255, 255, 0.22);
+}
+/* What the person opened after the message lies over it: a menu (over its
+   shade, under the menu), and a box in the middle of the window when the
+   message is one that stays. Its press takes no click from them. */
+.app:has(> .backdrop) .toast,
+.app:has(.ed-shade) .toast {
+  z-index: 45;
+}
+.app:has(> .modal-backdrop) .toast:has(.toast-undo) {
+  z-index: 99;
 }
 @keyframes toast-out {
   to {

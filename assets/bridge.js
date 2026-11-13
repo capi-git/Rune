@@ -1096,6 +1096,32 @@ document.addEventListener(
   true,
 );
 
+// The copy button of a code block, the arrow that folds a heading: a press
+// leaves the caret where it is.
+document.addEventListener(
+  'mousedown',
+  (e) => {
+    if (e.target.closest && e.target.closest('.code-copy, .fold-arrow')) e.preventDefault();
+  },
+  true,
+);
+
+// A fold hid the line with the caret (`set_fold` in state.rs): when that
+// line is gone from the page and the keyboard is in no other box, the caret
+// goes to the end of the heading.
+window.__rune.caretLeft = (gone, head) => {
+  let tries = 0;
+  const look = () => {
+    if (document.getElementById(gone)) {
+      if (tries++ < 60) requestAnimationFrame(look);
+      return;
+    }
+    const a = document.activeElement;
+    if (!a || a === document.body) window.__rune.focus(head, -1);
+  };
+  requestAnimationFrame(look);
+};
+
 // The browser's own undo would only know about one block; use the app's.
 document.addEventListener(
   'beforeinput',
@@ -1712,13 +1738,13 @@ const hangsFrom = (menu) => {
     const pane = hung.closest('.row-values') && hung.closest('.scroller');
     const p = pane && pane.getBoundingClientRect();
     const edge = p ? { left: Math.max(all.left, p.left + 4), top: Math.max(all.top, p.top + 4), right: Math.min(all.right, p.right - 4), bottom: Math.min(all.bottom, p.bottom - 4) } : all;
-    return { left: a.left, bottom: a.bottom, edge };
+    return { left: a.left, bottom: a.bottom, edge, el: hung };
   }
   const { hang, r, c } = hung.dataset;
   const b = box.getBoundingClientRect();
   const tr = box.querySelector(`tr[data-r="${hang === 'column' ? 0 : r}"]`);
   const el = hang === 'row' ? tr : tr && tr.querySelector(`:scope > td[data-col="${c}"]`);
-  if (!el) return { left: b.left, bottom: b.top, edge: all };
+  if (!el) return { left: b.left, bottom: b.top, edge: all, el: box };
   const a = el.getBoundingClientRect();
   // The menu of a row is at the left edge of the table; that of a cell or
   // a heading under it, at the part of it that shows in the box.
@@ -1726,7 +1752,7 @@ const hangsFrom = (menu) => {
   // box: the menu of a row is at the first cell, past that strip.)
   const strip = (parseFloat(getComputedStyle(box).paddingLeft) || 0) * (b.width / box.offsetWidth || 1);
   const left = hang === 'row' ? b.left + strip : Math.max(b.left + strip, Math.min(a.left, b.right - 40));
-  return { left, bottom: a.bottom, edge: all };
+  return { left, bottom: a.bottom, edge: all, el };
 };
 const placeTableMenu = (menu) => {
   const from = hangsFrom(menu);
@@ -1923,6 +1949,20 @@ const clearTabDrop = () => markDrop(null);
 // can't be a target (the one being dragged).
 const tabTarget = (e, skip) => {
   const tab = e.target.closest && e.target.closest('.tab[data-tab]');
+  // Pinned tabs stand first. One of them moves among the pinned ones only;
+  // anything else let go on a pinned tab lands after the last of them.
+  const row = e.target.closest && e.target.closest('.tabs');
+  const pins = row ? [...row.querySelectorAll(':scope > .tab.pinned')] : [];
+  const lastPin = pins[pins.length - 1];
+  const moved = pins.find((p) => p.dataset.tab === skip);
+  if (moved || (tab && tab.classList.contains('pinned'))) {
+    if (tab === moved) return null;
+    if (moved && pins.includes(tab)) {
+      const r = tab.getBoundingClientRect();
+      return { el: tab, to: tab.dataset.tab, mode: e.clientX < r.left + r.width / 2 ? 'before' : 'after' };
+    }
+    return lastPin === moved ? null : { el: lastPin, to: lastPin.dataset.tab, mode: 'after' };
+  }
   if (tab && tab.dataset.tab !== skip) {
     const r = tab.getBoundingClientRect();
     const x = (e.clientX - r.left) / r.width;
@@ -1983,7 +2023,8 @@ const paneDropFor = (e) => {
   const p = paneTarget(e);
   if (!p) return null;
   if (segDrag) return segDrag.pane === p.id ? null : p;
-  if (tabDrag) return tabDrag === activeTab() ? null : p;
+  // (A pinned tab is not pulled into a pane.)
+  if (tabDrag) return tabDrag === activeTab() || document.querySelector(`.tab.pinned[data-tab="${CSS.escape(tabDrag)}"]`) ? null : p;
   return pageDrag ? p : null;
 };
 
@@ -3446,7 +3487,8 @@ document.addEventListener('focusout', (e) => {
 document.addEventListener('mousedown', (e) => {
   if (atList && e.target !== atList.field && !atList.box.contains(e.target)) closeAt();
 });
-window.addEventListener('resize', closeAt);
+// (A window that changes its size: the list goes with its box, as every
+// menu does; see "an open menu stays at its thing".)
 document.addEventListener(
   'scroll',
   () => {
@@ -3454,6 +3496,136 @@ document.addEventListener(
   },
   true,
 );
+
+// ----- a card over a link to a page ---------------------------------------------------
+// When the pointer rests on a link to a page (a link in a line, a line that
+// is a sub-page, a link in a cell of a table, a row of "Linked from"), a
+// small card says what the page is: its icon and name, where it is, and its
+// first lines. The app gives the words (`preview_page` in state.rs) and
+// says nothing for a page that is gone; the card is drawn here. It goes
+// away when the pointer leaves the link, and at a press, a key, a scroll
+// and a menu that opens. A press on the link does what it did. The card
+// takes no pointer and no press (`pointer-events: none`): it lies over
+// what is under the link, often the next link of a list, and that must
+// stay what the pointer is on. (The card took the pointer: a press on the
+// next name, through the card, put the card away and opened nothing.)
+const LINKS_WITH_CARD = '.blk a[href^="rune://page/"], .blk a[href^="notion2://page/"], .page-link[data-preview], .linked-page[data-preview], .backlink[data-backlink]';
+const CARD_REST = 400; // the rest of the pointer before a card shows, in ms
+let linkCard = null; // { link, id, n, x, y, timer, box, watch }
+let linkCardAsked = 0;
+let linkCardShut = 0; // when the last card went away
+let linkCardKey = 0; // when a key was last pressed
+const linkCardPage = (link) => link.dataset.preview || link.dataset.backlink || ((link.getAttribute('href') || '').match(/^(?:rune|notion2):\/\/page\/([^/?#]+)/) || [])[1] || '';
+const closeLinkCard = () => {
+  const c = linkCard;
+  if (!c) return;
+  linkCard = null;
+  clearTimeout(c.timer);
+  if (c.watch) c.watch.disconnect();
+  if (c.box) {
+    c.box.remove();
+    linkCardShut = performance.now();
+  }
+};
+// No card while something is dragged, while a menu or a box is open over
+// the page, or over a link in the line that is being typed in.
+const noLinkCard = (link) => {
+  if (dragging() || document.body.dataset.dragging || document.querySelector('.popover, .modal-backdrop, .at-list, .marquee')) return true;
+  const line = link.closest('.blk');
+  return !!line && line === document.activeElement && performance.now() - linkCardKey < 1500;
+};
+const placeLinkCard = () => {
+  const c = linkCard;
+  if (!c || !c.box) return;
+  // Under the link, from the left of the part of it the pointer is on (a
+  // link in a line can go over two lines); above it when there is no room
+  // under it. Never over the link, and inside the window. (These places are
+  // in points of the window, as the card is: a zoomed page changes nothing.)
+  const all = c.link.getBoundingClientRect();
+  const part = [...c.link.getClientRects()].find((r) => c.y >= r.top - 1 && c.y <= r.bottom + 1 && c.x >= r.left - 1 && c.x <= r.right + 1) || all;
+  const w = c.box.offsetWidth;
+  const h = c.box.offsetHeight;
+  const gap = 6;
+  const under = all.bottom + gap + h <= innerHeight - 6 || all.top - gap - h < 6;
+  c.box.style.top = `${Math.round(under ? all.bottom + gap : all.top - gap - h)}px`;
+  c.box.style.left = `${Math.round(Math.max(6, Math.min(part.left, innerWidth - w - 6)))}px`;
+  c.box.classList.toggle('above', !under);
+};
+const askLinkCard = () => {
+  const c = linkCard;
+  if (!c) return;
+  if (!c.link.isConnected || noLinkCard(c.link)) return closeLinkCard();
+  linkCardAsked += 1;
+  c.n = linkCardAsked;
+  send({ t: 'page_preview', id: c.id, n: c.n });
+};
+window.__rune.pagePreview = (n, card) => {
+  const c = linkCard;
+  // (An answer for another page than the pointer is on now is dropped.)
+  if (!c || c.n !== n || c.box) return;
+  if (!card || card.id !== c.id || !c.link.isConnected || noLinkCard(c.link)) return closeLinkCard();
+  const part = (cls, words, into) => {
+    const el = document.createElement('div');
+    el.className = cls;
+    if (words) el.textContent = words;
+    into.appendChild(el);
+    return el;
+  };
+  const box = document.createElement('div');
+  box.className = 'link-card';
+  box.setAttribute('role', 'tooltip');
+  const head = part('link-card-head', '', box);
+  // (The icon is drawn by the app, with names it knows; all the words go in as text.)
+  part('link-card-icon', '', head).innerHTML = card.icon || '';
+  part('link-card-name', card.title, head);
+  if (card.place) part('link-card-place', card.place, box);
+  if (card.locked) part('link-card-lines locked', 'Locked', box);
+  else if (Array.isArray(card.lines) && card.lines.length) part('link-card-lines', card.lines.join('\n'), box);
+  // In the app's own element, for the colours and the letters of the look.
+  (document.querySelector('.app') || document.body).appendChild(box);
+  c.box = box;
+  placeLinkCard();
+  // A menu or a box that opens by itself (a command of the menu bar), or a
+  // page that went from under the pointer: the card goes.
+  c.watch = new MutationObserver(() => {
+    if (linkCard === c && (!c.link.isConnected || document.querySelector('.popover, .modal-backdrop, .at-list'))) closeLinkCard();
+  });
+  c.watch.observe(document.querySelector('.app') || document.body, { childList: true, subtree: true });
+};
+document.addEventListener('mouseover', (e) => {
+  const t = e.target;
+  if (!t || !t.closest) return;
+  const c = linkCard;
+  const link = t.closest(LINKS_WITH_CARD);
+  // On the link still: the card stays. Off it: the card goes.
+  if (c && link === c.link) return;
+  closeLinkCard();
+  if (!link) return;
+  const id = linkCardPage(link);
+  // (A button held down: text is being selected, or something is dragged.)
+  if (!id || e.buttons || noLinkCard(link)) return;
+  // At once when a card was open a moment ago (from one link to the next).
+  const rest = performance.now() - linkCardShut < 300 ? 0 : CARD_REST;
+  linkCard = { link, id, n: 0, x: e.clientX, y: e.clientY, box: null, watch: null, timer: setTimeout(askLinkCard, rest) };
+});
+document.addEventListener('mousemove', (e) => {
+  if (linkCard && !linkCard.box) [linkCard.x, linkCard.y] = [e.clientX, e.clientY];
+});
+// The pointer left the window.
+document.addEventListener('mouseout', (e) => {
+  if (linkCard && !e.relatedTarget) closeLinkCard();
+});
+for (const type of ['mousedown', 'wheel', 'scroll', 'dragstart', 'contextmenu']) document.addEventListener(type, closeLinkCard, true);
+window.addEventListener(
+  'keydown',
+  () => {
+    linkCardKey = performance.now();
+    closeLinkCard();
+  },
+  true,
+);
+window.addEventListener('blur', closeLinkCard);
+window.addEventListener('resize', closeLinkCard);
 
 // ----- pictures: a click shows one large, a drag puts it anywhere, the corner sizes it --
 // A picture that is let go off its line becomes free: it goes to the side of
@@ -4390,6 +4562,19 @@ const collectMatches = (root, query) => {
       out.push(r);
     }
   }
+  // A folded heading hides lines (they are not in the page): words found in
+  // them count as one match, at the end of the heading, and the heading
+  // opens when the search comes to it (`revealMatch`).
+  for (const row of root.querySelectorAll('.block-row.folded[data-fold-text]')) {
+    const blk = row.querySelector('.blk');
+    if (!blk || !row.dataset.foldText.toLowerCase().includes(needle)) continue;
+    const r = document.createRange();
+    r.selectNodeContents(blk);
+    r.collapse(false);
+    r._fold = { page: row.dataset.page, id: row.dataset.id };
+    const at = out.findIndex((m) => m.compareBoundaryPoints(Range.START_TO_START, r) > 0);
+    out.splice(at < 0 ? out.length : at, 0, r);
+  }
   return out;
 };
 
@@ -4406,8 +4591,15 @@ const paintFind = () => {
   else CSS.highlights.delete('rune-find-current');
 };
 
+// (Set while a folded heading opens for the search: the match it hid is shown next.)
+let findOpens = false;
 const revealMatch = () => {
   const r = findMatches[findAt];
+  if (r && r._fold) {
+    findOpens = true;
+    send({ t: 'block', page: r._fold.page, id: r._fold.id, action: 'unfold' });
+    return;
+  }
   const el = r && r.startContainer.parentElement;
   if (el) el.scrollIntoView({ block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
 };
@@ -4417,7 +4609,9 @@ const runFind = (keepPlace) => {
   findMatches = collectMatches(findRoot(), findInput() ? findInput().value : '');
   if (!keepPlace || findAt >= findMatches.length || findAt < 0) findAt = findMatches.length ? 0 : -1;
   paintFind();
-  if (!keepPlace) revealMatch();
+  const opened = findOpens;
+  findOpens = false;
+  if (!keepPlace || opened) revealMatch();
 };
 
 function findStep(d) {
@@ -4508,6 +4702,172 @@ function queueSizeAll() {
   });
 }
 
+// ----- an open menu stays at its thing ---------------------------------------------
+// One rule for every menu that hangs on a thing of the page: the menu of a
+// line, the menus of a table (a cell, a row, a heading, the date picker, a
+// list of choices), the day of a to-do, the menu of a page in the sidebar
+// and of a tab, the lists of the event panel, the "/" menu and the "@" lists.
+//   - The person scrolls the page with the wheel: a menu with a shade
+//     closes (see "the wheel over an open menu's shade" below). A scroll
+//     inside a menu's own list does nothing to the menu.
+//   - The page moves under an open menu in any other way (a scroll made by
+//     a key or by the app, the window, the sidebar or the zoom changing the
+//     size of the page): the menu is placed again by the function that
+//     placed it first, so it stays at its thing. When its thing is out of
+//     sight, the menu closes.
+// (They were placed once, and stayed where they were when their thing went.)
+const FOLLOWED = [
+  ['.block-menu.anchored', placeBlockMenu, (m) => m.parentElement, 28],
+  ['.sidebar-menu.anchored, .tab-menu.anchored, .due-menu.anchored, .ed-menu.anchored', anchorMenu, (m) => m.parentElement, 0],
+  [TABLE_MENUS, placeTableMenu, (m) => (hangsFrom(m) || {}).el, 0],
+  ['.slash-menu.anchored', placeSlashMenu, (m) => m.closest('.block-row') || m.parentElement, 0],
+];
+const OWN_SCROLL = '.popover, .block-menu, .slash-menu, .ed-menu, .at-list, .ai-menu';
+// Whether a thing shows in the part of the page that scrolls it (`first`:
+// only its first line counts, in points of the page).
+const inSight = (el, first) => {
+  const r = el.getBoundingClientRect();
+  // (A thing with no box of its own has no place to be out of.)
+  if (!r.width && !r.height) return true;
+  const bottom = first ? Math.min(r.bottom, r.top + first * zoomOf(el)) : r.bottom;
+  for (let n = el.parentElement; n && n !== document.documentElement; n = n.parentElement) {
+    const o = getComputedStyle(n).overflowY;
+    if (o !== 'auto' && o !== 'scroll' && o !== 'hidden') continue;
+    const b = n.getBoundingClientRect();
+    if (bottom <= b.top + 1 || r.top >= b.bottom - 1) return false;
+  }
+  return bottom > 0 && r.top < innerHeight;
+};
+// A menu placed while what it is in still moves into its place (a panel
+// that opens with a motion is, for that moment, what a fixed menu is placed
+// against) is placed once more when the motion has ended.
+const awaited = new WeakSet();
+const restThenFollow = (menu) => {
+  for (let n = menu.parentElement; n && n !== document.body; n = n.parentElement) {
+    for (const motion of n.getAnimations ? n.getAnimations() : []) {
+      if (motion.playState !== 'running' || awaited.has(motion)) continue;
+      awaited.add(motion);
+      motion.finished.then(queueFollow, () => {});
+    }
+  }
+};
+// (Every such menu is a `.popover` or a list of the event panel. These two
+// lists are kept by the engine, so that a scroll with no menu open, which
+// is nearly every scroll, looks through the page for none.)
+const openPopovers = document.getElementsByClassName('popover');
+const openEdMenus = document.getElementsByClassName('ed-menu');
+const followMenus = () => {
+  if (!atList && !openPopovers.length && !openEdMenus.length) return;
+  for (const [which, place, thingOf, first] of FOLLOWED) {
+    for (const menu of document.querySelectorAll(which)) {
+      if (menu.dataset.gone) continue;
+      const thing = thingOf(menu);
+      // (The lists of the event panel have a shade of their own, with no
+      // page that scrolls under it: they are placed again and stay open.)
+      if (thing && !inSight(thing, first) && !menu.classList.contains('ed-menu')) {
+        menu.dataset.gone = '1';
+        menu.style.visibility = 'hidden';
+        send({ t: 'shortcut', name: 'close_menu' });
+      } else {
+        place(menu);
+        restThenFollow(menu);
+      }
+    }
+  }
+  if (atList) {
+    if (inSight(atList.field, 0)) placeAt();
+    else closeAt();
+  }
+};
+let followQueued = false;
+const queueFollow = () => {
+  if (followQueued) return;
+  followQueued = true;
+  requestAnimationFrame(() => {
+    followQueued = false;
+    followMenus();
+  });
+};
+document.addEventListener(
+  'scroll',
+  (e) => {
+    if (e.target.closest && e.target.closest(OWN_SCROLL)) return;
+    queueFollow();
+  },
+  { capture: true, passive: true },
+);
+window.addEventListener('resize', queueFollow);
+
+// ----- the message at the foot --------------------------------------------------
+// A press on the "Undo" of a message leaves the keyboard where it is: the
+// caret stays in the line, and what is typed next goes there.
+document.addEventListener(
+  'mousedown',
+  (e) => {
+    if (e.target.closest && e.target.closest('.toast')) e.preventDefault();
+  },
+  true,
+);
+// The message sits clear of what else is at the foot of a pane: the AI's
+// button, its box, its answer with its buttons, what it did a moment ago;
+// and of the small video player and the meeting pad drawn in the page (in
+// a window that is not wide, or with the player moved to the foot).
+// It was drawn over them. Now each of them that it would lie over lifts
+// it: it sits above the highest. (From the foot up; with no room above
+// them all, it stays at the foot.) Seen again when its words change and
+// while it shows, since the AI's box can open under it.
+const TOAST_FOOT = 28;
+const seatToast = () => {
+  const t = document.querySelector('.toast');
+  if (!t) return;
+  const h = t.offsetHeight;
+  const left = innerWidth / 2 - t.offsetWidth / 2 - 8;
+  const right = innerWidth / 2 + t.offsetWidth / 2 + 8;
+  const boxes = [...document.querySelectorAll('.ai-dock, .ai-done, .player-dock, .pad-inline')]
+    .map((el) => el.getBoundingClientRect())
+    .filter((b) => b.width > 0 && b.right > left && b.left < right)
+    .sort((a, b) => b.bottom - a.bottom);
+  let foot = TOAST_FOOT;
+  for (const b of boxes) {
+    if (b.bottom > innerHeight - foot - h - 8 && b.top < innerHeight - foot + 8) foot = innerHeight - b.top + 10;
+  }
+  if (foot + h > innerHeight - 8) foot = TOAST_FOOT;
+  const want = foot === TOAST_FOOT ? '' : `${Math.round(foot)}px`;
+  if (t.style.bottom !== want) t.style.bottom = want;
+};
+const watchToast = (t) => {
+  seatToast();
+  new MutationObserver(seatToast).observe(t, { childList: true, characterData: true, subtree: true });
+  const again = setInterval(() => (t.isConnected ? seatToast() : clearInterval(again)), 250);
+};
+window.addEventListener('resize', seatToast);
+
+// ----- the room a scroll bar takes ------------------------------------------------
+// A page that grows past the window gets a scroll bar, which takes 10
+// points from the width; a column in the middle (the page, Home, Settings)
+// then moved 5 points to the left. What scrolls says how much room its bar
+// takes at this moment (--bar, in its own points: 0 with no bar), and the
+// styles keep the column where it is with no bar (style.css, `--bar`).
+// Seen before the next picture is drawn, so nothing moves on the screen.
+const BAR_BOXES = '.scroller, .settings-scroll';
+const barRoom =
+  typeof ResizeObserver !== 'undefined'
+    ? new ResizeObserver((entries) => {
+        for (const { target } of entries) {
+          const room = `${target.offsetWidth - target.clientWidth}px`;
+          if (target.style.getPropertyValue('--bar') !== room) target.style.setProperty('--bar', room);
+        }
+        // (The page has another size: an open menu goes with its thing.)
+        queueFollow();
+      })
+    : null;
+const watchBars = (n) => {
+  if (!barRoom || !n.querySelectorAll) return;
+  if (n.matches(BAR_BOXES)) barRoom.observe(n);
+  n.querySelectorAll(BAR_BOXES).forEach((box) => barRoom.observe(box));
+};
+watchBars(document.body);
+
 // ----- new blocks get their text from data-html ----------------------------------
 
 new MutationObserver((mutations) => {
@@ -4516,6 +4876,8 @@ new MutationObserver((mutations) => {
     m.addedNodes.forEach((n) => {
       initWithin(n);
       if (n.nodeType !== 1) return;
+      watchBars(n);
+      if (n.classList.contains('toast')) watchToast(n);
       if (n.tagName === 'TEXTAREA' || (n.querySelector && n.querySelector('textarea.title-input, textarea.ed-title'))) queueSizeAll();
       const menus = n.matches && n.matches('.sidebar-menu, .tab-menu, .due-menu, .ed-menu') ? [n] : n.querySelectorAll ? n.querySelectorAll('.sidebar-menu, .tab-menu, .due-menu, .ed-menu') : [];
       (n.matches && n.matches('.block-menu') ? [n] : n.querySelectorAll ? [...n.querySelectorAll('.block-menu')] : []).forEach(placeBlockMenu);
@@ -4551,14 +4913,29 @@ queueGlider(false);
 document.addEventListener('click', (e) => {
   const item = e.target.closest && e.target.closest('.outline-item[data-outline]');
   if (!item) return;
+  const go = (head) => {
+    const scroller = head.closest('.scroller');
+    if (!scroller) return;
+    // (On a zoomed page the places are in points of the window and the scroll
+    // is in the page's own units.)
+    const top = (head.getBoundingClientRect().top - scroller.getBoundingClientRect().top) / zoomOf(scroller) + scroller.scrollTop - 72;
+    const calm = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    scroller.scrollTo({ top: Math.max(0, top), behavior: calm ? 'auto' : 'smooth' });
+  };
   const head = document.getElementById('blk-' + item.dataset.outline);
-  const scroller = head && head.closest('.scroller');
-  if (!scroller) return;
-  // (On a zoomed page the places are in points of the window and the scroll
-  // is in the page's own units.)
-  const top = (head.getBoundingClientRect().top - scroller.getBoundingClientRect().top) / zoomOf(scroller) + scroller.scrollTop - 72;
-  const calm = matchMedia('(prefers-reduced-motion: reduce)').matches;
-  scroller.scrollTo({ top: Math.max(0, top), behavior: calm ? 'auto' : 'smooth' });
+  if (head) return go(head);
+  // A heading under a folded heading is not in the page: that one opens
+  // first, and the page goes to the heading when it is drawn.
+  const nav = item.closest('.page-outline');
+  if (!nav || !nav.dataset.page) return;
+  send({ t: 'block', page: nav.dataset.page, id: item.dataset.outline, action: 'show' });
+  let tries = 0;
+  const drawn = () => {
+    const now = document.getElementById('blk-' + item.dataset.outline);
+    if (now) go(now);
+    else if (tries++ < 90) requestAnimationFrame(drawn);
+  };
+  requestAnimationFrame(drawn);
 });
 let outlineQueued = false;
 const markOutline = () => {
@@ -4586,6 +4963,125 @@ const queueOutline = () => {
   requestAnimationFrame(markOutline);
 };
 document.addEventListener('scroll', queueOutline, true);
+
+// ----- a page keeps its scroll place -------------------------------------------------
+// The box that scrolls a pane is used again for the next tab, and made anew
+// for a split: the page in it began at its top each time. The place of each
+// page in each pane is kept here (in this window's memory only) and put back
+// when the pane shows that page again, before the window is drawn. A page
+// that a pane goes to anew starts at its top (`placeFresh`, from Rust).
+// (`scrollTop` is in the box's own units, so a zoomed page needs no sum.)
+const PLACE_BOXES = '.pane > .scroller[data-place], .pane > .scroller > .calendar .cal-scroll';
+const places = new Map(); // "pane|what it shows" -> scrollTop
+// The hours of the calendar: when their place was last set (by a scroll).
+// That place holds for a short time only: the calendar that is opened again
+// later, or on another day, opens at now (`calOpen`), not at the hours of
+// this morning. A page keeps its place with no such limit.
+const HOURS_PLACE_MS = 30 * 60 * 1000;
+const hoursSet = new Map(); // key -> [time, day]
+const hoursKey = (key) => key.endsWith('#hours');
+const hoursFresh = (key) => {
+  const set = hoursSet.get(key);
+  return !!set && Date.now() - set[0] < HOURS_PLACE_MS && set[1] === new Date().toDateString();
+};
+const placeWaits = new Set(); // boxes whose page is not yet as long as its place needs
+const placeKeyOf = (el) => {
+  const pane = el.closest('.pane');
+  const what = el.classList.contains('cal-scroll') ? 'calendar#hours' : el.dataset.place;
+  return pane && pane.dataset.pane && what ? pane.dataset.pane + '|' + what : '';
+};
+const placePut = (el) => {
+  // (Hours whose place is old are left for `calOpen`.)
+  if (hoursKey(el._place) && !hoursFresh(el._place)) {
+    places.delete(el._place);
+    hoursSet.delete(el._place);
+    return;
+  }
+  const want = places.get(el._place) || 0;
+  el.scrollTop = want;
+  placeWaits.delete(el);
+  el._placeWant = null;
+  if (Math.abs(el.scrollTop - want) <= 1) return;
+  // (A picture, a table or a diagram gets its height a little later.)
+  el._placeWant = want;
+  placeWaits.add(el);
+  let frames = 0;
+  const again = () => {
+    if (el._placeWant !== want) return;
+    if (el.isConnected) el.scrollTop = want;
+    if (!el.isConnected || Math.abs(el.scrollTop - want) <= 1 || ++frames > 90) {
+      el._placeWant = null;
+      placeWaits.delete(el);
+    } else requestAnimationFrame(again);
+  };
+  requestAnimationFrame(again);
+};
+// `shown`: also look for a box that was not drawn for a time (the other
+// panes in focus mode): it lost its place.
+const placesSync = (shown) => {
+  for (const el of document.querySelectorAll(PLACE_BOXES)) {
+    const key = placeKeyOf(el);
+    if (key !== el._place) {
+      el._place = key;
+      el._placeHid = false;
+      if (key) {
+        initWithin(el);
+        placePut(el);
+      }
+    } else if (shown && key) {
+      const hid = !el.clientHeight;
+      if (!hid && el._placeHid) placePut(el);
+      el._placeHid = hid;
+    }
+  }
+};
+let placeApp = null;
+const placeAppWatch = new MutationObserver(() => placesSync(true));
+new MutationObserver(() => {
+  const app = document.querySelector('.app');
+  if (app && app !== placeApp) {
+    placeApp = app;
+    placeAppWatch.observe(app, { attributes: true, attributeFilter: ['class'] });
+  }
+  placesSync(false);
+}).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-pane', 'data-place'] });
+document.addEventListener(
+  'scroll',
+  (e) => {
+    const el = e.target;
+    if (!(el instanceof Element && el._place && el._placeWant == null && el.clientHeight)) return;
+    places.set(el._place, el.scrollTop);
+    if (hoursKey(el._place)) hoursSet.set(el._place, [Date.now(), new Date().toDateString()]);
+  },
+  true,
+);
+// (The person scrolls: a place that still waits for its page is let go.)
+for (const type of ['wheel', 'mousedown', 'keydown', 'touchstart']) {
+  window.addEventListener(
+    type,
+    () => {
+      for (const el of placeWaits) el._placeWant = null;
+      placeWaits.clear();
+    },
+    { capture: true, passive: true },
+  );
+}
+window.__rune.placeFresh = (pane, what) => {
+  for (const key of [pane + '|' + what, pane + '|' + what + '#hours']) {
+    places.delete(key);
+    hoursSet.delete(key);
+    for (const el of document.querySelectorAll(PLACE_BOXES)) {
+      if (el._place !== key || el.classList.contains('cal-scroll')) continue;
+      el._placeWant = null;
+      el.scrollTop = 0;
+    }
+  }
+};
+window.__rune.placeKept = (el) => {
+  const key = placeKeyOf(el);
+  return places.has(key) && (!hoursKey(key) || hoursFresh(key));
+};
+placesSync(false);
 
 // ----- the graph of pages ---------------------------------------------------------
 // Rust gives the pages and what joins them (data-graph on .graph). This draws
@@ -4997,6 +5493,42 @@ const startGraph = (el) => {
   read();
 };
 document.querySelectorAll('.graph[data-graph]').forEach(startGraph);
+
+// ----- the calendar: the hours open at now ---------------------------------------------
+// The week and the day open with the line of now in sight, a third of the
+// way down, so that the hours before it show too. Hours that do not hold
+// today open at `morning` (8 AM). Early and late in the day the hours end
+// at midnight, and the view with them: the line is then nearer an edge.
+// This is done once for each time the hours come to the screen, and again
+// at "Today" (`day` is today: the hours that show it are waited for). It
+// is never done while the person looks at the hours: the line moves each
+// minute, the view does not. (All in the scroller's own points, so that a
+// zoomed page opens at the same hour.)
+const calPlace = (s, morning) => {
+  const now = s.querySelector('.cal-now');
+  s.scrollTop = now ? Math.max(0, (parseFloat(now.style.top) || 0) - s.clientHeight / 3) : morning;
+};
+window.__rune.calOpen = (morning, day) => {
+  const all = () => [...document.querySelectorAll('.cal-scroll')];
+  if (!day) {
+    all().filter((s) => !s._opened).forEach((s) => {
+      s._opened = true;
+      calPlace(s, morning);
+    });
+    return;
+  }
+  const place = () => {
+    const shown = all().filter((s) => s.querySelector(`.cal-col[data-day="${day}"]`));
+    shown.forEach((s) => calPlace(s, morning));
+    return shown.length > 0;
+  };
+  if (place()) return;
+  // (The hours of today are drawn a moment after the press: as soon as
+  // they are in the page. In the month there are none, and nothing is done.)
+  const seen = new MutationObserver(() => place() && seen.disconnect());
+  seen.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-day'] });
+  setTimeout(() => seen.disconnect(), 1000);
+};
 
 // ----- the calendar: drag an event --------------------------------------------------------
 // An event in the week or the day can be taken to another time or another
@@ -5878,6 +6410,8 @@ document.addEventListener(
 );
 
 window.__rune_test = { selIn, setSel, command: (name) => send({ t: 'shortcut', name }) };
+// (For the check of the calendar's kept hours: make them this much older.)
+window.__rune_test.ageHours = (ms) => hoursSet.forEach((set) => (set[0] -= ms));
 
 // Keep this script alive so dioxus.send() stays connected.
 await new Promise(() => {});

@@ -523,7 +523,6 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
     let tab = ui.tab().clone();
     let popover_open = ui.popover.is_some() || state.slash.read().is_some();
     drop(ui);
-    let toast = state.toast_msg.read().clone().map(|t| (t.1, t.2));
     let glass = glass_vars(&state.look.read());
     let accent = state.look.read().accent.clone();
 
@@ -579,14 +578,32 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
                 Some(Modal::LockPage) => rsx! { lock::LockPageModal {} },
                 Some(Modal::Settings) | None => rsx! {},
             }
-            if let Some((message, leaving)) = toast {
-                div { class: if leaving { "toast leaving" } else { "toast" }, "{message}" }
-            }
+            Toast {}
             FormatBar {}
             LineMic {}
             TextMenu {}
             FindBar {}
             LinkEditor {}
+        }
+    }
+}
+
+/// The short message at the foot of the window. After something was taken
+/// away it has an "Undo" in it (for a closed tab: "Reopen"), while that
+/// would still put back the thing the message is about (`back_holds`). The
+/// press never takes the keyboard from the page (bridge.js, "the message
+/// at the foot").
+#[component]
+fn Toast() -> Element {
+    let state = use_context::<AppState>();
+    let Some((_, message, leaving, back)) = state.toast_msg.read().clone() else { return rsx! {} };
+    let word = back.filter(|b| state.back_holds(b)).map(|b| if matches!(b, crate::state::Back::Tab(_)) { "Reopen" } else { "Undo" });
+    rsx! {
+        div { class: if leaving { "toast leaving" } else { "toast" }, role: "status",
+            span { class: "toast-text", "{message}" }
+            if let Some(word) = word {
+                button { class: "toast-undo", id: "toast-undo", tabindex: "-1", onclick: move |_| state.toast_undo(), "{word}" }
+            }
         }
     }
 }
@@ -607,6 +624,7 @@ fn LayoutView(node: Layout, tab: Tab) -> Element {
             let duplicate =
                 matches!(route, Route::Page(_)) && tab.ordered().iter().take_while(|p| p.id != id).any(|p| *p.route() == route);
             let pid = id.clone();
+            let place = route.place_key();
             rsx! {
                 div {
                     class: if focused { "pane focused" } else { "pane" },
@@ -617,7 +635,7 @@ fn LayoutView(node: Layout, tab: Tab) -> Element {
                         ListenBar { page: page.clone() }
                         PlaceBar { page: page.clone() }
                     }
-                    div { class: "scroller",
+                    div { class: "scroller", "data-place": "{place}",
                         PaneBody { route: route.clone(), duplicate }
                     }
                     // The AI: a small button at the foot that opens into a bar.

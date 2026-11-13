@@ -1254,7 +1254,10 @@ pub fn LinkedText(text: String) -> Element {
                                 key: "{i}",
                                 class: if gone { "linked-page gone" } else { "linked-page" },
                                 tabindex: "-1",
-                                title: if gone { "This page is in the Trash, or gone" } else { "Open this page" },
+                                // (A page that is there says what it is in a card,
+                                // when the pointer rests on it: see bridge.js.)
+                                title: if gone { "This page is in the Trash, or gone" },
+                                "data-preview": if !gone { id.clone() },
                                 // (The press does not take the keyboard into the box under it.)
                                 onmousedown: move |e| e.prevent_default(),
                                 onclick: move |e| {
