@@ -56,6 +56,7 @@ pub const UI_ICONS: &[&str] = &[
     "redo",
     "minus",
     "arrow-up-right",
+    "arrow-right",
     "hash",
     "gauge",
     "choice",
@@ -374,6 +375,7 @@ pub fn paths(name: &str) -> Option<&'static str> {
         }
         "plus" => r#"<path d="M12 5v14M5 12h14"/>"#,
         "arrow-up" => r#"<path d="M12 19.5V5M5.75 11.25 12 5l6.25 6.25"/>"#,
+        "arrow-right" => r#"<path d="M4.5 12H19M12.75 5.75 19 12l-6.25 6.25"/>"#,
         "quote" => {
             r#"<circle cx="7.75" cy="9.5" r="2.45" fill="currentColor" stroke="none"/><circle cx="16.25" cy="9.5" r="2.45" fill="currentColor" stroke="none"/><path d="M10.2 9.5c0 3.6-1.35 6.1-3.95 7.25M18.7 9.5c0 3.6-1.35 6.1-3.95 7.25"/>"#
         }

@@ -72,10 +72,17 @@ pub enum Kind {
     Formula,
     /// Rows of another table (`Column::from`), by their names.
     Relation,
+    /// The sum (or count, average, highest, lowest) of a column of the
+    /// first table on each row's own page: worked out from that page (see
+    /// `Column::of`, `Table::rolled`). It is kept as a formula column whose
+    /// formula says so (see `Column::to_stored`): a Rune of before it reads
+    /// such a column, and keeps it, where it read a kind it did not know as
+    /// a table it could not read at all.
+    Rollup,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 15] = [
+    pub const ALL: [Kind; 16] = [
         Kind::Text,
         Kind::Number,
         Kind::Choice,
@@ -90,6 +97,7 @@ impl Kind {
         Kind::Phone,
         Kind::File,
         Kind::Formula,
+        Kind::Rollup,
         Kind::Relation,
     ];
 
@@ -110,6 +118,7 @@ impl Kind {
             Kind::File => "file",
             Kind::Formula => "formula",
             Kind::Relation => "relation",
+            Kind::Rollup => "rollup",
         }
     }
 
@@ -130,6 +139,7 @@ impl Kind {
             Kind::File => "Picture",
             Kind::Formula => "Formula",
             Kind::Relation => "Row of another table",
+            Kind::Rollup => "From its page",
         }
     }
 
@@ -151,6 +161,7 @@ impl Kind {
             Kind::File => "image",
             Kind::Formula => "sigma",
             Kind::Relation => "arrow-up-right",
+            Kind::Rollup => "file",
         }
     }
 
@@ -173,7 +184,7 @@ impl Kind {
     /// The totals that mean something for this kind of column.
     pub fn totals(self) -> &'static [Total] {
         match self {
-            Kind::Number | Kind::Time | Kind::Formula => &[Total::Sum, Total::Average, Total::Median, Total::Highest, Total::Lowest, Total::Range, Total::Count, Total::Unique, Total::Empty],
+            Kind::Number | Kind::Time | Kind::Formula | Kind::Rollup => &[Total::Sum, Total::Average, Total::Median, Total::Highest, Total::Lowest, Total::Range, Total::Count, Total::Unique, Total::Empty],
             Kind::Pace => &[Total::Average, Total::Highest, Total::Lowest],
             Kind::Checkbox => &[Total::Checked],
             _ => &[Total::Count, Total::Unique, Total::Empty],
@@ -182,20 +193,27 @@ impl Kind {
 
     /// Its cells are amounts, which charts can draw and totals add up.
     pub fn is_amount(self) -> bool {
-        matches!(self, Kind::Number | Kind::Time | Kind::Pace | Kind::Formula)
+        matches!(self, Kind::Number | Kind::Time | Kind::Pace | Kind::Formula | Kind::Rollup)
     }
 
     /// Its cells are worked out, not typed.
     pub fn is_worked_out(self) -> bool {
-        matches!(self, Kind::Pace | Kind::Formula)
+        matches!(self, Kind::Pace | Kind::Formula | Kind::Rollup)
+    }
+
+    /// Its amounts have a format (money, percent), places and a bar or a ring.
+    pub fn has_format(self) -> bool {
+        matches!(self, Kind::Number | Kind::Formula | Kind::Rollup)
     }
 }
 
-/// What shows at the foot of a column.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// What shows at the foot of a column. (Also the way a rollup column
+/// takes the amounts of its page together: see `Total::WAYS`.)
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Total {
     Count,
+    #[default]
     Sum,
     Average,
     /// The middle amount.
@@ -214,6 +232,8 @@ pub enum Total {
 
 impl Total {
     pub const ALL: [Total; 10] = [Total::Count, Total::Sum, Total::Average, Total::Median, Total::Highest, Total::Lowest, Total::Range, Total::Unique, Total::Empty, Total::Checked];
+    /// The ways a rollup column takes the amounts of a row's page together.
+    pub const WAYS: [Total; 5] = [Total::Sum, Total::Count, Total::Average, Total::Highest, Total::Lowest];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -335,6 +355,60 @@ pub struct Column {
     /// Amounts above zero show green and below it red (a gain and a loss).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub signed: bool,
+    /// For a rollup column: the column of the table on each row's page
+    /// whose amounts it takes, by its heading, and the way it takes them
+    /// together. (Kept in `formula`: see `to_stored`.)
+    #[serde(skip)]
+    pub of: String,
+    #[serde(skip)]
+    pub way: Total,
+}
+
+/// What the app worked out for the rollup columns of a table (see
+/// `rollup_of`, `state::tables::roll_up`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Rolled {
+    /// By what the row goes by and the column. A row with none shows nothing.
+    pub values: std::collections::HashMap<(String, usize), f64>,
+    /// The format of a rollup column that has none of its own: that of the
+    /// column it takes from (see `Table::shown_format`). Only shown, never
+    /// kept or written in the Markdown.
+    pub formats: std::collections::HashMap<usize, String>,
+    /// How many rows of a column show nothing because their page writes
+    /// its amounts in another kind of money.
+    pub other: std::collections::HashMap<usize, usize>,
+    /// The columns that take from rollups deeper than rollups reach: those
+    /// rows show nothing (not 0), and so does a rollup of them.
+    pub too_deep: std::collections::BTreeSet<usize>,
+}
+
+/// The first word of the formula of a formula column that is kept for a
+/// rollup column (see `Column::to_stored`).
+const ROLLUP_WORD: &str = "rollup ";
+
+impl Column {
+    /// As the column is kept in the table's data. A rollup column is kept
+    /// as a formula column whose formula is "rollup Amount sum": a Rune of
+    /// before rollups reads it as a formula it cannot work out (its cells
+    /// show nothing) and keeps it as it is, where a kind it did not know
+    /// made it read the whole table as a new empty one.
+    fn to_stored(&self) -> Column {
+        if self.kind != Kind::Rollup {
+            return self.clone();
+        }
+        Column { kind: Kind::Formula, formula: format!("{ROLLUP_WORD}{} {}", name_in_line(&self.of, false), self.way.name()), of: String::new(), way: Total::Sum, ..self.clone() }
+    }
+
+    /// The column as `to_stored` keeps it, read back.
+    fn from_stored(&mut self) {
+        let Some(said) = self.formula.get(..ROLLUP_WORD.len()).filter(|w| self.kind == Kind::Formula && w.eq_ignore_ascii_case(ROLLUP_WORD)).map(|_| self.formula[ROLLUP_WORD.len()..].to_string()) else { return };
+        let words: Vec<String> = said.split_whitespace().map(str::to_string).collect();
+        let (of, way, _) = read_rollup(&words);
+        self.kind = Kind::Rollup;
+        self.of = of;
+        self.way = way;
+        self.formula.clear();
+    }
 }
 
 /// What a row has besides its cells.
@@ -418,6 +492,17 @@ pub struct Table {
     /// it reads a table for the screen (`AppState::table_at`, `TableView`).
     #[serde(skip)]
     pub names: std::collections::HashMap<String, String>,
+    /// What the rollup columns work out from the pages of the rows: the app
+    /// gives it when it reads a table (see `state::tables::roll_up`).
+    #[serde(skip)]
+    pub rolled: Rolled,
+    /// What the page of each row starts with: a table of these columns (its
+    /// header and their kinds). Said in Markdown as the `page:` part of the
+    /// table line, which makes the template's page of a table that has none
+    /// (see `state::tables::row_template`); the app gives it here when it
+    /// writes the table as Markdown. Never kept in the table's data.
+    #[serde(skip)]
+    pub page: Option<Box<Table>>,
     #[serde(skip)]
     parsed: Parsed,
 }
@@ -432,7 +517,7 @@ impl Default for Table {
 impl Table {
     /// A plain table of these rows.
     pub fn of(rows: Vec<Vec<String>>) -> Table {
-        let mut table = Table { rows, columns: Vec::new(), name: String::new(), icon: String::new(), info: Vec::new(), view: View::default(), template: None, beside: false, names: Default::default(), parsed: Parsed::default() };
+        let mut table = Table { rows, columns: Vec::new(), name: String::new(), icon: String::new(), info: Vec::new(), view: View::default(), template: None, beside: false, names: Default::default(), rolled: Default::default(), page: None, parsed: Parsed::default() };
         table.square();
         table
     }
@@ -441,12 +526,19 @@ impl Table {
     /// cannot be read).
     pub fn parse(data: &str) -> Table {
         let mut table: Table = serde_json::from_str(data).unwrap_or_default();
+        for col in &mut table.columns {
+            col.from_stored();
+        }
         table.square();
         table
     }
 
     pub fn to_data(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        if !self.columns.iter().any(|c| c.kind == Kind::Rollup) {
+            return serde_json::to_string(self).unwrap_or_default();
+        }
+        let stored = Table { columns: self.columns.iter().map(Column::to_stored).collect(), ..self.clone() };
+        serde_json::to_string(&stored).unwrap_or_default()
     }
 
     pub fn columns(&self) -> usize {
@@ -973,7 +1065,7 @@ impl Table {
             if col.total.is_some_and(|t| !kind.totals().contains(&t)) {
                 col.total = None;
             }
-            if !matches!(kind, Kind::Number | Kind::Formula) {
+            if !kind.has_format() {
                 col.format.clear();
                 col.places = None;
                 col.show = Show::Number;
@@ -984,6 +1076,10 @@ impl Table {
             }
             if kind != Kind::Relation {
                 col.from.clear();
+            }
+            if kind != Kind::Rollup {
+                col.of.clear();
+                col.way = Total::Sum;
             }
         }
         self.square();
@@ -1008,7 +1104,7 @@ impl Table {
     /// "percent", "USD"…). The numbers it has are written again that way.
     pub fn set_format(&mut self, c: usize, format: &str) {
         let format = money::known_format(format).unwrap_or("");
-        if let Some(col) = self.column_mut(c).filter(|col| matches!(col.kind, Kind::Number | Kind::Formula)) {
+        if let Some(col) = self.column_mut(c).filter(|col| col.kind.has_format()) {
             col.format = format.to_string();
         }
         self.square();
@@ -1017,7 +1113,7 @@ impl Table {
 
     /// Places after the point for column `c` (none: the format's own).
     pub fn set_places(&mut self, c: usize, places: Option<u8>) {
-        if let Some(col) = self.column_mut(c).filter(|col| matches!(col.kind, Kind::Number | Kind::Formula)) {
+        if let Some(col) = self.column_mut(c).filter(|col| col.kind.has_format()) {
             col.places = places.map(|p| p.min(6));
         }
         self.square();
@@ -1026,7 +1122,7 @@ impl Table {
 
     /// Show the numbers of column `c` with a bar or a ring, full at `goal`.
     pub fn set_show(&mut self, c: usize, show: Show, goal: Option<f64>) {
-        if let Some(col) = self.column_mut(c).filter(|col| matches!(col.kind, Kind::Number | Kind::Formula)) {
+        if let Some(col) = self.column_mut(c).filter(|col| col.kind.has_format()) {
             col.show = show;
             col.goal = goal.filter(|g| g.is_finite() && *g > 0.0);
         }
@@ -1053,6 +1149,16 @@ impl Table {
             Err(why) => return Some(why),
         };
         formula.names().into_iter().find(|name| self.find_heading(name).is_none_or(|o| o == c)).map(|name| format!("There is no column \"{name}\"."))
+    }
+
+    /// Which column of the table on each row's page rollup column `c` takes
+    /// its amounts from (by its heading), and the way it takes them together.
+    pub fn set_rollup(&mut self, c: usize, of: &str, way: Total) {
+        if let Some(col) = self.column_mut(c).filter(|col| col.kind == Kind::Rollup) {
+            col.of = of.split_whitespace().collect::<Vec<_>>().join(" ");
+            col.way = if Total::WAYS.contains(&way) { way } else { Total::Sum };
+        }
+        self.square();
     }
 
     /// The table whose rows relation column `c` names.
@@ -1186,6 +1292,7 @@ impl Table {
             Kind::Number => amount(number(text)),
             Kind::Time => amount(seconds(text)),
             Kind::Pace => amount(self.pace(r)),
+            Kind::Rollup => amount(self.rolled_value(r, c)),
             _ if text.is_empty() => Value::Empty,
             _ => Value::Text(self.links_as_names(text)),
         }
@@ -1199,8 +1306,19 @@ impl Table {
             Kind::Pace => self.pace(r),
             Kind::Checkbox => Some(if checked(self.cell(r, c)) { 1.0 } else { 0.0 }),
             Kind::Formula => self.worth(r, c, 0).number().filter(|v| v.is_finite()),
+            Kind::Rollup => self.rolled_value(r, c),
             _ => number(self.cell(r, c)),
         }
+    }
+
+    /// What the app worked out for rollup column `c` of row `r` (see `rolled`).
+    fn rolled_value(&self, r: usize, c: usize) -> Option<f64> {
+        self.rolled.values.get(&(self.row_id(r)?.to_string(), c)).copied().filter(|v| v.is_finite())
+    }
+
+    /// The columns that take a total from the pages of the rows.
+    pub fn rollups(&self) -> Vec<usize> {
+        (0..self.columns()).filter(|&c| self.kind(c) == Kind::Rollup).collect()
     }
 
     /// The pace of a row: its first time column over its first number column.
@@ -1229,6 +1347,19 @@ impl Table {
                 }
                 _ => "Needs a number column (the distance) and a time column.".to_string(),
             },
+            Kind::Rollup => {
+                let col = self.column(c);
+                let other = match self.rolled.other.get(&c).copied().unwrap_or(0) {
+                    0 => String::new(),
+                    1 => " One row shows nothing: its page has its amounts in another kind of money.".to_string(),
+                    n => format!(" {n} rows show nothing: their pages have their amounts in another kind of money."),
+                };
+                if col.of.trim().is_empty() {
+                    "No column yet. Choose one in the column's menu.".to_string()
+                } else {
+                    format!("{} of {} in the table on the row's page.{other}", col.way.label(), col.of.trim())
+                }
+            }
             _ => String::new(),
         }
     }
@@ -1300,6 +1431,7 @@ impl Table {
                 Value::Bool(yes) => if yes { "Yes" } else { "No" }.to_string(),
                 _ => String::new(),
             },
+            Kind::Rollup if r > 0 => self.rolled_value(r, c).map(|v| self.format(c, v)).unwrap_or_default(),
             _ => self.cell(r, c).to_string(),
         }
     }
@@ -1324,16 +1456,26 @@ impl Table {
         self.body().filter_map(|r| read_number(self.cell(r, c))).map(|read| read.typed).max().unwrap_or(0).min(2)
     }
 
+    /// How the amounts of column `c` are written: its own format, or for a
+    /// rollup with none, that of the column it takes from (`Rolled::formats`).
+    pub fn shown_format(&self, c: usize) -> String {
+        let own = self.column(c).format;
+        match self.rolled.formats.get(&c) {
+            Some(from) if own.is_empty() && self.kind(c) == Kind::Rollup => from.clone(),
+            _ => own,
+        }
+    }
+
     /// An amount of column `c` written as the column writes it.
     pub fn format(&self, c: usize, v: f64) -> String {
-        let col = self.column(c);
+        let col = Column { format: self.shown_format(c), ..self.column(c) };
         let own = col.places.map(usize::from);
         match col.kind {
             Kind::Time | Kind::Pace => clock(v),
             _ if money::currency(&col.format).is_some() => money::write(&col.format, v, own),
             // What a formula works out has no typed places: as few as the
             // number needs, two at the most.
-            Kind::Formula if own.is_none() => {
+            Kind::Formula | Kind::Rollup if own.is_none() => {
                 let cents = (v * 100.0).round() as i64;
                 let places = if cents % 100 == 0 { 0 } else if cents % 10 == 0 { 1 } else { 2 };
                 money::write(&col.format, v, Some(places))
@@ -1349,7 +1491,7 @@ impl Table {
     /// of 2 and 3 showed as 2.)
     pub fn format_worked(&self, c: usize, v: f64) -> String {
         let col = self.column(c);
-        if col.places.is_some() || matches!(col.kind, Kind::Time | Kind::Pace | Kind::Formula) || money::currency(&col.format).is_some() {
+        if col.places.is_some() || matches!(col.kind, Kind::Time | Kind::Pace | Kind::Formula | Kind::Rollup) || money::currency(&self.shown_format(c)).is_some() {
             return self.format(c, v);
         }
         let cents = (v * 100.0).round() as i64;
@@ -1580,51 +1722,71 @@ impl Table {
             }
         }
         if self.is_typed() {
-            let described: Vec<String> = (0..self.columns())
-                .map(|c| {
-                    let col = self.column(c);
-                    let mut words = vec![col.kind.name().to_string()];
-                    words.extend((!col.format.is_empty()).then(|| col.format.clone()));
-                    // (A unit that the line would read as something else, "min"
-                    // as the lowest or "bar" as a bar, goes in quotes.)
-                    words.extend(col.unit.clone().map(|u| {
-                        let other = Total::parse(&u).is_some() || money::known_format(&u).is_some() || matches!(u.to_lowercase().as_str(), "bar" | "bars" | "ring" | "rings" | "goal" | "signed");
-                        if other {
-                            format!("\"{u}\"")
-                        } else {
-                            u
-                        }
-                    }));
-                    words.extend(col.total.map(|t| t.name().to_string()));
-                    match col.show {
-                        Show::Number => {}
-                        Show::Bar => words.push("bar".to_string()),
-                        Show::Ring => words.push("ring".to_string()),
-                    }
-                    words.extend(col.goal.filter(|_| col.show != Show::Number).map(|g| format!("goal {g}")));
-                    words.extend((col.signed && col.kind.is_amount()).then(|| "signed".to_string()));
-                    // (Only when the list says more than the cells do.)
-                    if col.kind.has_options() && col.options != self.plain_options(c) {
-                        let list: Vec<String> = col.options.iter().map(|o| format!("{}:{}", o.name.replace(['|', ';', '{', '}', ':', '='], " ").replace("-->", "- ->"), o.color.name())).collect();
-                        words.push(format!("{{{}}}", list.join("; ")));
-                    }
-                    if !col.formula.is_empty() {
-                        words.push(format!("= {}", bars(&col.formula).replace("-->", "- ->")));
-                    }
-                    words.join(" ")
-                })
-                .collect();
+            let described: Vec<String> = (0..self.columns()).map(|c| self.column_words(c)).collect();
             out.push(format!("{pad}<!-- columns: {} -->", described.join(" | ")));
         }
         let view = self.view_parts();
-        if !self.name.is_empty() || !self.icon.is_empty() || self.beside || !view.is_empty() {
+        if !self.name.is_empty() || !self.icon.is_empty() || self.beside || !view.is_empty() || self.page.is_some() {
             let mut said = vec![bars(&self.name).replace("-->", "- ->")];
             said.extend((!self.icon.is_empty()).then(|| format!("icon {}", self.icon)));
             said.extend(self.beside.then(|| "beside".to_string()));
             said.extend(view.iter().map(|part| bars(part).replace("-->", "- ->")));
+            // (Last: each column of the page's table is a part of its own.)
+            if let Some(page) = &self.page {
+                said.push(format!("page: {}", page.page_words()));
+            }
             out.push(format!("{pad}<!-- table: {} -->", said.join(" | ")));
         }
         out.join("\n")
+    }
+
+    /// What the `page:` part of a table line says of this table, the one the
+    /// page of each row starts with: each column's heading and then its kind,
+    /// between bars ("Item text | Amount number USD sum").
+    pub fn page_words(&self) -> String {
+        let bars = |text: &str| text.replace('|', "\\|").replace('\n', " ").replace("-->", "- ->");
+        (0..self.columns()).map(|c| format!("{} {}", bars(&name_in_line(&self.heading(c), true)), self.column_words(c))).collect::<Vec<_>>().join(" | ")
+    }
+
+    /// What the `<!-- columns: … -->` line says of column `c`: its kind,
+    /// then its format, unit, total, bar or ring, options and formula
+    /// ("number USD sum", "rollup Amount sum USD sum").
+    pub fn column_words(&self, c: usize) -> String {
+        let bars = |text: &str| text.replace('|', "\\|").replace('\n', " ");
+        let col = self.column(c);
+        let mut words = vec![col.kind.name().to_string()];
+        if col.kind == Kind::Rollup {
+            words.push(bars(&name_in_line(&col.of, false)).replace("-->", "- ->"));
+            words.push(col.way.name().to_string());
+        }
+        words.extend((!col.format.is_empty()).then(|| col.format.clone()));
+        // (A unit that the line would read as something else, "min"
+        // as the lowest or "bar" as a bar, goes in quotes.)
+        words.extend(col.unit.clone().map(|u| {
+            let other = Total::parse(&u).is_some() || money::known_format(&u).is_some() || matches!(u.to_lowercase().as_str(), "bar" | "bars" | "ring" | "rings" | "goal" | "signed");
+            if other {
+                format!("\"{u}\"")
+            } else {
+                u
+            }
+        }));
+        words.extend(col.total.map(|t| t.name().to_string()));
+        match col.show {
+            Show::Number => {}
+            Show::Bar => words.push("bar".to_string()),
+            Show::Ring => words.push("ring".to_string()),
+        }
+        words.extend(col.goal.filter(|_| col.show != Show::Number).map(|g| format!("goal {g}")));
+        words.extend((col.signed && col.kind.is_amount()).then(|| "signed".to_string()));
+        // (Only when the list says more than the cells do.)
+        if col.kind.has_options() && col.options != self.plain_options(c) {
+            let list: Vec<String> = col.options.iter().map(|o| format!("{}:{}", o.name.replace(['|', ';', '{', '}', ':', '='], " ").replace("-->", "- ->"), o.color.name())).collect();
+            words.push(format!("{{{}}}", list.join("; ")));
+        }
+        if !col.formula.is_empty() {
+            words.push(format!("= {}", bars(&col.formula).replace("-->", "- ->")));
+        }
+        words.join(" ")
     }
 
     /// Read a Markdown pipe table from the lines at the start of `lines`.
@@ -1664,7 +1826,17 @@ impl Table {
         }
         let mut view_parts = Vec::new();
         if let Some(said) = comment(taken, "table:") {
+            // (The `page:` part is last: the parts after it are its columns.)
+            let mut page: Option<Vec<String>> = None;
             for (i, part) in split_bars(&said).into_iter().enumerate() {
+                if let Some(columns) = page.as_mut() {
+                    columns.push(part);
+                    continue;
+                }
+                if let Some(first) = part.get(..5).filter(|w| w.eq_ignore_ascii_case("page:")).map(|_| part[5..].trim().to_string()) {
+                    page = Some(vec![first]);
+                    continue;
+                }
                 match part.strip_prefix("icon ") {
                     _ if i == 0 => table.name = part,
                     Some(icon) => table.icon = icon.trim().to_string(),
@@ -1672,6 +1844,7 @@ impl Table {
                     None => view_parts.push(part),
                 }
             }
+            table.page = page.and_then(|columns| page_table(&columns)).map(Box::new);
             taken += 1;
         }
         table.square();
@@ -1857,7 +2030,14 @@ fn read_column(words: &str) -> Column {
         }
     }
     let mut goal_next = false;
-    for (i, word) in words.split_whitespace().enumerate() {
+    let mut words: Vec<String> = words.split_whitespace().map(str::to_string).collect();
+    // A rollup says the column of the page's table, then the way: "rollup Amount sum".
+    if words.first().is_some_and(|w| Kind::parse(w) == Some(Kind::Rollup)) {
+        let (of, way, used) = read_rollup(&words[1..]);
+        (col.of, col.way) = (of, way);
+        words.drain(1..1 + used);
+    }
+    for (i, word) in words.iter().map(String::as_str).enumerate() {
         if i == 0 {
             if let Some(kind) = Kind::parse(word) {
                 col.kind = kind;
@@ -1877,7 +2057,7 @@ fn read_column(words: &str) -> Column {
             }
             continue;
         }
-        let shows = matches!(col.kind, Kind::Number | Kind::Formula);
+        let shows = col.kind.has_format();
         match word.to_lowercase().as_str() {
             "bar" | "bars" if shows => {
                 col.show = Show::Bar;
@@ -1899,7 +2079,7 @@ fn read_column(words: &str) -> Column {
         }
         match (Total::parse(word), money::known_format(word)) {
             (Some(t), _) => col.total = Some(t),
-            (None, Some(format)) if col.format.is_empty() && matches!(col.kind, Kind::Number | Kind::Formula) => col.format = format.to_string(),
+            (None, Some(format)) if col.format.is_empty() && col.kind.has_format() => col.format = format.to_string(),
             _ if col.unit.is_none() => col.unit = Some(word.to_string()),
             _ => {}
         }
@@ -1912,7 +2092,104 @@ fn read_column(words: &str) -> Column {
         col.options.clear();
     }
     col.signed &= col.kind.is_amount();
+    // (A rollup as an older Rune writes it: "formula = rollup Amount sum".)
+    col.from_stored();
     col
+}
+
+/// A word that ends the name of a column in a line of kinds: a total, a
+/// format, a unit in quotes, a list of options, a bar or a ring; for a
+/// column of the `page:` part (`kinds`), a kind too.
+fn ends_name(word: &str, kinds: bool) -> bool {
+    Total::parse(word).is_some()
+        || money::known_format(word).is_some()
+        || word.starts_with(['"', '{', '='])
+        || matches!(word.to_lowercase().as_str(), "bar" | "bars" | "ring" | "rings" | "goal" | "signed")
+        || (kinds && Kind::parse(word).is_some())
+}
+
+/// The name of a column as a line of kinds writes it: in square brackets
+/// when a word of it would end it ("[Amount sum]") or it is empty ("[]"),
+/// else as it is.
+fn name_in_line(name: &str, kinds: bool) -> String {
+    let name = name.split_whitespace().collect::<Vec<_>>().join(" ").replace(['[', ']'], "");
+    if name.is_empty() || name.split_whitespace().skip(1).any(|w| ends_name(w, kinds)) {
+        format!("[{name}]")
+    } else {
+        name
+    }
+}
+
+/// The name of a column at the start of `words`, as `name_in_line` writes
+/// it, and how many words it took.
+fn read_name(words: &[String], kinds: bool) -> (String, usize) {
+    if words.first().is_some_and(|w| w.starts_with('[')) {
+        let n = words.iter().position(|w| w.ends_with(']')).map_or(words.len(), |i| i + 1);
+        return (words[..n].join(" ").trim_start_matches('[').trim_end_matches(']').trim().to_string(), n);
+    }
+    let n = words.iter().enumerate().position(|(i, w)| i > 0 && ends_name(w, kinds)).unwrap_or(words.len());
+    (words[..n].join(" "), n)
+}
+
+/// What a rollup column says after its kind: the column of the page's
+/// table, then the way ("Amount sum"; a sum when no way is said). Returns
+/// them and how many words they took.
+fn read_rollup(words: &[String]) -> (String, Total, usize) {
+    let (of, mut used) = read_name(words, false);
+    let way = words.get(used).and_then(|w| Total::parse(w)).filter(|t| Total::WAYS.contains(t));
+    used += usize::from(way.is_some());
+    (of, way.unwrap_or_default(), used)
+}
+
+/// The table the `page:` part of a table line says each row's page starts
+/// with: a column for each part, its name and then its kind in the words
+/// of the columns line ("Item", "Amount number USD sum", "Amount USD sum",
+/// "Category choice {Food; Fun}"). An amount said with no kind is a
+/// number, a list with no kind a choice.
+fn page_table(parts: &[String]) -> Option<Table> {
+    let mut names = Vec::new();
+    let mut columns = Vec::new();
+    for part in parts.iter().take(MOST_COLUMNS) {
+        let words: Vec<String> = part.split_whitespace().map(str::to_string).collect();
+        let (name, used) = read_name(&words, true);
+        if name.is_empty() {
+            continue;
+        }
+        let mut kind = words[used..].join(" ");
+        let first = words.get(used).map(String::as_str).unwrap_or("");
+        if !first.is_empty() && Kind::parse(first).is_none() {
+            kind = format!("{} {kind}", if first.starts_with('{') { "choice" } else { "number" });
+        }
+        names.push(name);
+        columns.push(read_column(&kind));
+    }
+    if names.is_empty() {
+        return None;
+    }
+    let width = names.len();
+    let mut table = Table::of(vec![names, vec![String::new(); width]]);
+    table.columns = columns;
+    table.square();
+    Some(table)
+}
+
+/// What rollup column `col` takes from `table`, the first table on the
+/// page of a row: its way over the column `col.of` (by heading). A sum and
+/// a count of a table that has that column and no amounts are 0; an
+/// average, the highest and the lowest are nothing then. `None` too when
+/// the table has no such column.
+pub fn rollup_of(col: &Column, table: &Table) -> Option<f64> {
+    let c = table.find_heading(&col.of).or_else(|| table.find_column(&col.of))?;
+    if col.way == Total::Count {
+        return Some(table.body().filter(|&r| !table.shown(r, c).trim().is_empty()).count() as f64);
+    }
+    let values: Vec<f64> = table.body().filter_map(|r| table.value(r, c)).collect();
+    match col.way {
+        Total::Average => (!values.is_empty()).then(|| values.iter().sum::<f64>() / values.len() as f64),
+        Total::Highest => values.iter().copied().reduce(f64::max),
+        Total::Lowest => values.iter().copied().reduce(f64::min),
+        _ => Some(values.iter().sum()),
+    }
 }
 
 // ----- reading cells -------------------------------------------------------
@@ -3240,7 +3517,10 @@ mod tests {
                     }
                     13 => drop(t.name_rows()),
                     14 => t.set_total(c, Some(Total::ALL[next(Total::ALL.len())])),
-                    15 => t.set_formula(c, ["Amount * 2", "Item", "Amount +", "[Amount 2] / Amount", ""][next(5)]),
+                    15 => {
+                        t.set_formula(c, ["Amount * 2", "Item", "Amount +", "[Amount 2] / Amount", ""][next(5)]);
+                        t.set_rollup(c, ["Amount", "Amount sum", "", "Paid | late", "[x]"][next(5)], Total::ALL[next(Total::ALL.len())]);
+                    }
                     16 => drop(t.add_day_row(today, today)),
                     _ => t.change_view(|v| {
                         v.sort_by(c, r % 2 == 0);
@@ -3316,5 +3596,138 @@ mod tests {
         assert!(!t.column(2).signed, "words have no sign");
         let md = t.to_markdown("");
         assert!(md.contains("number USD sum signed"), "{md}");
+    }
+
+    /// A month's budget: a row for each day, its spending on the day's page.
+    fn budget() -> Table {
+        let lines = [
+            "| Date | Budget | Spent | Left |",
+            "| --- | --- | --- | --- |",
+            "| 2026-11-01 | $60.00 |  |  |",
+            "| 2026-11-02 | $60.00 |  |  |",
+            "| 2026-11-03 | $60.00 |  |  |",
+            "<!-- columns: date | number USD sum | rollup Amount sum USD sum | formula USD sum = Budget - Spent -->",
+            "<!-- table: November | color Left below 0 red | page: Item | Amount USD sum | Category choice {Food; Fun; Bills} -->",
+        ];
+        let (mut t, taken) = Table::from_markdown(&lines).unwrap();
+        assert_eq!(taken, lines.len());
+        t.name_rows();
+        t
+    }
+
+    /// The table on the page of a day: what was spent, and on what.
+    fn spends(amounts: &[&str]) -> Table {
+        let mut rows = vec![vec!["Item".to_string(), "Amount".to_string()]];
+        rows.extend(amounts.iter().enumerate().map(|(i, a)| vec![format!("Thing {i}"), a.to_string()]));
+        let mut t = Table::of(rows);
+        t.set_kind(1, Kind::Number);
+        t.set_format(1, "USD");
+        t
+    }
+
+    #[test]
+    fn a_rollup_takes_the_sum_of_the_money_on_each_rows_page() {
+        let mut t = budget();
+        let col = t.column(2);
+        assert_eq!((col.kind, col.of.as_str(), col.way, col.format.as_str(), col.total), (Kind::Rollup, "Amount", Total::Sum, "USD", Some(Total::Sum)));
+        // Day 1 spent $12.50 and $8.00; day 2 bought $70.25 of things; day 3 has no page.
+        let day1 = rollup_of(&col, &spends(&["$12.50", "$8.00"])).unwrap();
+        let day2 = rollup_of(&col, &spends(&["$70.25", ""])).unwrap();
+        assert_eq!((day1, day2), (20.5, 70.25));
+        for (r, v) in [(1, day1), (2, day2)] {
+            let id = t.row_id(r).unwrap().to_string();
+            t.rolled.values.insert((id, 2), v);
+        }
+        assert_eq!((t.shown(1, 2), t.shown(2, 2), t.shown(3, 2)), ("$20.50".to_string(), "$70.25".to_string(), String::new()));
+        // The formula and the total at the foot (the month) work with it as with a number.
+        assert_eq!((t.shown(1, 3), t.shown(2, 3)), ("$39.50".to_string(), "-$10.25".to_string()));
+        assert_eq!(t.total(2), Some(("Sum", "$90.75".to_string())));
+        // A colour rule: the day over its budget is red.
+        let paint = &t.view.paint[0];
+        assert!(!t.passes(1, paint) && t.passes(2, paint));
+        // It is an amount: sorted, filtered and drawn as one.
+        assert!(t.kind(2).is_amount() && t.kind(2).is_worked_out());
+        assert_eq!(t.value(2, 2), Some(70.25));
+        // It cannot be typed in.
+        t.put_named(1, &[("Spent".to_string(), "5".to_string())], d(2026, 11, 1));
+        assert_eq!(t.cell(1, 2), "");
+    }
+
+    #[test]
+    fn a_rollup_of_a_page_with_nothing_spent_is_nought_and_of_no_page_is_nothing() {
+        let col = budget().column(2);
+        // The page's table has the column and no amounts yet: nothing spent.
+        assert_eq!(rollup_of(&col, &spends(&[])), Some(0.0));
+        assert_eq!(rollup_of(&Column { way: Total::Count, ..col.clone() }, &spends(&[])), Some(0.0));
+        assert_eq!(rollup_of(&Column { way: Total::Average, ..col.clone() }, &spends(&[])), None);
+        // A table with no such column gives nothing.
+        assert_eq!(rollup_of(&Column { of: "Price".into(), ..col.clone() }, &spends(&["$3.00"])), None);
+        // The other ways.
+        let three = spends(&["$3.00", "$9.00", "", "$6.00"]);
+        let by = |way: Total| rollup_of(&Column { way, ..col.clone() }, &three);
+        assert_eq!((by(Total::Count), by(Total::Average), by(Total::Highest), by(Total::Lowest)), (Some(3.0), Some(6.0), Some(9.0), Some(3.0)));
+        // A row with no value (no page) shows nothing, and the total leaves it out.
+        let t = budget();
+        assert_eq!((t.shown(1, 2), t.value(1, 2), t.shown(1, 3)), (String::new(), None, String::new()));
+    }
+
+    #[test]
+    fn a_rollup_and_the_page_part_survive_markdown() {
+        let t = budget();
+        let md = t.to_markdown("");
+        assert!(md.contains("<!-- columns: date | number USD sum | rollup Amount sum USD sum | formula USD sum = Budget - Spent -->"), "{md}");
+        assert!(md.contains("| page: Item text | Amount number USD sum | Category choice {Food:"), "{md}");
+        let lines: Vec<&str> = md.lines().collect();
+        let (back, _) = Table::from_markdown(&lines).unwrap();
+        assert_eq!(back.columns, t.columns);
+        let page = back.page.as_deref().unwrap();
+        assert_eq!((0..page.columns()).map(|c| (page.heading(c), page.kind(c))).collect::<Vec<_>>(), vec![("Item".to_string(), Kind::Text), ("Amount".to_string(), Kind::Number), ("Category".to_string(), Kind::Choice)]);
+        assert_eq!((page.column(1).format.as_str(), page.column(1).total), ("USD", Some(Total::Sum)));
+        assert_eq!(page.column(2).options.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(), vec!["Food", "Fun", "Bills"]);
+        assert_eq!(back.page, t.page);
+        // A name of more than one word, a way and no format.
+        let (t, _) = Table::from_markdown(&["| Day | Things |", "| --- | --- |", "| Mon |  |", "<!-- columns: text | rollup [Amount sum] count -->"]).unwrap();
+        assert_eq!((t.column(1).of.as_str(), t.column(1).way, t.column(1).total), ("Amount sum", Total::Count, None));
+        assert!(t.to_markdown("").contains("rollup [Amount sum] count -->"));
+        let (t, _) = Table::from_markdown(&["| Day | Paid |", "| --- | --- |", "| Mon |  |", "<!-- columns: text | rollup Paid on time highest -->"]).unwrap();
+        assert_eq!((t.column(1).of.as_str(), t.column(1).way), ("Paid on time", Total::Highest));
+        // With no way, a sum.
+        let (t, _) = Table::from_markdown(&["| Day | Spent |", "| --- | --- |", "| Mon |  |", "<!-- columns: text | rollup Amount EUR -->"]).unwrap();
+        assert_eq!((t.column(1).of.as_str(), t.column(1).way, t.column(1).format.as_str()), ("Amount", Total::Sum, "EUR"));
+    }
+
+    #[test]
+    fn a_rollup_is_kept_as_a_formula_that_an_older_rune_keeps() {
+        let t = budget();
+        let data = t.to_data();
+        let raw: serde_json::Value = serde_json::from_str(&data).unwrap();
+        assert_eq!(raw["columns"][2]["kind"], "formula");
+        assert_eq!(raw["columns"][2]["formula"], "rollup Amount sum");
+        assert_eq!(raw["columns"][2]["format"], "USD");
+        // What its `page:` said is never kept in its data.
+        assert!(t.page.is_some() && raw.get("page").is_none());
+        // Read back: the same table.
+        let t = Table { page: None, ..t };
+        assert_eq!(Table::parse(&data), t);
+        // (An older Rune read a kind it did not know as no table at all: that is why.)
+        assert!(serde_json::from_str::<Table>(r#"{"rows":[["a"]],"columns":[{"kind":"something new"}]}"#).is_err());
+        // Its formula is one that a formula cannot work out: an older Rune shows the cells empty.
+        assert!(crate::formula::Formula::parse("rollup Amount sum").is_err());
+        // A rollup made a number again forgets what it took.
+        let mut t = t;
+        t.set_kind(2, Kind::Number);
+        assert_eq!((t.column(2).of.as_str(), t.column(2).format.as_str()), ("", "USD"));
+        t.set_kind(2, Kind::Rollup);
+        t.set_rollup(2, " Amount   spent ", Total::Median);
+        assert_eq!((t.column(2).of.as_str(), t.column(2).way), ("Amount spent", Total::Sum));
+        assert_eq!(Table::parse(&t.to_data()), t);
+        // A name with a bar or a total in it, kept and written as Markdown.
+        for name in ["Paid | late", "Sum paid sum", ""] {
+            t.set_rollup(2, name, Total::Count);
+            assert_eq!(Table::parse(&t.to_data()), t, "{name}");
+            let md = t.to_markdown("");
+            let (back, _) = Table::from_markdown(&md.lines().collect::<Vec<_>>()).unwrap();
+            assert_eq!((back.column(2).of.as_str(), back.column(2).way), (name, Total::Count), "{md}");
+        }
     }
 }

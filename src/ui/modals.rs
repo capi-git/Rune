@@ -164,6 +164,7 @@ fn commands_now(state: &AppState) -> Vec<Cmd> {
     add("graph", "Graph of pages", "", "links map");
     add("toggle_sidebar", "Show or hide sidebar", "⌘\\", "");
     add("focus_mode", if state.ui.read().focus_mode { "Leave focus mode" } else { "Focus mode" }, "⌘.", "zen write distraction");
+    add("typewriter", if state.ui.read().typewriter { "Leave typewriter mode" } else { "Typewriter mode" }, "", "middle centre center scroll writer");
     let dark = match state.ui.read().theme {
         Theme::Dark => true,
         Theme::Light => false,
@@ -186,7 +187,10 @@ fn commands_now(state: &AppState) -> Vec<Cmd> {
         add("sync_now", "Sync now", "", "iphone icloud");
     }
     if crate::ai::shown() {
-        add("ai", "Ask AI", "⌘J", "assistant claude codex");
+        // (Not on a locked page: the AI does not read it.)
+        if !locked.is_locked() {
+            add("ai", "Ask AI", "⌘J", "assistant claude codex");
+        }
         add("ask_notes", "Ask your notes", "⌘⇧J", "assistant question");
     }
     if let Some(id) = page.as_deref() {

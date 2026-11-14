@@ -1352,6 +1352,37 @@ mod tests {
     }
 
     #[test]
+    fn lines_side_by_side_come_back_whole_from_the_iphone() {
+        let mut mac = Mac::new("columns");
+        let own = mac.own();
+        let base = version_of(&mac, "page", "plan");
+        let mut two = phone_page(Some(base), 50, "Plan", "Left");
+        two.page.as_mut().unwrap().blocks.push(SyncBlock { id: "b2".into(), kind: "text".into(), text: "Right".into(), ..Default::default() });
+        phone_writes(&own, 1, vec![two]);
+        mac.run(&[own.clone()]);
+        // The two lines stand side by side on the Mac: the change says so in their place.
+        let (left, right) = (r#"{"free":false,"right":false,"x":0,"y":0,"w":0,"col":1}"#, r#"{"free":false,"right":false,"x":0,"y":0,"w":0,"col":2}"#);
+        mac.sql(&format!("UPDATE blocks SET place = '{left}' WHERE id = 'b1'; UPDATE blocks SET place = '{right}' WHERE id = 'b2';"));
+        mac.run(&[own.clone()]);
+        let sent = mac.change_files(&own).pop().unwrap().changes.remove(0);
+        let page = sent.page.clone().unwrap();
+        assert_eq!(page.blocks.iter().map(|b| b.place.as_str()).collect::<Vec<_>>(), vec![left, right]);
+        assert_eq!(page.blocks.iter().map(|b| to_block(b).place.col).collect::<Vec<_>>(), vec![1, 2]);
+        // The iPhone of today changes the words of a line and sends the page
+        // back: `place` as it got it (it does not read it).
+        let now = version_of(&mac, "page", "plan");
+        let mut back = phone_page(Some(now), 400, "Plan", "Left, changed on the phone");
+        back.page.as_mut().unwrap().blocks = page.blocks.clone();
+        back.page.as_mut().unwrap().blocks[0].text = "Left, changed on the phone".into();
+        back.page.as_mut().unwrap().blocks.iter_mut().for_each(|b| b.tint = None);
+        phone_writes(&own, 2, vec![back]);
+        mac.run(&[own.clone()]);
+        assert_eq!(mac.one("SELECT text FROM blocks WHERE id = 'b1'"), "Text(\"Left, changed on the phone\")");
+        assert_eq!(mac.one("SELECT place FROM blocks WHERE id = 'b1'"), format!("Text({left:?})"));
+        assert_eq!(mac.one("SELECT place FROM blocks WHERE id = 'b2'"), format!("Text({right:?})"));
+    }
+
+    #[test]
     fn a_change_from_the_iphone_is_taken_and_not_sent_back() {
         let mut mac = Mac::new("reader");
         let own = mac.own();

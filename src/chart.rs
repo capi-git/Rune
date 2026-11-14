@@ -204,7 +204,7 @@ impl Chart {
     pub fn columns(&self, t: &Table) -> (Option<usize>, Option<usize>) {
         let tags = || (0..t.columns()).find(|&c| t.kind(c).has_options());
         let x = t.find_column(&self.x).or_else(|| if self.shape == Shape::Pie { tags() } else { t.first_of(Kind::Date) });
-        let y = t.find_column(&self.y).or_else(|| [Kind::Number, Kind::Time, Kind::Pace, Kind::Formula].into_iter().find_map(|k| t.first_of(k)));
+        let y = t.find_column(&self.y).or_else(|| [Kind::Number, Kind::Time, Kind::Pace, Kind::Formula, Kind::Rollup].into_iter().find_map(|k| t.first_of(k)));
         (x, y)
     }
 

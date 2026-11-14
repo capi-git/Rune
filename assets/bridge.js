@@ -557,6 +557,8 @@ const updateBar = () => {
   }
   const lb = b.querySelector('[data-fmt="link"]');
   if (lb) lb.classList.toggle('on', !!linkAt(el, s.start, s.end, runs));
+  // (No "say what to do" in a locked page: the AI does not read it.)
+  b.classList.toggle('no-ai', !!el.closest('.page.no-ai'));
   const rect = sel.getRangeAt(0).getBoundingClientRect();
   b.classList.add('show');
   const w = b.offsetWidth;
@@ -699,6 +701,8 @@ const markFocusLine = () => {
 
 const centreFocusLine = (always) => {
   const row = markFocusLine();
+  // (In typewriter mode the line has its own place: see below.)
+  if (typewriterOn()) return;
   if (!row || (!always && performance.now() - focusKeyAt > 400)) return;
   const scroller = row.closest('.scroller');
   const r = caretRect();
@@ -716,9 +720,64 @@ document.addEventListener('selectionchange', () => {
   if (focusOn()) requestAnimationFrame(() => centreFocusLine(false));
 });
 
+// ----- typewriter mode -------------------------------------------------------------
+// View ▸ Typewriter Mode: as keys are pressed (typing, the arrows, Return),
+// the line with the caret is kept at 45 % of the height of its pane, with a
+// short glide (a jump when the Mac asks for less motion). The page has room
+// at its end for the last line to come up to there (style.css). A press or a
+// drag of the mouse moves nothing, nor does the caret in the title or in a
+// table (a cell keeps its own scroll). With focus mode too, this places the line.
+function typewriterOn() {
+  return !!document.querySelector('.app.typewriter');
+}
+const TYPEWRITER_AT = 0.45;
+let glide = 0;
+// When a key was pressed last. A press of the mouse ends its time: the
+// caret it puts, or a selection it draws, moves nothing.
+let typedAt = 0;
+document.addEventListener('keydown', () => (typedAt = performance.now()), true);
+document.addEventListener('mousedown', () => (typedAt = 0), true);
+const glideTo = (scroller, top) => {
+  cancelAnimationFrame(glide);
+  const from = scroller.scrollTop;
+  if (Math.abs(top - from) < 1 || matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    scroller.scrollTop = top;
+    return;
+  }
+  const t0 = performance.now();
+  const step = (now) => {
+    const k = Math.min(1, (now - t0) / 150);
+    scroller.scrollTop = from + (top - from) * (1 - Math.pow(1 - k, 3));
+    if (k < 1) glide = requestAnimationFrame(step);
+  };
+  glide = requestAnimationFrame(step);
+};
+const typewriterLine = (always) => {
+  if (!typewriterOn() || (!always && performance.now() - typedAt > 400)) return;
+  const sel = getSelection();
+  const blk = sel && sel.rangeCount ? blockOf(sel.focusNode) : null;
+  if (!blk || blk.closest('.table-block, .row-values')) return;
+  const scroller = blk.closest('.scroller');
+  const r = caretRect();
+  if (!scroller || !r || (!r.height && !r.top)) return;
+  const box = scroller.getBoundingClientRect();
+  const delta = r.top + r.height / 2 - (box.top + box.height * TYPEWRITER_AT);
+  if (Math.abs(delta) < 2) return;
+  // (In points of the window; the scroll is in the page's own: see zoomOf.)
+  const most = scroller.scrollHeight - scroller.clientHeight;
+  glideTo(scroller, Math.max(0, Math.min(most, scroller.scrollTop + delta / zoomOf(scroller))));
+};
+document.addEventListener('selectionchange', () => {
+  if (typewriterOn()) requestAnimationFrame(() => typewriterLine(false));
+});
+
 // ----- API used from Rust -----------------------------------------------------
 
 window.__rune = {
+  // Typewriter mode was turned on: the line with the caret goes to its place.
+  typewriter(on) {
+    if (on) requestAnimationFrame(() => requestAnimationFrame(() => typewriterLine(true)));
+  },
   focusMode(on) {
     requestAnimationFrame(() =>
       requestAnimationFrame(() => {
@@ -1077,12 +1136,18 @@ document.addEventListener(
 
     // Plain typing is handled by the input event; only these keys need the
     // caret position (which isn't free to measure).
-    if (!(e.key === 'Enter' || e.key === 'Backspace' || e.key === 'Delete' || e.key === 'Tab' || e.key.startsWith('Arrow') || (cmd && key === 'd'))) return;
+    if (!(e.key === 'Enter' || e.key === 'Backspace' || e.key === 'Delete' || e.key === 'Tab' || e.key.startsWith('Arrow') || (cmd && (key === 'd' || key === 'p')))) return;
     const s = selIn(t) || { start: 0, end: 0 };
 
     if (cmd && e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
       e.preventDefault();
       send({ t: 'block', action: e.key === 'ArrowUp' ? 'move_up' : 'move_down', page, id, pos: s.start });
+      return;
+    }
+    // ⌘⇧P: "Move to…" for this line, with what is nested in it.
+    if (cmd && e.shiftKey && key === 'p') {
+      e.preventDefault();
+      send({ t: 'block', action: 'move_to', page, id, pos: 0 });
       return;
     }
     if (cmd && !e.shiftKey && !e.altKey && key === 'd') {
@@ -1123,6 +1188,13 @@ document.addEventListener(
       return;
     }
     if (e.key === 'Delete') return;
+    // Math in a line: Tab at the end of a line that shows an answer keeps
+    // the answer, as text of the line.
+    if (e.key === 'Tab' && t.dataset.calc && !e.shiftKey && !e.metaKey && !e.altKey && !e.ctrlKey && s.start === s.end && s.end >= textLen(t)) {
+      e.preventDefault();
+      document.execCommand('insertText', false, (/\s$/.test(t.textContent) ? '' : ' ') + t.dataset.calc);
+      return;
+    }
     if (e.key === 'Tab') {
       e.preventDefault();
       if (code && !e.shiftKey) {
@@ -1138,7 +1210,9 @@ document.addEventListener(
       if (atStart || (e.key === 'ArrowUp' && s.start === s.end && caretLine(t).first)) {
         e.preventDefault();
         if (e.key === 'ArrowUp') keepNav('up');
-        send({ t: 'nav', dir: 'up', page, id });
+        // (Up passes over the other columns of a set, unless a narrow pane
+        // shows them one under the other; Left goes on from line to line.)
+        send({ t: 'nav', dir: e.key === 'ArrowUp' && !stackedColumns(t) ? 'up' : 'left', page, id });
       }
       return;
     }
@@ -1148,7 +1222,7 @@ document.addEventListener(
       if (atEnd || (e.key === 'ArrowDown' && s.start === s.end && caretLine(t).last)) {
         e.preventDefault();
         if (e.key === 'ArrowDown') keepNav('down');
-        send({ t: 'nav', dir: 'down', page, id });
+        send({ t: 'nav', dir: e.key === 'ArrowDown' && !stackedColumns(t) ? 'down' : 'right', page, id });
       }
     }
   },
@@ -1557,10 +1631,13 @@ document.addEventListener('mousedown', (e) => {
     const min = Math.min(PANE_MIN_PX, pair / 3);
     const foldAt = Math.max(RAIL_PX + 12, min - FOLD_PULL_PX);
     const openAt = Math.min(RAIL_OPEN_PX, Math.max(RAIL_PX + 12, pair / 3));
-    // The width each side would have with the line under the pointer.
+    // The width each side would have with the line under the pointer. (In a
+    // tab of several pages the line is a gap between two cards: its middle
+    // follows the pointer.)
+    const half = Math.max(0, b0 - a1) / 2;
     const sides = [
-      [index, pointer - a0],
-      [index + 1, b1 - pointer],
+      [index, pointer - half - a0],
+      [index + 1, b1 - pointer - half],
     ];
     for (const [i, width] of sides) {
       if (refused.has(i) || !cs[i].dataset.leaf) continue;
@@ -1584,7 +1661,7 @@ document.addEventListener('mousedown', (e) => {
       const both = a1 - a0 + (b1 - b0);
       const grow = growOf(a) + growOf(b);
       if (both > 0 && grow > 0) {
-        const width = Math.min(both - min, Math.max(min, pointer - a0));
+        const width = Math.min(both - min, Math.max(min, pointer - half - a0));
         a.style.flexGrow = String((grow * width) / both);
         b.style.flexGrow = String(grow - (grow * width) / both);
         changed = true;
@@ -1744,6 +1821,15 @@ const containingBlock = (el) => {
 // screen; `left` and `top` inside the card are in its zoomed points.
 // (Read from the card, not from the element: a menu that opens grows with a
 // motion, and its drawn size is not its size yet.)
+// The lines of a page: the rows of its `.blocks`, and the rows in its sets
+// of columns (src/columns.rs), in their order. (`within`: from `.blocks`.)
+const pageRows = (more = '') => `.blocks > .block-row${more}, .blocks > .columns > .column > .block-row${more}`;
+const rowsWithin = (more = '') => `:scope > .block-row${more}, :scope > .columns > .column > .block-row${more}`;
+// The columns of the line `el` stand one under the other (a narrow pane).
+const stackedColumns = (el) => {
+  const set = el.closest('.columns');
+  return !!set && getComputedStyle(set).flexDirection === 'column';
+};
 const zoomOf = (el) => {
   let z = 1;
   for (let n = el.parentElement; n && n !== document.body; n = n.parentElement) {
@@ -1752,6 +1838,36 @@ const zoomOf = (el) => {
   }
   return z;
 };
+
+// ----- math in a line: the grey answer at the end of a line ------------------
+// The page draws it after the text (`.blk[data-calc]::after`), so it is no
+// part of the line. A press on it copies it and leaves the caret where it is.
+// It starts where the text ends, on the text's last line, and is as wide as
+// its words in the line's letters.
+const calcCanvas = document.createElement('canvas');
+const onCalc = (el, x, y) => {
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  const rects = range.getClientRects();
+  const end = rects[rects.length - 1];
+  if (!end) return false;
+  const cs = getComputedStyle(el);
+  const ctx = calcCanvas.getContext('2d');
+  ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+  const wide = ctx.measureText(' ' + el.dataset.calc).width * zoomOf(el);
+  return x >= end.right - 1 && x <= end.right + wide + 2 && y >= end.top - 2 && y <= end.bottom + 2;
+};
+document.addEventListener(
+  'mousedown',
+  (e) => {
+    const el = e.button === 0 && e.target.closest && e.target.closest('.blk[data-calc]');
+    if (!el || !onCalc(el, e.clientX, e.clientY)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    send({ t: 'copy_answer', text: el.dataset.calc.replace(/^= /, '') });
+  },
+  true,
+);
 
 const anchorMenu = (menu) => {
   const anchor = menu.parentElement;
@@ -2327,11 +2443,30 @@ document.addEventListener('dragstart', (e) => {
   }
 });
 
+// At the left or the right edge of a line, the dragged line goes beside
+// it: the two stand in columns (src/columns.rs). (Not over the handles at
+// its left: a line dragged by its handle straight up or down goes there.)
+// Beside a line of the top level, or beside a line of a set that has room
+// for one more column (three at most). Gives the side, or null.
+const SIDE_EDGE = 60;
+const sideOf = (e, row) => {
+  if (row.classList.contains('free') || row.classList.contains('side')) return null;
+  const set = row.closest('.columns');
+  if (set) {
+    const from = [...document.querySelectorAll('.block-row[data-id]')].find((r) => r.dataset.id === dragId);
+    if (set.children.length >= 3 && !(from && set.contains(from))) return null;
+  } else if (parseFloat(row.style.paddingLeft) > 0) return null;
+  const r = row.getBoundingClientRect();
+  const edge = Math.min(SIDE_EDGE * zoomOf(row), r.width * 0.15);
+  if (e.clientX >= r.left && e.clientX < r.left + edge) return 'left';
+  if (e.clientX > r.right - edge) return 'right';
+  return null;
+};
 const dropTarget = (e) => {
   const row = e.target && e.target.closest && e.target.closest('.block-row');
   if (!row || row.dataset.id === dragId) return null;
   const rect = row.getBoundingClientRect();
-  return { row, after: e.clientY >= rect.top + rect.height / 2 };
+  return { row, after: e.clientY >= rect.top + rect.height / 2, side: sideOf(e, row) };
 };
 
 document.addEventListener('dragover', (e) => {
@@ -2340,7 +2475,9 @@ document.addEventListener('dragover', (e) => {
   if (!target) return;
   e.preventDefault();
   e.dataTransfer.dropEffect = 'move';
-  markRow(target.row, target.after ? 'drop-after' : 'drop-before');
+  // A side of a line in a set marks that side of its whole column.
+  if (target.side) markRow(target.row.closest('.column') || target.row, `drop-${target.side}`);
+  else markRow(target.row, target.after ? 'drop-after' : 'drop-before');
 });
 
 const endDrag = () => {
@@ -2354,7 +2491,7 @@ document.addEventListener('drop', (e) => {
   e.preventDefault();
   const target = dropTarget(e);
   if (target) {
-    send({ t: 'move', page: target.row.dataset.page, from: dragId, to: target.row.dataset.id, after: target.after });
+    send({ t: 'move', page: target.row.dataset.page, from: dragId, to: target.row.dataset.id, after: target.after, side: target.side || undefined });
   }
   endDrag();
 });
@@ -2674,7 +2811,7 @@ const holdsFiles = (e) => e.dataTransfer && [...e.dataTransfer.types].includes('
 const rowAtHeight = (pane, y) => {
   let best = null;
   let gap = Infinity;
-  for (const row of pane.querySelectorAll('.blocks > .block-row[data-id]')) {
+  for (const row of pane.querySelectorAll(pageRows('[data-id]'))) {
     const box = row.getBoundingClientRect();
     if (!box.height) continue;
     const away = y < box.top ? box.top - y : y > box.bottom ? y - box.bottom : 0;
@@ -2702,7 +2839,7 @@ document.addEventListener('drop', (e) => {
   if (!id) {
     // The row it was let go on (a picture, a table or a divider too), else
     // the row at that height (above the first line: the first line).
-    const row = under && under.closest('.blocks > .block-row[data-id]');
+    const row = under && under.closest(pageRows('[data-id]'));
     const pane = under && under.closest('.pane');
     const at = row || (pane && rowAtHeight(pane, e.clientY));
     if (!at) return;
@@ -4278,7 +4415,7 @@ window.addEventListener(
         page = t.dataset.page;
       } else {
         const pane = document.querySelector('.pane.focused') || document.querySelector('.pane');
-        const row = pane && pane.querySelector('.blocks > .block-row[data-page]');
+        const row = pane && pane.querySelector(pageRows('[data-page]'));
         page = row && row.dataset.page;
       }
       if (!page) return;
@@ -4298,7 +4435,7 @@ window.addEventListener(
       send(name === 'pick_clear' ? { t: 'pick_clear' } : { t: 'shortcut', name });
     };
     if (e.shiftKey && !cmd && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
-      const all = [...pickedRows()[0].parentElement.querySelectorAll(':scope > .block-row[data-id]')];
+      const all = [...pickedRows()[0].closest('.blocks').querySelectorAll(rowsWithin('[data-id]'))];
       const on = all.map((r, i) => (r.classList.contains('picked') ? i : -1)).filter((i) => i >= 0);
       // Keys pressed fast, before the marks of the last press are drawn: go
       // on from where the last press reached.
@@ -4316,6 +4453,17 @@ window.addEventListener(
       }
       return;
     }
+    // ⌘⇧P: "Move to…" for them. Its list hangs on the first of them that
+    // is in sight (one out of sight would close it at once).
+    if (cmd && e.shiftKey && key === 'p') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      const rows = [...pickedRows()];
+      const seen = rows.find((r) => inSight(r, true)) || rows[0];
+      if (!inSight(seen, true)) seen.scrollIntoView({ block: 'nearest' });
+      send({ t: 'block', action: 'move_to', page: seen.dataset.page, id: seen.dataset.id, pos: 0 });
+      return;
+    }
     if (cmd && key === 'c') act('picked_copy');
     else if (cmd && key === 'x') act('picked_cut');
     // (Not while the AI is asked about them: the keyboard may be on the page
@@ -4330,7 +4478,7 @@ document.addEventListener(
   (e) => {
     if (e.button !== 0 || e.ctrlKey || !e.target.closest) return;
     const t = e.target;
-    const row = t.closest('.blocks > .block-row');
+    const row = t.closest(pageRows());
     // What has a use of its own for a press: text, controls, pictures, tables, drawings.
     const own = t.closest('.blk, input, textarea, select, button, a, .gutter, .marker, .image-block, .table-wrap, .row-values, .drawing, .video-embed, .popover, .ai-panel, .page-link, .code-wrap, .callout-icon, .check, .toggle-arrow');
     const some = pickedRows().length > 0;
@@ -4341,8 +4489,9 @@ document.addEventListener(
       send({ t: 'pick', page: row.dataset.page, id: row.dataset.id, extend: e.shiftKey && some });
       return;
     }
-    // (A press on the AI box keeps what is picked: the request is about it.)
-    if (some && !t.closest('.ai-dock')) send({ t: 'pick_clear' });
+    // (A press on the AI box keeps what is picked: the request is about it.
+    // So does one on "Move to…" and on its list of pages.)
+    if (some && !t.closest('.ai-dock, .move-menu, #move-lines')) send({ t: 'pick_clear' });
   },
   true,
 );
@@ -4426,7 +4575,7 @@ window.addEventListener(
 const WHITE = /[\t\n\v\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+/;
 const wordsIn = (text) => text.replace(/[\u200b\ufeff]/g, '').split(WHITE).filter(Boolean).length;
 const selWords = () => {
-  const lines = [...document.querySelectorAll('.blocks[data-picked-words]')].find((b) => Number(b.dataset.pickedWords) > 0 && b.querySelector(':scope > .block-row.picked'));
+  const lines = [...document.querySelectorAll('.blocks[data-picked-words]')].find((b) => Number(b.dataset.pickedWords) > 0 && b.querySelector(rowsWithin('.picked')));
   if (lines) return { n: Number(lines.dataset.pickedWords), pane: lines.closest('.pane') };
   const sel = getSelection();
   if (!sel || !sel.rangeCount || sel.isCollapsed) return null;
@@ -4485,7 +4634,7 @@ const marqueeRows = (m) => {
   // Where each block is in the page (not in the window: the page scrolls).
   const sx = m.scroller.scrollLeft * m.z;
   const sy = m.scroller.scrollTop * m.z;
-  m.rows = [...m.blocks.querySelectorAll(':scope > .block-row[data-id]')].map((row) => {
+  m.rows = [...m.blocks.querySelectorAll(rowsWithin('[data-id]'))].map((row) => {
     const r = row.getBoundingClientRect();
     return { row, left: r.left + sx, right: r.right + sx, top: r.top + sy, bottom: r.bottom + sy, depth: Math.round((parseFloat(row.style.paddingLeft) || 0) / 26) };
   });
@@ -4604,13 +4753,13 @@ document.addEventListener(
     const t = e.target;
     const scroller = t.closest('.scroller');
     const blocks = scroller && scroller.querySelector(':scope > .page > .blocks');
-    const row = blocks && blocks.querySelector(':scope > .block-row[data-page]');
+    const row = blocks && blocks.querySelector(rowsWithin('[data-page]'));
     if (!row) return;
     // The empty part of the page only: not its heading, not what has a use of
     // its own for a press.
     // (The frame of a table itself, with no cell or control under the press,
     // is its empty edge: the strip at its left, the space under its rows.)
-    const empty = t === scroller || t.matches('.page, .blocks, .page-tail') || (t.closest('.blocks > .block-row') && (!t.closest(MARQUEE_OWN) || t.matches('.table-block')));
+    const empty = t === scroller || t.matches('.page, .blocks, .columns, .column, .page-tail') || (t.closest(pageRows()) && (!t.closest(MARQUEE_OWN) || t.matches('.table-block')));
     if (!empty) return;
     // (A zoomed page scrolls in its own units: places in the window are those
     // times the zoom.)
@@ -4811,7 +4960,8 @@ const placeLineMic = () => {
   const mic = lineMic();
   if (!mic) return;
   const el = document.activeElement;
-  const row = isBlock(el) ? el.closest('.block-row.kind-text') : null;
+  // (Not in a locked page: the AI does not read it.)
+  const row = isBlock(el) && !el.closest('.page.no-ai') ? el.closest('.block-row.kind-text') : null;
   const busy = document.querySelector('.slash-menu, .modal-backdrop, .popover');
   if (!row || el.textContent !== '' || busy) {
     mic.classList.remove('show');

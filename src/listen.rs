@@ -575,7 +575,7 @@ pub fn put_under(page: &mut Vec<Block>, toggle: &mut Option<Id>, title: &str, co
             *toggle = Some(head.id.clone());
             match after.and_then(|id| page.iter().position(|b| b.id == id)) {
                 Some(line) => {
-                    head.indent = page[line].indent;
+                    head = head.next_to(&page[line]);
                     page.insert(line + 1, head);
                     line + 1
                 }
@@ -586,12 +586,13 @@ pub fn put_under(page: &mut Vec<Block>, toggle: &mut Option<Id>, title: &str, co
             }
         }
     };
-    let depth = page[at].indent;
-    // What the toggle holds: the deeper blocks after it.
-    let end = page[at + 1..].iter().position(|b| b.indent <= depth).map(|i| at + 1 + i).unwrap_or(page.len());
+    let (depth, col) = (page[at].indent, page[at].place.col);
+    // What the toggle holds: the deeper blocks after it (in its column).
+    let end = crate::model::subtree_end(page, at);
     let mut lines = lines;
     for (i, line) in lines.iter_mut().enumerate() {
         line.indent += depth;
+        line.place.col = col;
         // Lines already there keep their ids, so the page is not redrawn for them.
         if let Some(old) = page[at + 1..end].get(i) {
             line.id = old.id.clone();
@@ -610,7 +611,7 @@ pub fn transcript_so_far(page: &[Block]) -> (Option<Id>, usize) {
     let Some(at) = page.iter().rposition(|b| b.kind == BlockKind::Toggle && b.indent == 0 && b.plain_text().trim().eq_ignore_ascii_case("Transcript")) else {
         return (None, 0);
     };
-    let lines = page[at + 1..].iter().take_while(|b| b.indent > 0).count();
+    let lines = crate::model::subtree_end(page, at) - (at + 1);
     (Some(page[at].id.clone()), lines)
 }
 
@@ -620,9 +621,8 @@ pub fn heard_before(page: &[Block], from: usize) -> String {
     let Some(at) = page.iter().rposition(|b| b.kind == BlockKind::Toggle && b.indent == 0 && b.plain_text().trim().eq_ignore_ascii_case("Transcript")) else {
         return String::new();
     };
-    page[at + 1..]
+    page[at + 1..crate::model::subtree_end(page, at)]
         .iter()
-        .take_while(|b| b.indent > 0)
         .skip(from)
         .filter_map(|b| {
             let plain = b.plain_text();
@@ -647,7 +647,7 @@ pub fn last_part(page: &[Block]) -> usize {
     let Some(at) = page.iter().rposition(|b| b.kind == BlockKind::Toggle && b.indent == 0 && b.plain_text().trim().eq_ignore_ascii_case("Transcript")) else {
         return 0;
     };
-    page[at + 1..].iter().take_while(|b| b.indent > 0).enumerate().filter(|(_, b)| b.text.starts_with(AGAIN)).map(|(i, _)| i).last().unwrap_or(0)
+    page[at + 1..crate::model::subtree_end(page, at)].iter().enumerate().filter(|(_, b)| b.text.starts_with(AGAIN)).map(|(i, _)| i).last().unwrap_or(0)
 }
 
 const AGAIN: &str = "_Listening started again at ";
@@ -679,11 +679,15 @@ pub fn put_transcript(page: &mut Vec<Block>, toggle: &mut Option<Id>, kept: usiz
             page.len() - 1
         }
     };
-    // What the toggle holds: the indented blocks after it.
-    let end = page[at + 1..].iter().position(|b| b.indent == 0).map(|i| at + 1 + i).unwrap_or(page.len());
+    // What the toggle holds: the indented blocks after it (in its column,
+    // when it was put in one: the lines go there too).
+    let end = crate::model::subtree_end(page, at);
     let from = (at + 1 + kept).min(end);
     // Lines already there keep their ids, so the page is not redrawn for them.
     let mut lines = lines;
+    for line in lines.iter_mut() {
+        line.place.col = page[at].place.col;
+    }
     for (new, old) in lines.iter_mut().zip(&page[from..end]) {
         new.id = old.id.clone();
     }
@@ -700,7 +704,7 @@ pub fn put_transcript(page: &mut Vec<Block>, toggle: &mut Option<Id>, kept: usiz
 pub fn keep_changes(page: &[Block], toggle: Option<&Id>, kept: usize, written: &mut Vec<String>, lines: &mut [Block]) {
     let heard: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
     if let Some(at) = toggle.and_then(|id| page.iter().position(|b| &b.id == id)) {
-        let end = page[at + 1..].iter().position(|b| b.indent == 0).map(|i| at + 1 + i).unwrap_or(page.len());
+        let end = crate::model::subtree_end(page, at);
         let from = (at + 1 + kept).min(end);
         if end - from == written.len() {
             for ((line, old), was) in lines.iter_mut().zip(&page[from..end]).zip(written.iter()) {

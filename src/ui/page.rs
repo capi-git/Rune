@@ -604,6 +604,10 @@ pub fn PageView(page_id: String) -> Element {
         Some(Popover::Due { block_id, .. }) => Some(block_id.clone()),
         _ => None,
     };
+    let move_menu = match &ui.popover {
+        Some(Popover::MoveLines { page, block, ids }) if *page == page_id => Some((block.clone(), ids.clone())),
+        _ => None,
+    };
     let icon_picker = matches!(&ui.popover, Some(Popover::IconPicker { page_id: p }) if *p == page_id);
     let cover_picker = matches!(&ui.popover, Some(Popover::CoverPicker { page_id: p }) if *p == page_id);
     // The headings folded on this page: the lines under them are not drawn.
@@ -626,8 +630,12 @@ pub fn PageView(page_id: String) -> Element {
         Some((i + 1, if heading_level(blocks[i].kind).is_some() { section_end(&blocks, i) } else { subtree_end(&blocks, i) }))
     });
     let sides = side_lines(&blocks);
+    // Math in a line: the answer at the end of a line that ends with "=".
+    let mut answers = crate::calc::answers(&blocks);
+    // Lines that stand side by side (see columns.rs).
+    let places = crate::columns::layout(&blocks);
     let mut appear_n = 0usize;
-    let rows: Vec<(Block, Option<usize>, bool, Option<usize>, (u8, bool), Option<(bool, String)>)> = blocks
+    let rows: Vec<(Row, Option<(usize, usize)>)> = blocks
         .iter()
         .enumerate()
         .filter(|(i, _)| visible[*i])
@@ -647,7 +655,64 @@ pub fn PageView(page_id: String) -> Element {
                 };
                 (is_folded || end > i + 1).then_some((is_folded, hidden))
             });
-            (b.clone(), numbers[i], has_children(&blocks, i), appear, sides[i], fold)
+            ((b.clone(), numbers[i], has_children(&blocks, i), appear, sides[i], fold, answers[i].take()), places[i])
+        })
+        .collect();
+    // The lines in order, those of a set of columns together: (the set's
+    // number, its columns), or (none, one line).
+    let mut parts: Vec<(Option<usize>, Vec<Vec<Row>>)> = Vec::new();
+    for (row, at) in rows {
+        match at {
+            None => parts.push((None, vec![vec![row]])),
+            Some((set, c)) => {
+                if !matches!(parts.last(), Some((Some(s), _)) if *s == set) {
+                    parts.push((Some(set), Vec::new()));
+                }
+                let cols = &mut parts.last_mut().expect("just pushed").1;
+                cols.resize_with(cols.len().max(c + 1), Vec::new);
+                cols[c].push(row);
+            }
+        }
+    }
+    let line = |(block, number, kids, appear, (side, side_last), fold, calc): Row| {
+        rsx! {
+            BlockRow {
+                key: "{block.id}",
+                appear,
+                fold,
+                calc,
+                side,
+                side_last,
+                page_id: page_id.clone(),
+                slash: slash.clone().filter(|s| s.block_id == block.id),
+                menu_open: block_menu.as_deref() == Some(block.id.as_str()),
+                due_open: due_menu.as_deref() == Some(block.id.as_str()),
+                move_lines: move_menu.as_ref().filter(|(at, _)| *at == block.id).map(|(_, ids)| ids.clone()),
+                picked: picked.contains(&block.id),
+                number,
+                has_children: kids,
+                block,
+            }
+        }
+    };
+    let parts: Vec<Element> = parts
+        .into_iter()
+        .map(|(set, cols)| match set {
+            None => cols.into_iter().flatten().map(line).next().unwrap_or_else(|| rsx! {}),
+            Some(n) => {
+                let count = cols.len();
+                rsx! {
+                    div { key: "columns-{n}", class: "columns", "data-count": "{count}",
+                        for (c, lines) in cols.into_iter().enumerate() {
+                            div { key: "{c}", class: "column", "data-col": "{c + 1}",
+                                for row in lines {
+                                    {line(row)}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         })
         .collect();
 
@@ -686,8 +751,10 @@ pub fn PageView(page_id: String) -> Element {
     // A meeting's page: who spoke when, from its transcript lines.
     let voices = crate::listen::voices(&crate::listen::spoken_in(&blocks));
     let page_class = format!(
-        "page{}{}",
+        "page{}{}{}",
         if has_cover { " has-cover" } else { "" },
+        // (An open locked page shows nothing of the AI: see `.no-ai`.)
+        if crate::lock::is_open(&page_id) { " no-ai" } else { "" },
         match page.font.as_str() {
             "serif" => " font-serif",
             "mono" => " font-mono",
@@ -839,23 +906,7 @@ pub fn PageView(page_id: String) -> Element {
                 MeetingBand { page_id: page_id.clone(), voices: v }
             }
             div { class: "blocks", "data-picked-words": "{picked_words}",
-                for (block, number, kids, appear, (side, side_last), fold) in rows {
-                    BlockRow {
-                        key: "{block.id}",
-                        appear,
-                        fold,
-                        side,
-                        side_last,
-                        page_id: page_id.clone(),
-                        slash: slash.clone().filter(|s| s.block_id == block.id),
-                        menu_open: block_menu.as_deref() == Some(block.id.as_str()),
-                        due_open: due_menu.as_deref() == Some(block.id.as_str()),
-                        picked: picked.contains(&block.id),
-                        number,
-                        has_children: kids,
-                        block,
-                    }
-                }
+                {parts.into_iter()}
             }
             // The pages that link to this one.
             if !backlinks.is_empty() {
@@ -884,6 +935,11 @@ pub fn PageView(page_id: String) -> Element {
     }
 }
 
+/// What a line of the page is drawn with: the line, its number in a list,
+/// whether lines are nested in it, its place in a reveal, how many tables
+/// stand in its line, and its fold.
+type Row = (Block, Option<usize>, bool, Option<usize>, (u8, bool), Option<(bool, String)>, Option<String>);
+
 /// The room between two tables that stand in one line.
 const SIDE_GAP: usize = 44;
 
@@ -896,7 +952,7 @@ fn side_lines(blocks: &[Block]) -> Vec<(u8, bool)> {
     while i < blocks.len() {
         let mut end = i + 1;
         if blocks[i].kind == BlockKind::Table {
-            while end < blocks.len() && end - i < 3 && blocks[end].kind == BlockKind::Table && blocks[end].place.beside {
+            while end < blocks.len() && end - i < 3 && blocks[end].kind == BlockKind::Table && blocks[end].place.beside && blocks[end].place.col == blocks[i].place.col {
                 end += 1;
             }
         }
@@ -961,6 +1017,9 @@ fn BlockRow(
     slash: Option<SlashState>,
     menu_open: bool,
     #[props(default)] due_open: bool,
+    /// "Move to…" is open at this line, for these lines.
+    #[props(default)]
+    move_lines: Option<Vec<Id>>,
     #[props(default)] picked: bool,
     #[props(!optional)] appear: Option<usize>,
     /// How many tables stand in this block's line (0: it has the line to
@@ -972,6 +1031,10 @@ fn BlockRow(
     /// words of the lines it then hides.
     #[props(!optional)]
     fold: Option<(bool, String)>,
+    /// The answer of math in the line, drawn after its text in grey (it is
+    /// no part of the text: see `.blk[data-calc]` in style.css).
+    #[props(!optional)]
+    calc: Option<String>,
 ) -> Element {
     let state = use_context::<AppState>();
     // A diagram shows its code only while it is edited (an empty one always does).
@@ -1042,6 +1105,7 @@ fn BlockRow(
             "data-menu": "{menu_flag}",
             "data-placeholder": "{placeholder}",
             "data-html": "{html}",
+            "data-calc": calc,
             spellcheck: kind != BlockKind::Code,
         }
     };
@@ -1231,6 +1295,9 @@ fn BlockRow(
             }
             if menu_open {
                 BlockMenu { page_id: page_id.clone(), block: block }
+            }
+            if let Some(ids) = move_lines {
+                MoveMenu { page_id: page_id.clone(), ids }
             }
             if let Some(s) = slash {
                 SlashMenu { slash: s }
@@ -1571,7 +1638,7 @@ fn SlashMenu(slash: SlashState) -> Element {
             }
         };
     }
-    let items = filter_slash(&slash.query);
+    let items = filter_slash(&slash.query, &slash.page_id);
     rsx! {
         div {
             class: "popover slash-menu",
@@ -1615,6 +1682,8 @@ fn BlockMenu(page_id: String, block: Block) -> Element {
     // A line whose video picture was put away can show it again.
     let video_hidden = block.data == crate::video::HIDDEN && crate::video::in_block(block.kind, &block.text).is_some();
     let (p3, b3) = (page_id.clone(), id.clone());
+    let (p4, b4) = (page_id.clone(), id.clone());
+    let locked = state.locked_lines(&page_id);
 
     rsx! {
         div { class: "popover block-menu", onclick: move |e| e.stop_propagation(),
@@ -1633,6 +1702,14 @@ fn BlockMenu(page_id: String, block: Block) -> Element {
                 span { class: "menu-icon", Icon { name: "duplicate", size: 16 } }
                 span { "Duplicate" }
                 span { class: "menu-shortcut", "⌘D" }
+            }
+            // (Not on a locked page, shut or open: its lines stay in it.)
+            if !locked {
+                div { class: "menu-item compact", id: "move-lines", onclick: move |_| state.open_move_lines(&p4, &b4),
+                    span { class: "menu-icon", Icon { name: "arrow-right", size: 16 } }
+                    span { "Move to…" }
+                    span { class: "menu-shortcut", "⌘⇧P" }
+                }
             }
             if editable {
                 div { class: "menu-section", "Turn into" }
@@ -1687,7 +1764,7 @@ fn BlockMenu(page_id: String, block: Block) -> Element {
                     }
                 }
             }
-            if editable && has_text && *state.ai_on.read() {
+            if editable && has_text && *state.ai_on.read() && !crate::lock::is_open(&page_id) {
                 div { class: "menu-section", "AI" }
                 for action in ai_actions {
                     div {
@@ -1698,6 +1775,134 @@ fn BlockMenu(page_id: String, block: Block) -> Element {
                         },
                         span { class: "menu-icon", Icon { name: "sparkles", size: 16 } }
                         span { "{action.label()}" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// "Move to…" for lines: a box to find a page, the pages that match it
+/// (with nothing typed, those changed last), and "New page" at the end. A
+/// choice moves the lines to the end of that page (`move_lines_to`). It
+/// hangs on its line as the menu of a line does (bridge.js places it).
+#[component]
+fn MoveMenu(page_id: String, ids: Vec<Id>) -> Element {
+    let state = use_context::<AppState>();
+    let mut query = use_signal(String::new);
+    let mut active = use_signal(|| 0usize);
+    // "New page…" with nothing typed: the box asks for the name first.
+    let mut naming = use_signal(|| false);
+    let q = query();
+    let typed = q.trim().to_string();
+    let found: Vec<(Id, Option<String>, String)> = if naming() {
+        Vec::new()
+    } else {
+        state.move_lines_choices(&page_id, &typed).into_iter().map(|p| (p.id.clone(), p.icon.clone(), p.display_title().to_string())).collect()
+    };
+    let len = found.len() + 1;
+    let at = active().min(len - 1);
+    let count = ids.len();
+    let choose = {
+        let (page_id, ids, found) = (page_id.clone(), ids.clone(), found.clone());
+        move |i: usize| {
+            let typed = query.peek().trim().to_string();
+            match found.get(i) {
+                Some((to, ..)) => state.move_lines_to(&page_id, &ids, to),
+                None if typed.is_empty() => {
+                    let mut naming = naming;
+                    naming.set(true);
+                    document::eval("document.querySelector('.move-menu .menu-search-input')?.focus()");
+                }
+                None => state.move_lines_to_new(&page_id, &ids, &typed),
+            }
+        }
+    };
+    let keys = {
+        let choose = choose.clone();
+        move |e: KeyboardEvent| match e.key() {
+            Key::ArrowDown | Key::ArrowUp => {
+                e.prevent_default();
+                let next = if e.key() == Key::ArrowDown { (at + 1) % len } else { (at + len - 1) % len };
+                active.set(next);
+            }
+            Key::Enter => {
+                e.prevent_default();
+                choose(at);
+            }
+            Key::Escape => {
+                e.prevent_default();
+                e.stop_propagation();
+                state.set_popover(None);
+            }
+            _ => {}
+        }
+    };
+    let label = if count == 1 { "Move 1 line to".to_string() } else { format!("Move {count} lines to") };
+    rsx! {
+        div { class: "popover block-menu move-menu", role: "menu", "aria-label": "{label}", onclick: move |e| e.stop_propagation(),
+            div { class: "menu-search",
+                Icon { name: "search", size: 13 }
+                input {
+                    class: "menu-search-input",
+                    placeholder: if naming() { "Name of the new page" } else { "Search pages…" },
+                    "aria-label": if naming() { "Name of the new page" } else { "Find a page" },
+                    spellcheck: false,
+                    value: "{q}",
+                    onmounted: move |e: MountedEvent| async move {
+                        let _ = e.set_focus(true).await;
+                    },
+                    oninput: move |e: FormEvent| {
+                        query.set(e.value());
+                        active.set(0);
+                    },
+                    onkeydown: keys,
+                }
+            }
+            if !naming() {
+                div { class: "ai-menu-label", "{label}" }
+            }
+            for (i, (to, icon, title)) in found.iter().cloned().enumerate() {
+                button {
+                    key: "{to}",
+                    class: if i == at { "ai-menu-row kb" } else { "ai-menu-row" },
+                    role: "menuitem",
+                    "data-page": "{to}",
+                    onmouseenter: move |_| active.set(i),
+                    onclick: {
+                        let choose = choose.clone();
+                        move |e: MouseEvent| {
+                            e.stop_propagation();
+                            choose(i);
+                        }
+                    },
+                    span { class: "ai-menu-value",
+                        PageIcon { icon, size: 14 }
+                        "{title}"
+                    }
+                }
+            }
+            if !found.is_empty() {
+                div { class: "ai-menu-sep" }
+            }
+            button {
+                class: if at == len - 1 { "ai-menu-row kb" } else { "ai-menu-row" },
+                role: "menuitem",
+                id: "move-new-page",
+                onmouseenter: move |_| active.set(len - 1),
+                onclick: {
+                    let choose = choose.clone();
+                    move |e: MouseEvent| {
+                        e.stop_propagation();
+                        choose(len - 1);
+                    }
+                },
+                span { class: "ai-menu-value",
+                    Icon { name: "plus", size: 14 }
+                    if typed.is_empty() {
+                        "New page…"
+                    } else {
+                        "New page “{typed}”"
                     }
                 }
             }

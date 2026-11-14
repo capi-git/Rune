@@ -147,15 +147,19 @@ pub fn LockedPage(page_id: String) -> Element {
     let mut try_key = try_open.clone();
     let mut try_click = try_open;
     rsx! {
+        // One quiet row under the title: the lock, and the field with its
+        // arrow inside it (a line under it says what the row is). It was a
+        // large lock, a title and a field with a grey "Open" button beside
+        // it, set at the left of an empty page.
         div { class: "locked-page",
-            span { class: "locked-icon", Icon { name: "lock", size: 22 } }
-            div { class: "locked-title", "This page is locked" }
             div { class: "locked-row",
+                span { class: "locked-icon", Icon { name: "lock", size: 16 } }
+                div { class: "locked-field",
                 input {
                     class: "text-input",
                     id: "unlock-password",
                     r#type: "password",
-                    placeholder: "Password",
+                    placeholder: "Password to open",
                     autocomplete: "current-password",
                     value: "{password}",
                     "aria-label": "Password of the page",
@@ -170,12 +174,21 @@ pub fn LockedPage(page_id: String) -> Element {
                         }
                     },
                 }
-                button { class: "secondary-btn", id: "unlock-go", disabled: working() || password.read().is_empty(), onclick: move |_| try_click(),
-                    if working() { "Opening…" } else { "Open" }
+                button {
+                    class: if working() { "locked-go working" } else { "locked-go" },
+                    id: "unlock-go",
+                    title: if working() { "Opening…" } else { "Open" },
+                    "aria-label": if working() { "Opening…" } else { "Open the page" },
+                    disabled: working() || password.read().is_empty(),
+                    onclick: move |_| try_click(),
+                    Icon { name: "arrow-right", size: 13 }
+                }
                 }
             }
             if let Some(why) = wrong() {
                 div { class: "lock-problem", "{why}" }
+            } else {
+                div { class: "locked-note", "This page is locked." }
             }
         }
     }

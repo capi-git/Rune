@@ -72,7 +72,7 @@ pub fn ColumnMenu(page_id: String, id: String, c: usize, table: Table) -> Elemen
     let column = table.column(c);
     let kind = column.kind;
     let locked = table.view.locked;
-    let numbers = matches!(kind, Kind::Number | Kind::Formula);
+    let numbers = kind.has_format();
     let sorted = table.view.sort.iter().find(|s| s.column == c).map(|s| s.down);
     // (By the column's own place in the table: see `Grid`.)
     let place = c;
@@ -101,6 +101,9 @@ pub fn ColumnMenu(page_id: String, id: String, c: usize, table: Table) -> Elemen
     let (p_goal, b_goal) = (page_id.clone(), id.clone());
     let (p_freeze, b_freeze) = (page_id.clone(), id.clone());
     let tables = if sub() == "from" { state.tables_to_link(&page_id, &id) } else { Vec::new() };
+    // (A rollup: the columns of the table its rows' pages start with.)
+    let page_columns = if sub() == "rollup-of" { state.columns_on_row_pages(&id) } else { Vec::new() };
+    let (p_of, b_of) = (page_id.clone(), id.clone());
     rsx! {
         div { class: "popover column-menu table-menu", role: "menu", onclick: move |e| e.stop_propagation(),
             if !locked {
@@ -110,6 +113,18 @@ pub fn ColumnMenu(page_id: String, id: String, c: usize, table: Table) -> Elemen
                 }
                 if kind == Kind::Relation {
                     MenuRow { icon: "table", label: "Table", aside: from_name, more: true, active: sub() == "from", name: "from", onpick: move |_| toggle("from") }
+                }
+                if kind == Kind::Rollup {
+                    MenuRow {
+                        icon: "file",
+                        label: "From the column",
+                        aside: if column.of.is_empty() { "Choose".to_string() } else { column.of.clone() },
+                        more: true,
+                        active: sub() == "rollup-of",
+                        name: "rollup-of",
+                        onpick: move |_| toggle("rollup-of"),
+                    }
+                    MenuRow { icon: "sigma", label: "Take", aside: column.way.label(), more: true, active: sub() == "rollup-way", name: "rollup-way", onpick: move |_| toggle("rollup-way") }
                 }
                 MenuRow { icon: "sigma", label: "Total", aside: total, more: true, active: sub() == "total", name: "total", onpick: move |_| toggle("total") }
                 if kind == Kind::Formula {
@@ -304,6 +319,53 @@ pub fn ColumnMenu(page_id: String, id: String, c: usize, table: Table) -> Elemen
                             onpick: {
                                 let (p, b) = (page_id.clone(), id.clone());
                                 move |_| state.set_column_total(&p, &b, c, Some(t))
+                            },
+                        }
+                    }
+                }
+            }
+            if sub() == "rollup-of" {
+                div { class: "popover column-sub", role: "menu",
+                    for name in page_columns {
+                        MenuRow {
+                            key: "{name}",
+                            label: name.clone(),
+                            active: column.of.eq_ignore_ascii_case(&name),
+                            onpick: {
+                                let (p, b, way) = (page_id.clone(), id.clone(), column.way);
+                                move |_| state.set_column_rollup(&p, &b, c, &name, way)
+                            },
+                        }
+                    }
+                    label { class: "column-field",
+                        span { "Column" }
+                        input {
+                            r#type: "text",
+                            placeholder: "Amount",
+                            spellcheck: false,
+                            "aria-label": "The column on each row's page",
+                            "data-item": "rollup-name",
+                            value: "{column.of}",
+                            onchange: {
+                                let way = column.way;
+                                move |e: FormEvent| state.set_column_rollup(&p_of, &b_of, c, &e.value(), way)
+                            },
+                        }
+                    }
+                    div { class: "menu-hint", "Of the first table on each row's page." }
+                }
+            }
+            if sub() == "rollup-way" {
+                div { class: "popover column-sub", role: "menu",
+                    for way in crate::table::Total::WAYS {
+                        MenuRow {
+                            key: "{way.name()}",
+                            label: way.label(),
+                            active: column.way == way,
+                            name: way.name(),
+                            onpick: {
+                                let (p, b, of) = (page_id.clone(), id.clone(), column.of.clone());
+                                move |_| state.set_column_rollup(&p, &b, c, &of, way)
                             },
                         }
                     }

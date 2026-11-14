@@ -288,7 +288,7 @@ impl Table {
     /// What can be asked of the cells of column `c`.
     pub fn ops(&self, c: usize) -> &'static [Op] {
         match self.kind(c) {
-            Kind::Number | Kind::Time | Kind::Pace | Kind::Formula => &[Op::Is, Op::IsNot, Op::Above, Op::Below, Op::AtLeast, Op::AtMost, Op::Empty, Op::Filled],
+            Kind::Number | Kind::Time | Kind::Pace | Kind::Formula | Kind::Rollup => &[Op::Is, Op::IsNot, Op::Above, Op::Below, Op::AtLeast, Op::AtMost, Op::Empty, Op::Filled],
             Kind::Date => &[Op::Is, Op::Below, Op::Above, Op::Empty, Op::Filled],
             Kind::Checkbox => &[Op::Ticked, Op::NotTicked],
             Kind::Choice | Kind::Status => &[Op::Is, Op::IsNot, Op::Empty, Op::Filled],

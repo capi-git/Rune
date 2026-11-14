@@ -97,14 +97,23 @@ pub fn mention_query(text: &str) -> Option<(usize, bool, String)> {
 
 /// Convert Markdown (for example an AI reply) into blocks.
 pub fn to_blocks(md: &str) -> Vec<Block> {
-    read(md, false, &mut Vec::new())
+    read(md, false, &mut Vec::new(), &mut Vec::new())
+}
+
+/// The tables of this Markdown whose table line says what the page of each
+/// row starts with (`page:`), in their order, each with that table in
+/// `Table::page`. (It is not kept in the blocks: see `state::row_template`.)
+pub fn said_pages(md: &str) -> Vec<crate::table::Table> {
+    let mut said = Vec::new();
+    read(md, false, &mut Vec::new(), &mut said);
+    said
 }
 
 /// The tables of this Markdown that are more than a table holds: for each,
 /// its columns and its rows under the header (see `Table::over_most`).
 pub fn tables_over_most(md: &str) -> Vec<(usize, usize)> {
     let mut over = Vec::new();
-    read(md, false, &mut over);
+    read(md, false, &mut over, &mut Vec::new());
     over
 }
 
@@ -112,10 +121,10 @@ pub fn tables_over_most(md: &str) -> Vec<(usize, usize)> {
 /// page. (In a Markdown file, lines one under the other are one paragraph;
 /// a list of names copied from another program is not.)
 pub fn to_blocks_by_line(md: &str) -> Vec<Block> {
-    read(md, true, &mut Vec::new())
+    read(md, true, &mut Vec::new(), &mut Vec::new())
 }
 
-fn read<'a>(md: &'a str, each_line: bool, over: &mut Vec<(usize, usize)>) -> Vec<Block> {
+fn read<'a>(md: &'a str, each_line: bool, over: &mut Vec<(usize, usize)>, said: &mut Vec<crate::table::Table>) -> Vec<Block> {
     let mut out: Vec<Block> = Vec::new();
     let mut paragraph: Vec<String> = Vec::new();
     let mut quote: Vec<String> = Vec::new();
@@ -164,6 +173,9 @@ fn read<'a>(md: &'a str, each_line: bool, over: &mut Vec<(usize, usize)>) -> Vec
                 block.data = table.to_data();
                 block.place.beside = table.beside;
                 out.push(block);
+                if table.page.is_some() {
+                    said.push(table);
+                }
                 skip = taken - lead - 1;
                 let cut = taken == crate::table::MOST_ROWS + 1 && lines.get(taken).is_some_and(|l| l.trim_start().starts_with('|'));
                 more_rows = cut.then(|| (at + taken - lead, lines[0], lines[1]));

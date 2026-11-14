@@ -161,7 +161,11 @@ Wall-clock time is never used to decide anything.
   picture's caption is the `text` of its `image` block. `remind` is the time of
   a to-do's reminder on its due day (`09:00`; `""` for none). For a table,
   `place` only says whether it stands beside the table above it
-  (`{"beside":true,…}`).
+  (`{"beside":true,…}`). Since 2026-11-13 any line can have `"col"` (1 to 3)
+  in its `place`: it stands in that column of a set of lines side by side
+  (`src/columns.rs`; the lines of column 1 come first in the list, then
+  those of column 2). A device that does not show columns shows the lines
+  in their order and sends `place` back as it came.
 - `tint` (since Rune 0.1.17) is the colour of a line: `red` for its words, `red-bg` for a band, or both with the words first (`red blue-bg`):
   behind it (gray, brown, orange, yellow, green, blue, purple, pink, red), or `""` for none.
   A device that does not know colours leaves the key out; the line then keeps the colour it

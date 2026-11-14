@@ -200,8 +200,24 @@ fn table_of(popover: &Popover) -> Option<&str> {
 #[component]
 pub fn TableView(page_id: String, id: String, data: String) -> Element {
     let state = use_context::<AppState>();
+    // What the rollup columns take from the pages of the rows: worked out
+    // again only when one of the pages it reads changes, not at each key
+    // typed anywhere (see `rollup_sources`). A table with no rollup column
+    // watches nothing.
+    let sources = use_memo(use_reactive((&id, &data), move |(id, data)| {
+        if !data.contains(r#""formula":"rollup "#) {
+            return Vec::new();
+        }
+        crate::state::rollup_sources(&state.pages.read(), &state.blocks.read(), &id)
+    }));
+    let rolled = use_memo(use_reactive((&id, &data), move |(id, data)| {
+        let _ = sources.read();
+        let table = Table::parse(&data);
+        crate::state::rolled(&state.pages.peek(), &state.blocks.peek(), &id, &table, 1)
+    }));
     let mut table = Table::parse(&data);
     state.name_links(&mut table, true);
+    table.rolled = rolled();
     let open = state.ui.read().popover.clone().filter(|p| table_of(p) == Some(id.as_str()));
     let (picked, picked_cols) = picked_of(&PICKED.read(), &id, &table);
     let order = HELD.read().as_ref().filter(|h| h.block == id && h.rows == table.rows.len()).map(|h| h.order.clone()).unwrap_or_else(|| table.order());
@@ -463,7 +479,7 @@ fn column_width(table: &Table, c: usize) -> usize {
     let for_kind = match table.kind(c) {
         Kind::Text | Kind::Multi | Kind::Link | Kind::Email | Kind::Relation => 150,
         Kind::Checkbox => 66,
-        Kind::Number | Kind::Formula => 110,
+        Kind::Number | Kind::Formula | Kind::Rollup => 110,
         Kind::Time | Kind::Pace => 96,
         _ => 118,
     };
@@ -811,7 +827,7 @@ pub fn CellList(page_id: String, id: String, r: usize, c: usize, column: Column,
         k if k.has_options() => rsx! { ChoicePicker { page_id, id, r, c, column, text } },
         Kind::Relation => rsx! { CellMenu { page_id, id, r, c, from: column.from.clone(), text } },
         Kind::Date => rsx! { DatePicker { page_id, id, r, c, text } },
-        k if k.is_worked_out() => rsx! { WorkedOut { id, c, heading, from, formula: k == Kind::Formula, in_table } },
+        k if k.is_worked_out() => rsx! { WorkedOut { id, c, heading, from, formula: k == Kind::Formula, rollup: k == Kind::Rollup, in_table } },
         _ => rsx! {},
     }
 }
@@ -1019,7 +1035,7 @@ pub fn CellBody(
                 }
             }
         }
-        Kind::Pace | Kind::Formula => {
+        Kind::Pace | Kind::Formula | Kind::Rollup => {
             let block = id.clone();
             rsx! {
                 div { class: "cell-meter",
@@ -1039,7 +1055,7 @@ pub fn CellBody(
                     }
                     {meter}
                     if menu_open && own_menu {
-                        WorkedOut { id: id.clone(), c, heading: heading.clone(), from: from.clone(), formula: kind == Kind::Formula, in_table: false }
+                        WorkedOut { id: id.clone(), c, heading: heading.clone(), from: from.clone(), formula: kind == Kind::Formula, rollup: kind == Kind::Rollup, in_table: false }
                     }
                 }
             }
@@ -1297,7 +1313,26 @@ pub fn RowValues(page_id: String) -> Element {
     let state = use_context::<AppState>();
     // (Read here so that this is drawn again when a table or a page changes.)
     let _ = (state.blocks.read().len(), state.pages.read().len());
-    let Some(row) = state.row_ref(&page_id) else { return rsx! {} };
+    let row = state.row_ref(&page_id);
+    // What the rollup columns take from the pages of the rows: the same as
+    // the table shows (see `TableView`), worked out again only when one of
+    // those pages changes.
+    let (block, data) = row.as_ref().filter(|r| !r.table.rollups().is_empty()).map(|r| (r.block.clone(), r.table.to_data())).unwrap_or_default();
+    let sources = use_memo(use_reactive((&block, &data), move |(block, data)| {
+        if data.is_empty() {
+            return Vec::new();
+        }
+        crate::state::rollup_sources(&state.pages.read(), &state.blocks.read(), &block)
+    }));
+    let rolled = use_memo(use_reactive((&block, &data), move |(block, data)| {
+        let _ = sources.read();
+        if data.is_empty() {
+            return Default::default();
+        }
+        crate::state::rolled(&state.pages.peek(), &state.blocks.peek(), &block, &Table::parse(&data), 1)
+    }));
+    let Some(mut row) = row else { return rsx! {} };
+    row.table.rolled = rolled();
     let cell_menu = match state.ui.read().popover.clone() {
         Some(Popover::TableCell { block_id, row: at, column, on_page: true }) if block_id == row.block => Some((at, column)),
         _ => None,

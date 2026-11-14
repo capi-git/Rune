@@ -1352,6 +1352,17 @@ body[data-resizing="rows"] * {
 .kind-heading3 .blk:empty::before {
   color: var(--placeholder);
 }
+/* Math in a line: the answer after the text, drawn by the page and no part
+   of it (not kept, copied or found). It takes no room, so the line keeps
+   its height and where it wraps. A press on it copies it (bridge.js). */
+.blk[data-calc]::after {
+  content: " " attr(data-calc);
+  display: inline-block;
+  width: 0;
+  white-space: pre;
+  color: var(--text-3);
+  cursor: pointer;
+}
 .blk strong {
   font-weight: 650;
 }
@@ -2047,6 +2058,57 @@ body[data-resizing="rows"] * {
 .block-row.drop-after::after {
   bottom: -3px;
 }
+/* Let go at a side of a line (or of a column), it goes beside it. */
+.block-row.drop-left::before,
+.block-row.drop-right::after,
+.column.drop-left::before,
+.column.drop-right::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: var(--accent);
+  opacity: 0.55;
+  border-radius: 2px;
+  pointer-events: none;
+}
+.block-row.drop-left::before {
+  left: -8px;
+}
+.block-row.drop-right::after {
+  right: -8px;
+}
+/* (In the middle of the room between two columns.) */
+.column.drop-left::before {
+  left: -28px;
+}
+.column.drop-right::after {
+  right: -28px;
+}
+
+/* Lines side by side (src/columns.rs): columns of one width, with room
+   between them for the handles of the lines of the column at the right. */
+.columns {
+  display: flex;
+  gap: 52px;
+}
+.column {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+}
+/* (The tops of the columns are level, also when one begins with a heading.) */
+.column > .block-row:first-child {
+  margin-top: 1px;
+}
+/* A narrow pane: the columns one under the other. */
+@container (max-width: 600px) {
+  .columns {
+    flex-direction: column;
+    gap: 0;
+  }
+}
 
 /* ---------- popovers and menus ---------- */
 .backdrop {
@@ -2101,7 +2163,7 @@ body[data-resizing="rows"] * {
 }
 /* The blocks the box touches, marked at once by the page script while the
    drag goes on (as picked blocks are), with a short fade in and out. */
-.blocks[data-mq-on] > .block-row {
+.blocks[data-mq-on] .block-row {
   transition: background-color 140ms ease;
 }
 .block-row[data-mq] {
@@ -2140,6 +2202,14 @@ body[data-resizing="rows"] * {
   width: 260px;
   max-height: 440px;
   overflow-y: auto;
+}
+/* "Move to…" for lines: placed as the menu of a line, with a box to find
+   a page (as the menu of rows of a table has one). */
+.move-menu .ai-menu-row.kb {
+  background: var(--hover);
+}
+.move-menu .ai-menu-value .ico {
+  color: var(--text-2);
 }
 .sidebar-menu {
   top: 30px;
@@ -3262,6 +3332,64 @@ body[data-resizing="rows"] * {
 .sash:hover::after,
 body[data-resizing] .sash:active::after {
   opacity: 0.6;
+}
+/* A tab of several pages: each page is a card of its own (a bubble), with
+   the window's glass between them as wide as the frame around them. The
+   card behind them steps back. Lengths are divided by the zoom of the page
+   (`.card-zoom`), so the gap, the corners and the edges stay as they are. */
+.work-card.bubbles {
+  --bubble-gap: calc(6px / var(--zoom, 1));
+  background: transparent;
+  border-width: 0;
+  border-radius: 0;
+}
+.work-card.bubbles .split-group {
+  gap: var(--bubble-gap);
+}
+.work-card.bubbles .split-group > .split-cell + .split-cell {
+  border: 0;
+}
+.work-card.bubbles .pane,
+.work-card.bubbles .split-cell.railed {
+  box-sizing: border-box;
+  background: var(--card);
+  border: calc(1px / var(--zoom, 1)) solid var(--card-edge);
+  border-radius: calc(10px / var(--zoom, 1));
+  transition: background-color 220ms ease, border-color 220ms ease;
+}
+.work-card.bubbles .pane-rail {
+  border-radius: calc(9px / var(--zoom, 1));
+}
+/* (The bubble does not clip, so that a menu may reach past it as before;
+   the part that scrolls, and its scroll bar, keep to its round corners.) */
+.work-card.bubbles .pane > .scroller {
+  border-radius: 0 0 calc(9px / var(--zoom, 1)) calc(9px / var(--zoom, 1));
+}
+/* The gap is the line to drag: the grip sits in its middle, and the pointer
+   over it shows a short bar there. */
+.work-card.bubbles .split-group.split-row > .split-cell > .sash {
+  left: calc(var(--bubble-gap) / -2 - 4.5px);
+}
+.work-card.bubbles .split-group.split-col > .split-cell > .sash {
+  top: calc(var(--bubble-gap) / -2 - 4.5px);
+}
+.work-card.bubbles .split-group.split-row > .split-cell > .sash::after {
+  top: 50%;
+  bottom: auto;
+  left: 3px;
+  width: 3px;
+  height: 36px;
+  margin-top: -18px;
+  border-radius: 2px;
+}
+.work-card.bubbles .split-group.split-col > .split-cell > .sash::after {
+  left: 50%;
+  right: auto;
+  top: 3px;
+  width: 36px;
+  height: 3px;
+  margin-left: -18px;
+  border-radius: 2px;
 }
 .panes.split .pane {
   animation: fade-in 180ms var(--ease-out);
@@ -4530,6 +4658,8 @@ button.ed-row.open {
   gap: 0;
   padding-left: 4px;
 }
+/* Each part is a small bubble, as each page is a card of its own below
+   (`.work-card.bubbles`): joined, with a small gap between them. */
 .tab-seg {
   display: inline-flex;
   align-items: center;
@@ -4538,28 +4668,29 @@ button.ed-row.open {
   flex: 1 1 0;
   justify-content: center;
   padding: 2px 6px;
-  border-radius: 4px;
+  border-radius: 6px;
+  background: var(--fill-4);
   color: var(--text-2);
   position: relative;
+  transition: background-color 150ms var(--ease-tab);
 }
 .tab-seg + .tab-seg {
-  margin-left: 5px;
+  margin-left: 2px;
+  border-top-left-radius: 3px;
+  border-bottom-left-radius: 3px;
 }
-.tab-seg + .tab-seg::before {
-  content: "";
-  position: absolute;
-  left: -3px;
-  top: 50%;
-  width: 1px;
-  height: 14px;
-  margin-top: -7px;
-  background: var(--sep);
+.tab-seg:has(+ .tab-seg) {
+  border-top-right-radius: 3px;
+  border-bottom-right-radius: 3px;
 }
 .tab-seg.on {
   color: var(--text);
 }
+.tab.active .tab-seg.on {
+  background: var(--fill-2);
+}
 .tab-seg:hover {
-  background: var(--fill-4);
+  background: var(--fill-3);
 }
 .tab-seg[draggable="true"] {
   cursor: default;
@@ -9026,6 +9157,12 @@ body.ev-dragging .cal-event {
 .app.focus-mode .page:has(.block-row.fm-here) .page-header {
   opacity: 0.3;
 }
+/* Typewriter mode (View ▸ Typewriter Mode): room at the end of the page for
+   its last line to come up to the middle of the pane (bridge.js keeps the
+   line there). In window points whatever the zoom of the page. */
+.app.typewriter .page-tail {
+  min-height: calc(60vh / var(--zoom, 1));
+}
 
 /* ---------- accent colour (Settings ▸ Appearance) ----------
    The app's blue is the accent with no choice made. Each other choice has a
@@ -9051,6 +9188,11 @@ body.ev-dragging .cal-event {
 }
 
 /* ---------- locked pages (lock.rs) ---------- */
+/* Nothing of the AI on a locked page, also while it is open: the
+   microphone of the format bar asks the AI what to do with the words. */
+.fmt-bar.no-ai [data-fmt="speak"] {
+  display: none;
+}
 .modal.lock-modal {
   width: min(440px, 92vw);
 }
@@ -9081,25 +9223,71 @@ body.ev-dragging .cal-event {
 .locked-page {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 28px 2px 0;
-}
-.locked-icon {
-  display: inline-flex;
-  color: var(--text-3);
-}
-.locked-title {
-  font-size: 15px;
-  color: var(--text-2);
+  align-items: stretch;
+  gap: 8px;
+  max-width: 420px;
+  padding: 22px 0 0;
 }
 .locked-row {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--sep);
+  border-radius: 10px;
+  background: var(--fill-4);
 }
-.locked-row .text-input {
-  width: 240px;
+.locked-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--text-2);
+}
+.locked-field {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+.locked-field .text-input {
+  width: 100%;
+  padding-right: 36px;
+}
+/* The arrow inside the field: blue as the app's accent once there is a
+   password to try. */
+.locked-go {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin-top: -12px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  cursor: default;
+  transition: opacity 120ms var(--ease-out);
+}
+.locked-go:disabled {
+  opacity: 0.35;
+}
+.locked-go.working {
+  opacity: 0.6;
+}
+.locked-go:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 50%, transparent);
+  outline-offset: 1px;
+}
+.locked-note {
+  padding-left: 2px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+.locked-page .lock-problem {
+  padding-left: 2px;
 }
 .text-input.shake {
   animation: lock-shake 320ms var(--ease-out);

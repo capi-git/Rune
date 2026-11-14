@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 const SUPPORTED_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 const LINK_PREFIX: &str = crate::inline::PAGE_URL;
 
-const INSTRUCTIONS: &str = "Rune is the user's local notes workspace: pages and a calendar. \
+pub(crate) const INSTRUCTIONS: &str = "Rune is the user's local notes workspace: pages and a calendar. \
 Pages nest inside other pages and each has an id. Find ids with search_pages or list_pages before reading or editing. \
 The workspace has spaces (as Work, Personal): each top-level page is in one space, and a sub-page is in the space of its parent. list_pages names the spaces and says which one is open in Rune. \
 When the person names a space for a new page (\"in my Personal space\"), pass that name as `space` to create_page; without `space`, a new top-level page goes to the space that is open in Rune, which may not be the one they mean. To put a page in another space, use update_page with `space`. You cannot make a space: if the one they name does not exist, ask them. \
@@ -33,20 +33,24 @@ When the person asks to be reminded of something, make it a to-do with its day a
 A picture or a drawing shows in read_page as a line [Image](rune://block/<id>) or [Drawing](rune://block/<id>): keep that line as it is to keep the picture or drawing in its place when you replace a page (one that you leave out is kept at the end of the page, never lost). \
 Tables are Markdown pipe tables. A table's columns can have kinds, given on a comment line right under it, one part for each column: \
 <!-- columns: text count | date | choice | number km sum | number USD sum | time sum | pace average | checkbox checked | formula USD sum = Price * Qty --> \
-(kinds: text, number, date, time, pace, checkbox, choice (one tag from a list), multi (several tags, with commas between them), status (one of Not started, In progress, Done, or its own list; a choice, multi or status column can list its options and their colours in braces, as choice {Long:green; Short:red}, colours: gray, brown, orange, yellow, green, blue, purple, pink, red), link, email, phone, file (pictures), formula, relation (rows of another table, by their names); \
-then for a number or a formula an optional format (a kind of money by its code, as USD or EUR, or percent, or grouped), an optional unit, \
+(kinds: text, number, date, time, pace, checkbox, choice (one tag from a list), multi (several tags, with commas between them), status (one of Not started, In progress, Done, or its own list; a choice, multi or status column can list its options and their colours in braces, as choice {Long:green; Short:red}, colours: gray, brown, orange, yellow, green, blue, purple, pink, red), link, email, phone, file (pictures), formula, relation (rows of another table, by their names), \
+rollup (worked out from the page of each row: the sum, count, average, highest or lowest of a column of the first table on that page, by its heading, as rollup Amount sum; a heading of more than one word in square brackets, as rollup [Amount paid] sum); \
+then for a number, a formula or a rollup an optional format (a kind of money by its code, as USD or EUR, or percent, or grouped), an optional unit, \
 and an optional total shown at the foot: count, sum, average, median, highest, lowest, range, unique, empty, checked; \
 a number column can also show a bar or a ring that is full at a goal: number percent ring goal 100, number km bar goal 20; \
 a number or formula column marked signed shows amounts above zero green and below it red (a gain and a loss): number USD sum signed; \
 a formula column ends with = and what it works out from the other columns of its row, by their headings). \
 A cell of a money column is written with its sign ($2,000.00); a plain number there is fine too. \
-A pace column is worked out from the first number and the first time column of its row, and a formula column from its formula: what is in their cells is not kept. \
+A pace column is worked out from the first number and the first time column of its row, a formula column from its formula, and a rollup from the pages of the rows: what is in their cells is not kept. \
 A table can have a name, on a second comment line under it, and after the name, each between bars, what else it has: \
 <!-- table: Trades | icon target:green | sort Date down | frozen 1 | color P&L below 0 red | color Result is Win green --> \
 (icon NAME:COLOUR, NAME one of plus, minus, check, star, heart, home, calendar, briefcase, book, flame, gift, coffee, target, trophy, rocket, leaf, music, plane, wrench, globe; \
 beside: it stands at the right of the table above it; board by COLUMN, list, gallery or calendar: how the rows show (a board has a column of cards for each option of a choice column); \
 group COLUMN; sort COLUMN, or sort COLUMN down for high to low and newest first; frozen N: the first N columns stay in place when a wide table scrolls sideways; hide COLUMN; \
-filter COLUMN TEST: only rows that pass show; color COLUMN TEST COLOUR: rows that pass get that colour; locked; full: a row opens as a full page, not at the side. \
+filter COLUMN TEST: only rows that pass show; color COLUMN TEST COLOUR: rows that pass get that colour; locked; full: a row opens as a full page, not at the side; \
+and last on the line, page: and the columns of the table that the page of each row starts with, each its heading and then its kind in the words of the columns line, between bars: page: Item | Amount number USD sum | Category choice {Food; Fun}. \
+page: makes that table the template of a table that has none (a new table); it never changes a template that is there. \
+To change what the pages of new rows start with, change the template's page itself: read_page names it (row_page_template:), and you read and change it as any page. \
 A TEST is is, is not, has, has not, above, below, at least or at most, then words or a number, or is empty, is filled, is ticked, is not ticked. Columns go by their headings.) \
 Keep both comment lines when you rewrite a table. What Markdown cannot say of a table (the pages of its rows, their nesting, the template of a new row) stays when you rewrite it, \
 and so does the view when the table line says nothing of it: \
@@ -56,7 +60,7 @@ a name for the table and an icon; the right kind for each column (date for days,
 choice or multi for words from a short list, checkbox for yes or no, link for web addresses); the options of each choice column with colours that mean something \
 (green for a win, done or good, red for a loss or a problem, yellow or orange for waiting, gray for nothing yet); a total at the foot of the columns that add up; \
 the newest first when rows are dated; frozen 1 when the table has more than six columns; and a colour rule when one result matters at a glance. \
-The first column names each row (a row opens as a page of that name): make it a text column, such as the ticker, the task or the item, never a date or a number. Leave the rows empty unless the person gives you rows or asks for examples; a chart, a short line on how to use the page, \
+The first column names each row (a row opens as a page of that name): make it a text column, such as the ticker, the task or the item, never a number, and a date only when each row is one day. Leave the rows empty unless the person gives you rows or asks for examples; a chart, a short line on how to use the page, \
 or a section of rules or a review under the table make it better when they fit what was asked. \
 A diagram is a code block of the language mermaid (Mermaid's own syntax), which Rune draws: \
 ```mermaid flowchart LR; A[Plan] --> B[Enter]; B --> C[Review]; C -. lessons .-> A ``` (each on its own line, without the semicolons). \
@@ -65,6 +69,15 @@ keep labels short, put the details in the text under it, and give it no colours 
 in a code block or out of one: it breaks on a narrow page and looks broken. Levels or amounts go in a small table, and a rule or a formula in one line in bold. \
 A table holds at most 12 columns and 199 rows under its header. A tool refuses Markdown with a larger table and writes nothing: \
 write a long log as more than one table (one for each month or year, say), each with its header and its comment lines. \
+When each row of a table needs a list of its own (what was spent each day, the costs of each trip), make one table with a rollup column and a page: part, \
+and Rune does the rest: the person opens a row (its Open button), writes in the table its page starts with, and the row and the total at the foot follow by themselves. \
+For example a budget for a month, a row for each day of the month: \
+| Date | Budget | Spent | Left | \
+| --- | --- | --- | --- | \
+| 2026-11-01 | $60.00 |  |  | \
+<!-- columns: date | number USD sum | rollup Amount sum USD sum | formula USD sum = Budget - Spent --> \
+<!-- table: November | icon calendar:green | color Left below 0 red | page: Item | Amount number USD sum | Category choice {Food:orange; Fun:purple; Bills:gray} --> \
+(each line on its own line). Rune makes the page of a row when it is opened: do not make those pages, and do not ask the person how to do it. \
 To add a row to a table (a log), use add_table_row; to change one, update_table_row; to tick a to-do or set its day, set_todo: none of them write the page again. \
 A chart is a code block of the language chart holding JSON, for example \
 ```chart {\"shape\": \"bars\", \"from\": \"Run log\", \"x\": \"Date\", \"by\": \"week\", \"y\": \"km\", \"add\": \"sum\", \"goal\": 20, \"title\": \"Distance per week\"} ``` \
@@ -75,6 +88,10 @@ Amounts below zero draw under a line at zero, green and red when the column is s
 A pie draws how much of each word of a choice, multi or status column, in the colours of its options: x is that column, and add is count for how many rows, or sum with y for an amount, \
 for example {\"shape\": \"pie\", \"x\": \"Status\", \"add\": \"count\"}. \
 A ring draws one amount (add over all rows) against the goal; days draws which days of the last four weeks have a row. The chart follows its table by itself. \
+Build what the person asks for (a table, its views and colours, the pages it needs, a chart) in one go with the tools; do not stop to ask about details you can choose well. \
+When the person says that what you made in this conversation is wrong, read the page again (read_page), fix what most likely does not match what they asked for, \
+and say in one sentence what you changed. When you did not make it in this conversation and they do not say what they want instead, ask one short question \
+and change nothing. Never reply with a list of guesses. \
 Changes are saved immediately. trash_page is reversible with restore_page; no page is ever deleted permanently (delete_event does remove an event for good).";
 
 /// What a change gets as its answer when this connector is older than the
@@ -706,10 +723,25 @@ impl Server {
         let id = required_page_id(args, "page_id")?;
         let (pages, blocks) = self.load()?;
         let page = live_page(&pages, &id)?;
-        let body = render_body(&pages, blocks.get(&id).map(Vec::as_slice).unwrap_or(&[]));
+        let body = render_body_with(&pages, Some(&blocks), blocks.get(&id).map(Vec::as_slice).unwrap_or(&[]));
         let (spaces, _) = self.spaces()?;
+        // The page each row's page of a table starts with (its template), to
+        // read and change as a page: `page:` makes one only for a table that has none.
+        let templates: String = blocks
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .filter(|b| b.kind == BlockKind::Table)
+            .enumerate()
+            .filter_map(|(n, b)| {
+                let of = crate::state::template_page_id(&pages, &b.id)?;
+                let name = crate::table::Table::parse(&b.data).name;
+                let name = if name.trim().is_empty() { format!("table {}", n + 1) } else { format!("table {}", quoted(name.trim())) };
+                Some(format!("row_page_template: {of} (what each row's page of the {name} starts with)\n"))
+            })
+            .collect();
         let header = format!(
-            "---\nid: {}\ntitle: {}\nicon: {}\nparent_id: {}\npath: {}\nspace: {}\nfavorite: {}\nupdated: {}\nlink: {LINK_PREFIX}{}\n---\n\n",
+            "---\nid: {}\ntitle: {}\nicon: {}\nparent_id: {}\npath: {}\nspace: {}\nfavorite: {}\nupdated: {}\nlink: {LINK_PREFIX}{}\n{templates}---\n\n",
             page.id,
             quoted(page.display_title()),
             page.icon.as_deref().unwrap_or("none"),
@@ -773,6 +805,7 @@ impl Server {
             parent_blocks.push(Block::page_link(page.id.clone()));
             self.save_blocks(pid, &parent_blocks)?;
         }
+        self.keep_row_templates(&page.id, &markdown)?;
         Ok(pretty(&json!({
             "id": page.id,
             "title": page.display_title(),
@@ -799,6 +832,7 @@ impl Server {
         let _ = blocks;
         let count = added.len();
         let total = self.store.append_blocks(&id, &added, now_ms()).map_err(db_error)?;
+        self.keep_row_templates(&id, markdown)?;
         Ok(pretty(&json!({ "page_id": id, "appended_blocks": count, "total_blocks": total })))
     }
 
@@ -949,7 +983,40 @@ impl Server {
         if arg_str(args, "title").is_some() {
             self.name_row_cell(&page, &blocks)?;
         }
+        self.keep_row_templates(&id, markdown)?;
         Ok(pretty(&json!({ "page_id": id, "title": page.display_title(), "blocks": body.len() })))
+    }
+
+    /// The tables of a page whose Markdown said what the page of each row
+    /// starts with (`page:` on the table line): each that has no template
+    /// yet gets one (see `state::row_template`). An existing template's
+    /// page is never changed this way. (Only when the Markdown has a
+    /// `page:` part: else nothing is read.)
+    fn keep_row_templates(&self, page_id: &str, markdown: &str) -> Result<(), String> {
+        if !markdown.to_lowercase().contains("page:") {
+            return Ok(());
+        }
+        let said = markdown::said_pages(markdown);
+        if said.is_empty() {
+            return Ok(());
+        }
+        let (mut pages, mut blocks) = self.load()?;
+        let lines = blocks.get(page_id).cloned().unwrap_or_default();
+        for (block, said) in crate::state::said_for_blocks(&lines, said) {
+            let Some((table, holder, template)) = crate::state::row_template(&pages, &blocks, page_id, &block, &said) else { continue };
+            self.save_page(&holder)?;
+            self.save_blocks(&holder.id, &template)?;
+            blocks.insert(holder.id.clone(), template);
+            pages.insert(holder.id.clone(), holder);
+            let mut own = blocks.get(page_id).cloned().unwrap_or_default();
+            if let Some(b) = own.iter_mut().find(|b| b.id == block) {
+                b.data = table.to_data();
+                b.text = table.plain_text();
+            }
+            self.save_blocks(page_id, &own)?;
+            blocks.insert(page_id.to_string(), own);
+        }
+        Ok(())
     }
 
     /// The pages of the rows of a table take the names their rows have now.
@@ -1930,6 +1997,13 @@ fn page_link_target(text: &str) -> Option<Id> {
 /// Blocks → Markdown, with # / ## / ### headings (the title is reported
 /// separately) and page links as `[Title](rune://page/<id>)`.
 pub(crate) fn render_body(pages: &HashMap<Id, Page>, blocks: &[Block]) -> String {
+    render_body_with(pages, None, blocks)
+}
+
+/// The same; with `all` (the lines of every page), a table says what its
+/// rollup columns take from the pages of its rows, and what those pages
+/// start with (see `state::roll_up`).
+pub(crate) fn render_body_with(pages: &HashMap<Id, Page>, all: Option<&HashMap<Id, Vec<Block>>>, blocks: &[Block]) -> String {
     let as_text = |b: &Block, text: String| {
         let mut t = Block::text(text);
         t.indent = b.indent;
@@ -1955,7 +2029,15 @@ pub(crate) fn render_body(pages: &HashMap<Id, Page>, blocks: &[Block]) -> String
             // same picture or drawing back (see `keep_media`).
             BlockKind::Drawing => as_text(b, format!("[Drawing]({BLOCK_PREFIX}{})", b.id)),
             BlockKind::Image => as_text(b, format!("[Image]({BLOCK_PREFIX}{})", b.id)),
-            BlockKind::Table => as_text(b, crate::markdown::table_markdown(b, "")),
+            BlockKind::Table => match all {
+                Some(all) => {
+                    let mut table = crate::table::Table::parse(&b.data);
+                    table.beside = b.place.beside;
+                    crate::state::roll_up(pages, all, &b.id, &mut table);
+                    as_text(b, table.to_markdown(""))
+                }
+                None => as_text(b, crate::markdown::table_markdown(b, "")),
+            },
             BlockKind::Chart => as_text(b, crate::chart::Chart::parse(&b.data).to_markdown()),
             _ => b.clone(),
         })
@@ -2146,6 +2228,132 @@ mod tests {
         let code = format!("```\n{}\n```", wide(14));
         let (_, err) = call(&mut s, "append_to_page", json!({ "page_id": fits, "markdown": code }));
         assert!(!err);
+    }
+
+    #[test]
+    fn a_template_page_made_by_hand_stays_through_the_ai_writing_its_page_again() {
+        for rollup in [false, true] {
+            let mut s = server();
+            let kind = if rollup { "rollup Price sum USD sum" } else { "number USD sum" };
+            let md = format!("Intro with a tpyo.\n\n| Trade | Cost |\n| --- | --- |\n| AAPL |  |\n<!-- columns: text | {kind} -->");
+            let (made, _) = call(&mut s, "create_page", json!({ "title": "Trades", "markdown": md }));
+            let id = json_of(&made)["id"].as_str().unwrap().to_string();
+            // A template's page made by hand: a column with no heading, a
+            // choice whose options came from typing, four places, rows, a
+            // name, a sort, and words under the table.
+            let (_, blocks) = s.load().unwrap();
+            let mut lines = blocks[&id].clone();
+            let at = lines.iter().position(|b| b.kind == BlockKind::Table).unwrap();
+            let mut table = crate::table::Table::parse(&lines[at].data);
+            table.name_rows();
+            table.template = Some(Default::default());
+            lines[at].data = table.to_data();
+            s.save_blocks(&id, &lines).unwrap();
+            let mut template = Page::new(Some(id.clone()), 0.0);
+            template.row_of = Some(format!("{}/template", lines[at].id));
+            template.title = "Template".into();
+            let mut own = crate::table::Table::of(vec![vec!["Step".into(), "Price".into(), "When".into(), String::new()], vec!["Entry".into(), "185.25".into(), String::new(), "a".into()], vec!["Stop".into(), "180".into(), String::new(), String::new()]]);
+            own.set_kind(1, crate::table::Kind::Number);
+            own.set_format(1, "USD");
+            own.set_places(1, Some(4));
+            own.set_kind(2, crate::table::Kind::Choice);
+            for (r, name) in [(1, "9:30"), (2, "Close; late")] {
+                let made = own.add_option(2, name).unwrap();
+                own.toggle_name(r, 2, &made);
+            }
+            own.name = "Plan".into();
+            let mut tb = Block::new(BlockKind::Table, own.plain_text());
+            tb.data = own.to_data();
+            s.save_page(&template).unwrap();
+            s.save_blocks(&template.id, &[tb, Block::text("Check the news first")]).unwrap();
+            let (_, kept) = s.load().unwrap();
+            // Ten times "fix the typo in the intro": the page as read, the
+            // typo put right; every other time with words after `page:` of its own.
+            for round in 0..10 {
+                let (page, _) = call(&mut s, "read_page", json!({ "page_id": id }));
+                assert!(page.contains(&format!("row_page_template: {}", template.id)), "{page}");
+                assert_eq!(page.contains("page: "), rollup, "{page}");
+                let mut body = page.split("---\n\n").nth(1).unwrap().replace("tpyo", "typo");
+                if round % 2 == 1 {
+                    body = match body.find("<!-- table:") {
+                        Some(at) => {
+                            let end = at + body[at..].find("-->").unwrap();
+                            format!("{} | Page: Item | Other text -->{}", body[..end].split(" | page:").next().unwrap().trim_end(), &body[end + 3..])
+                        }
+                        None => body.replace(&format!("{kind} -->"), &format!("{kind} -->\n<!-- table: | page: Item | Other text -->")),
+                    };
+                }
+                let (_, err) = call(&mut s, "replace_page_content", json!({ "page_id": id, "markdown": body }));
+                assert!(!err);
+            }
+            let (_, after) = s.load().unwrap();
+            assert_eq!(after[&template.id], kept[&template.id], "the template's page is as it was (rollup: {rollup})");
+            assert!(s.store.latest_version(&template.id).unwrap().is_none(), "and no copy of it in its history");
+            let table_now = after[&id].iter().find(|b| b.kind == BlockKind::Table).unwrap();
+            assert!(!table_now.data.contains("\"page\""));
+            assert_eq!((table_now.id.clone(), crate::table::Table::parse(&table_now.data)), (kept[&id][at].id.clone(), crate::table::Table::parse(&kept[&id][at].data)), "the table is the table it was");
+        }
+    }
+
+    #[test]
+    fn page_makes_a_template_in_any_case_and_is_never_kept_in_a_table() {
+        let mut s = server();
+        let table = "| Day | Spent |\n| --- | --- |\n| Mon |  |\n<!-- columns: text | rollup Amount sum USD sum -->";
+        // Written "Page:", by create_page, then by append_to_page.
+        let (made, _) = call(&mut s, "create_page", json!({ "title": "Week", "markdown": format!("{table}\n<!-- table: Week | Page: Item | Amount USD sum -->") }));
+        let id = json_of(&made)["id"].as_str().unwrap().to_string();
+        let (_, err) = call(&mut s, "append_to_page", json!({ "page_id": id, "markdown": format!("\n{}\n<!-- table: Next | page: Thing | Amount USD sum -->", table.replace("Day", "When")) }));
+        assert!(!err);
+        let (pages, blocks) = s.load().unwrap();
+        let tables: Vec<&Block> = blocks[&id].iter().filter(|b| b.kind == BlockKind::Table).collect();
+        assert_eq!(tables.len(), 2);
+        for (b, first) in tables.iter().zip(["Item", "Thing"]) {
+            assert!(!b.data.contains("\"page\""), "{}", b.data);
+            assert!(crate::table::Table::parse(&b.data).template.is_some());
+            let of = crate::state::template_page_id(&pages, &b.id).expect("a template's page");
+            assert_eq!(crate::table::Table::parse(&blocks[&of][0].data).heading(0), first);
+        }
+        // Nothing of a `page:` part in any stored block of the notes.
+        assert!(blocks.values().flatten().all(|b| !b.data.contains("\"page\"")));
+    }
+
+    #[test]
+    fn a_budget_with_a_page_for_each_day_is_made_in_one_go() {
+        let mut s = server();
+        let md = "| Date | Budget | Spent | Left |\n| --- | --- | --- | --- |\n| 2026-11-01 | $60.00 |  |  |\n| 2026-11-02 | $60.00 |  |  |\n\
+                  <!-- columns: date | number USD sum | rollup Amount sum USD sum | formula USD sum = Budget - Spent -->\n\
+                  <!-- table: November | color Left below 0 red | page: Item | Amount USD sum | Category choice {Food; Fun; Bills} -->";
+        let (made, err) = call(&mut s, "create_page", json!({ "title": "November budget", "markdown": md }));
+        assert!(!err, "{made}");
+        let id = json_of(&made)["id"].as_str().unwrap().to_string();
+        // The page of each row starts with that table: it is the table's template now.
+        let (pages, blocks) = s.load().unwrap();
+        let table_block = blocks[&id].iter().find(|b| b.kind == BlockKind::Table).unwrap();
+        assert!(!table_block.data.contains("\"page\":"), "kept in the template, not in the table");
+        let table = crate::table::Table::parse(&table_block.data);
+        assert!(table.template.is_some());
+        assert_eq!(table.kind(2), crate::table::Kind::Rollup);
+        let template = pages.values().find(|p| p.row_of.as_deref() == Some(format!("{}/template", table_block.id).as_str())).expect("a template page");
+        let start = crate::table::Table::parse(&blocks[&template.id][0].data);
+        assert_eq!((0..start.columns()).map(|c| start.heading(c)).collect::<Vec<_>>(), vec!["Item", "Amount", "Category"]);
+        // Read back, the page says so, and the rollup is there.
+        let (page, _) = call(&mut s, "read_page", json!({ "page_id": id }));
+        assert!(page.contains("rollup Amount sum USD sum"), "{page}");
+        assert!(page.contains("| page: Item text | Amount number USD sum | Category choice {Food:"), "{page}");
+        // Written again as it was read: nothing changes, and nothing is lost.
+        let body = page.split("---\n\n").nth(1).unwrap().to_string();
+        let (_, err) = call(&mut s, "replace_page_content", json!({ "page_id": id, "markdown": body }));
+        assert!(!err);
+        let (pages_after, blocks_after) = s.load().unwrap();
+        assert_eq!(pages_after.values().filter(|p| p.row_of.is_some()).count(), 1);
+        assert_eq!(blocks_after[&template.id], blocks[&template.id]);
+        // A kind changed and nothing else: the change is taken (the cells are the same).
+        let (_, err) = call(&mut s, "replace_page_content", json!({ "page_id": id, "markdown": body.replace("rollup Amount sum USD sum", "rollup Amount highest USD") }));
+        assert!(!err);
+        let (_, blocks_after) = s.load().unwrap();
+        let now = crate::table::Table::parse(&blocks_after[&id].iter().find(|b| b.kind == BlockKind::Table).unwrap().data);
+        assert_eq!(now.column(2).way, crate::table::Total::Highest);
+        assert!(now.template.is_some(), "what Markdown cannot say stays");
     }
 
     #[test]

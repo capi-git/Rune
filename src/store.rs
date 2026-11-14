@@ -1053,6 +1053,27 @@ mod tests {
     }
 
     #[test]
+    fn lines_side_by_side_are_kept_in_the_place_of_each_line() {
+        let store = Store::open_in_memory().unwrap();
+        let page = Page::new(None, 1.0);
+        store.save_page(&page).unwrap();
+        let mut lines = vec![Block::text("above"), Block::text("left"), Block::new(BlockKind::Image, ""), Block::text("below")];
+        lines[1].place.col = 1;
+        lines[2].place.col = 2;
+        lines[2].data = "a1b2c3.png".into();
+        store.save_blocks(&page.id, &lines).unwrap();
+        assert_eq!(store.load_page_blocks(&page.id).unwrap(), lines);
+        // In the column every line already has: no new column, no new mark.
+        assert_eq!(store.conn.query_row("SELECT place FROM blocks WHERE id = ?1", [&lines[2].id], |r| r.get::<_, String>(0)).unwrap(), r#"{"free":false,"right":false,"x":0,"y":0,"w":0,"col":2}"#);
+        assert_eq!(store.file_schema().unwrap(), SCHEMA);
+        assert_eq!(SCHEMA, 7);
+        // Rune 0.1.23 saves the page again: its place has no column.
+        store.run_for_test(&format!("UPDATE blocks SET place = '{{\"free\":false,\"right\":false,\"x\":0,\"y\":0,\"w\":0}}' WHERE id IN ('{}', '{}')", lines[1].id, lines[2].id));
+        let after = store.load_page_blocks(&page.id).unwrap();
+        assert_eq!(after.iter().map(|b| (&b.id, &b.text, &b.data, b.place.col)).collect::<Vec<_>>(), lines.iter().map(|b| (&b.id, &b.text, &b.data, 0)).collect::<Vec<_>>());
+    }
+
+    #[test]
     fn pages_and_events_of_a_space_that_is_gone_join_the_first_space() {
         let store = Store::open_in_memory().unwrap();
         let first = store.load_spaces().unwrap()[0].id.clone();
@@ -1227,7 +1248,7 @@ mod tests {
         // A picture keeps where it was put and how wide it was made.
         let mut picture = Block::new(BlockKind::Image, "");
         picture.data = "abcdefghij0123456789.png".into();
-        picture.place = crate::model::Place { free: true, right: true, x: -40, y: 0, w: 320, beside: false };
+        picture.place = crate::model::Place { free: true, right: true, x: -40, y: 0, w: 320, beside: false, col: 0 };
         let blocks = vec![Block::text("one"), todo, code, Block::page_link("abc".into()), picture];
         store.save_blocks(&page.id, &blocks).unwrap();
         // Saving again replaces rather than duplicates.

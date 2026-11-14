@@ -308,6 +308,9 @@ pub fn start_with(prefs: Prefs, messages: Vec<ChatMessage>, tools: Option<Tools>
         let reply = reply.replace("{given}", &given.join(" | "));
         let page = whole.split_once("<page>\n").and_then(|(_, rest)| rest.split_once("\n</page>")).map(|(page, _)| page).unwrap_or("");
         let reply = reply.replace("{page}", &page.chars().take(80).collect::<String>().replace('\n', " / "));
+        // (…and what was asked on the page just before, see `earlier_note`.)
+        let earlier = whole.split_once("asked on this page: “").and_then(|(_, rest)| rest.split_once('”')).map_or("", |(was, _)| was);
+        let reply = reply.replace("{earlier}", earlier);
         // A test of a large job: the reply is a plan ("@plan …"). The tools
         // are used only after the yes, and the answer is then "[[then: text]]".
         let is_plan = split_plan(&reply).is_some();
@@ -438,7 +441,7 @@ pub const PLAN_MARK: &str = "@plan";
 pub const PLAN_OK: &str = "The plan is approved.";
 
 /// For a run with the tools: a large job is shown as a plan first.
-pub const PLAN_RULE: &str = "A large job needs the person's yes first. If the request will make or change more than six pages or events, do not change anything yet: reply with a first line that is exactly `@plan`, then one or two sentences on what you will build, then the steps as a list (one line each, seven lines at most, plain words, no ids). When the request says that the plan is approved, do the work at once with the tools and do not ask again.";
+pub const PLAN_RULE: &str = "A large job needs the person's yes first. If the request will make or change more than six pages or events, do not change anything yet: reply with a first line that is exactly `@plan`, then one or two sentences on what you will build, then the steps as a list (one line each, seven lines at most, plain words, no ids). When the request says that the plan is approved, do the work at once with the tools and do not ask again. The pages of the rows of a table are made by Rune when the person opens them: they do not count, and a table with a page for each row is not a large job.";
 
 /// If a reply is a plan for a large job: what it will build, in a sentence
 /// or two, and its steps.
@@ -707,8 +710,12 @@ make, change, name, move and remove pages, and add, change and remove calendar e
 Never tell the person to do a step that you can do, and never say that you cannot see or change the notes: look, and do it. \
 You have no other tools: you cannot read files, run commands or browse the web, and you see nothing of this Mac but Rune. \
 Never invent what is in the notes: look it up with the tools. A page that you remove goes to the Trash. \
-Do what the request asks for and no more. Make each page with a tool call of its own, the main page first, \
-so that the person sees each page as it is made. When the work is done, say in one or two plain sentences what you did, \
+Do what the request asks for and no more, and build it in one go: do not stop to ask about details you can choose well. \
+Make each page with a tool call of its own, the main page first, so that the person sees each page as it is made. \
+When the person says that the result is wrong and not what they want instead: if a note after the request says what they asked just before, \
+read the page again with the tools, change what most likely did not match that, and say in one sentence what you changed; with no such note, \
+it is not known what they asked, so change nothing and reply with one short question about what they want. Never reply with a list of guesses. \
+When the work is done, say in one or two plain sentences what you did, \
 with the names of the pages and events, and with no ids and no links; but a reply that is a page (one that starts with @replace) says nothing else. \
 When you reply with content for a page, use Markdown: headings (#, ##, ###), bulleted lists, numbered lists, \
 to-do items (- [ ] task), block quotes, fenced code blocks and plain paragraphs; inside text you may \
@@ -723,9 +730,56 @@ with the names of the pages and events, with no ids and no links, and with no So
 When it is a question that the pages below do not answer, look in the other notes with the tools before you say that the notes \
 do not hold the answer. Never tell the person to do a step that you can do. A page that you remove goes to the Trash. \
 You have no other tools: you cannot read files, run commands or browse the web. \
-A large job needs the person's yes first. If the request will make or change more than six pages or events, do not change anything yet: reply with a first line that is exactly `@plan`, then one or two sentences on what you will build, then the steps as a list (one line each, seven lines at most, plain words, no ids). When the request says that the plan is approved, do the work at once with the tools and do not ask again.";
+A large job needs the person's yes first. If the request will make or change more than six pages or events, do not change anything yet: reply with a first line that is exactly `@plan`, then one or two sentences on what you will build, then the steps as a list (one line each, seven lines at most, plain words, no ids). When the request says that the plan is approved, do the work at once with the tools and do not ask again. The pages of the rows of a table are made by Rune when the person opens them: they do not count, and a table with a page for each row is not a large job.";
 
 pub const MAX_CONTEXT_CHARS: usize = 24_000;
+
+/// The last request asked on a page in this run of the app, and what came
+/// of it. A request that follows it on the same page soon after ("no, this
+/// is wrong") is given it: the AI sees only the page and the new words, and
+/// without it answered "this is wrong" with a list of guesses at what had
+/// been asked. Kept in memory only.
+struct Earlier {
+    page: String,
+    asked: String,
+    at: std::time::Instant,
+}
+
+thread_local! {
+    static EARLIER: std::cell::RefCell<Option<Earlier>> = const { std::cell::RefCell::new(None) };
+}
+
+/// How long a request is "the one before" for the next one on its page.
+const EARLIER_FOR: Duration = Duration::from_secs(30 * 60);
+
+/// A request on `page` came to its end: it is the one before for the next
+/// request there. Only the person's own words are kept (not the AI's
+/// reply, which can quote the page).
+pub fn remember_request(page: &str, asked: &str) {
+    // (A test's marks for the stand-in AI are not part of what was asked.)
+    let asked = asked.split("[[").next().unwrap_or("").trim();
+    if asked.is_empty() {
+        return;
+    }
+    let earlier = Earlier { page: page.to_string(), asked: asked.chars().take(600).collect(), at: std::time::Instant::now() };
+    EARLIER.with(|e| *e.borrow_mut() = Some(earlier));
+}
+
+/// For a new request on `page`: what was asked on that page just before, as
+/// a note after the request ("" when there was none, it was long ago, or it
+/// was this same request asked again).
+pub fn earlier_note(page: &str, asked: &str) -> String {
+    let asked = asked.split("[[").next().unwrap_or("").trim();
+    EARLIER.with(|e| {
+        let earlier = e.borrow();
+        let Some(was) = earlier.as_ref().filter(|was| was.page == page && was.at.elapsed() < EARLIER_FOR && was.asked != asked) else { return String::new() };
+        format!(
+            "\n\n(Just before this, the person asked on this page: “{}”. When this request says that the result is wrong, it is about that: \
+             fix what most likely did not match it, and do not reply with a list of guesses.)",
+            was.asked
+        )
+    })
+}
 
 /// The first line of a reply that is the whole page after a change (see the
 /// instructions for `AiAction::Ask`).
@@ -885,6 +939,10 @@ pub fn build_messages(action: &AiAction, page_md: &str, block_text: &str, prompt
              on what you did, because every line after it goes into that page. \
              If the request is a question, or asks for something new that changes nothing that is \
              there, reply with only the answer or the new content, and no `{REVISE_MARK}` line. \
+             If the request says that what is on the page is wrong and not what is wanted instead: \
+             when a note after the request says what was asked just before, change the page to what \
+             was most likely meant (with `{REVISE_MARK}`); with no such note, reply with one short \
+             question about what is wanted. Never reply with a list of guesses. \
              Never draw a picture with characters (boxes, lines, arrows, shading), even when a diagram or a picture \
              is asked for: a diagram is a code block of the language mermaid, which the app draws in its own colours (write no style \
              or classDef lines); levels, prices or amounts go in a small table.",
@@ -1017,6 +1075,34 @@ mod tests {
         let msgs = build_agent_messages("abc", "Plan", "# Plan", "build me a journal", "2026-11-10 17:30, Tuesday");
         assert!(msgs[1].content.contains(PLAN_MARK) && msgs[1].content.contains("more than six pages or events"));
         assert!(ASK_NOTES_TOOLS.contains(PLAN_MARK));
+        // A table with a page for each row is no large job: those pages are made when they are opened.
+        assert!(msgs[1].content.contains("a table with a page for each row is not a large job") && ASK_NOTES_TOOLS.contains("a table with a page for each row is not a large job"));
+    }
+
+    #[test]
+    fn told_it_is_wrong_the_ai_fixes_it_and_knows_what_was_asked() {
+        // The rule, in what a run with the tools is told and in the frame of a run without them.
+        let msgs = build_agent_messages("abc", "Budget", "# Budget", "no this is wrong", "2026-11-13 19:00, Friday");
+        assert!(msgs[0].content.contains("Never reply with a list of guesses") && msgs[0].content.contains("read the page again"));
+        assert!(msgs[0].content.contains("build it in one go"));
+        // With no note of what was asked before, a question, and no change.
+        assert!(msgs[0].content.contains("with no such note,") && msgs[0].content.contains("change nothing and reply with one short question"));
+        let plain = build_messages(&AiAction::Ask, "# Budget", "", "no this is wrong").pop().unwrap().content;
+        assert!(plain.contains("Never reply with a list of guesses") && plain.contains("most likely meant") && plain.contains("with no such note, reply with one short"));
+        // The connector's instructions know rollups, the page of each row, and the same rule.
+        for words in ["rollup Amount sum USD sum", "page: Item | Amount number USD sum", "Never reply with a list of guesses", "do not make those pages", "in this conversation", "it never changes a template that is there", "row_page_template:"] {
+            assert!(crate::mcp::INSTRUCTIONS.contains(words), "{words}");
+        }
+        // What was asked on a page just before goes with the next request there.
+        let page = "budget-page-of-this-test";
+        assert_eq!(earlier_note(page, "anything"), "");
+        remember_request(page, "a budget for November where each day has a table of spending [[reply: I made the page November budget.]]");
+        let note = earlier_note(page, "no this is wrong");
+        assert!(note.contains("“a budget for November where each day has a table of spending”"), "{note}");
+        assert!(!note.contains("[[") && !note.contains("]]") && !note.contains("I made the page"), "the person's words only: {note}");
+        // Not for another page, and not for the same request asked again.
+        assert_eq!(earlier_note("another page", "no this is wrong"), "");
+        assert_eq!(earlier_note(page, "a budget for November where each day has a table of spending"), "");
     }
 
     #[test]

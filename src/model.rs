@@ -269,6 +269,16 @@ pub struct Place {
     /// A table that stands beside the table above it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub beside: bool,
+    /// The column a line stands in when lines stand side by side (1 to
+    /// `columns::MOST`); 0 for a line as wide as the page. Any kind of line
+    /// can have it. See columns.rs. (An older Rune passes over the name: it
+    /// shows the lines one under the other, in their order.)
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub col: u8,
+}
+
+fn is_zero(n: &u8) -> bool {
+    *n == 0
 }
 
 impl Place {
@@ -288,6 +298,7 @@ impl Place {
             self.w = self.w.clamp(Place::NARROWEST, Place::WIDEST);
         }
         self.y = 0;
+        self.col = self.col.min(crate::columns::MOST);
         if self.free {
             self.x = self.x.clamp(-Place::FARTHEST, Place::FARTHEST);
         } else {
@@ -385,6 +396,13 @@ impl Block {
         self
     }
 
+    /// A new line made beside `line`: as deep as it, and in its column.
+    pub fn next_to(mut self, line: &Block) -> Block {
+        self.indent = line.indent;
+        self.place.col = line.place.col;
+        self
+    }
+
     /// The text as shown, without formatting markers.
     pub fn plain_text(&self) -> String {
         crate::inline::plain_for(self.kind, &self.text)
@@ -418,7 +436,8 @@ impl Block {
             self.collapsed = false;
         }
         if kind != BlockKind::Image {
-            self.place = Place::default();
+            // (A line stays in its column.)
+            self.place = Place { col: self.place.col, ..Place::default() };
         }
     }
 }
@@ -670,11 +689,12 @@ pub fn index_of(blocks: &[Block], id: &str) -> Option<usize> {
     blocks.iter().position(|b| b.id == id)
 }
 
-/// Exclusive end of the block at `idx` plus all of its nested children.
+/// Exclusive end of the block at `idx` plus all of its nested children
+/// (in its own column: see columns.rs).
 pub fn subtree_end(blocks: &[Block], idx: usize) -> usize {
-    let level = blocks[idx].indent;
+    let (level, col) = (blocks[idx].indent, blocks[idx].place.col);
     let mut end = idx + 1;
-    while end < blocks.len() && blocks[end].indent > level {
+    while end < blocks.len() && blocks[end].indent > level && blocks[end].place.col == col {
         end += 1;
     }
     end
@@ -683,10 +703,10 @@ pub fn subtree_end(blocks: &[Block], idx: usize) -> usize {
 /// Which blocks are visible (not hidden inside a collapsed toggle).
 pub fn visibility(blocks: &[Block]) -> Vec<bool> {
     let mut out = Vec::with_capacity(blocks.len());
-    let mut hidden_below: Option<u8> = None;
+    let mut hidden_below: Option<(u8, u8)> = None;
     for b in blocks {
-        if let Some(level) = hidden_below {
-            if b.indent > level {
+        if let Some((level, col)) = hidden_below {
+            if b.indent > level && b.place.col == col {
                 out.push(false);
                 continue;
             }
@@ -694,7 +714,7 @@ pub fn visibility(blocks: &[Block]) -> Vec<bool> {
         }
         out.push(true);
         if b.kind == BlockKind::Toggle && b.collapsed {
-            hidden_below = Some(b.indent);
+            hidden_below = Some((b.indent, b.place.col));
         }
     }
     out
@@ -712,14 +732,16 @@ pub fn heading_level(kind: BlockKind) -> Option<u8> {
 
 /// Exclusive end of the lines under the heading at `idx`: up to the next
 /// heading of the same or a higher level, or to the end of what the heading
-/// is nested in. (For a block that is no heading: the block alone.)
+/// is nested in. (For a block that is no heading: the block alone.) A
+/// heading in a column holds lines of its column only; a heading as wide as
+/// the page holds the columns under it too (see columns.rs).
 pub fn section_end(blocks: &[Block], idx: usize) -> usize {
     let Some(level) = heading_level(blocks[idx].kind) else { return idx + 1 };
-    let indent = blocks[idx].indent;
+    let (indent, col) = (blocks[idx].indent, blocks[idx].place.col);
     let mut end = idx + 1;
     while end < blocks.len() {
         let b = &blocks[end];
-        if b.indent < indent || (b.indent == indent && heading_level(b.kind).is_some_and(|l| l <= level)) {
+        if (col > 0 && b.place.col != col) || b.indent < indent || (b.indent == indent && b.place.col == col && heading_level(b.kind).is_some_and(|l| l <= level)) {
             break;
         }
         end += 1;
@@ -771,12 +793,18 @@ pub fn newly_hidden(before: &[Block], after: &[Block], folded: &std::collections
 /// The number shown on each numbered-list block (None for other blocks).
 pub fn list_numbers(blocks: &[Block]) -> Vec<Option<usize>> {
     let mut counters = [0usize; MAX_INDENT as usize + 1];
+    let mut col = 0;
     blocks
         .iter()
         .map(|b| {
             // A free picture is not in the list: the count goes on past it.
             if b.floats() {
                 return None;
+            }
+            // Each column counts from 1.
+            if b.place.col != col {
+                col = b.place.col;
+                counters = [0; MAX_INDENT as usize + 1];
             }
             let level = b.indent.min(MAX_INDENT) as usize;
             for c in counters.iter_mut().skip(level + 1) {
@@ -840,7 +868,7 @@ pub fn press_enter(blocks: &mut Vec<Block>, idx: usize, pos: usize, value: &str)
 
     // Enter at the very start of a non-empty block inserts an empty block above.
     if pos == 0 && visible > 0 {
-        let above = Block::new(next_kind, "").with_indent(current.indent);
+        let above = Block::new(next_kind, "").next_to(&current);
         blocks.insert(idx, above);
         return Caret::start(&current.id);
     }
@@ -862,7 +890,7 @@ pub fn press_enter(blocks: &mut Vec<Block>, idx: usize, pos: usize, value: &str)
         next_kind
     };
     let after = crate::inline::convert(&after, current.kind, kind);
-    let new_block = Block::new(kind, after).with_indent(indent);
+    let new_block = Block::new(kind, after).next_to(&current).with_indent(indent);
     let new_id = new_block.id.clone();
     blocks.insert(insert_at, new_block);
     Caret::start(&new_id)
@@ -898,6 +926,18 @@ pub fn press_backspace_at_start(blocks: &mut Vec<Block>, idx: usize, value: &str
 
     let vis = visibility(blocks);
     let prev = backspace_reaches(blocks, idx)?;
+    // At the top of a column nothing of the column before is joined or
+    // taken out (a divider at its foot was). An empty line goes away when a
+    // line of its own column above it can take the caret; else it stays.
+    if blocks[prev].place.col != current.place.col {
+        if !current.plain_text().is_empty() {
+            return None;
+        }
+        let target = (0..idx).rev().find(|&i| vis[i] && blocks[i].kind.is_editable() && blocks[i].place.col == current.place.col)?;
+        let id = blocks[target].id.clone();
+        blocks.remove(idx);
+        return Some(Caret::end(&id));
+    }
     match blocks[prev].kind {
         BlockKind::Divider => {
             blocks.remove(prev);
@@ -943,6 +983,10 @@ pub fn press_delete_at_end(blocks: &mut Vec<Block>, idx: usize, value: &str) -> 
     if !other.is_editable() || kind == BlockKind::Code {
         return None;
     }
+    // (Nothing is joined across columns: an empty line goes away.)
+    if blocks[next].place.col != blocks[idx].place.col && !blocks[idx].plain_text().is_empty() {
+        return None;
+    }
     if blocks[idx].plain_text().is_empty() {
         // (A line with lines nested in it stays: they would hang from nothing.)
         if subtree_end(blocks, idx) != idx + 1 {
@@ -979,7 +1023,8 @@ pub fn indent(blocks: &mut [Block], idx: usize) -> bool {
         return false;
     }
     let prev_indent = blocks[idx - 1].indent;
-    if blocks[idx].indent > prev_indent || blocks[idx].indent >= MAX_INDENT {
+    // (The first line of a column nests under nothing of the column before.)
+    if blocks[idx].indent > prev_indent || blocks[idx].indent >= MAX_INDENT || blocks[idx - 1].place.col != blocks[idx].place.col {
         return false;
     }
     let end = subtree_end(blocks, idx);
@@ -1016,13 +1061,23 @@ pub fn move_lines(blocks: &mut Vec<Block>, from_id: &str, to_id: &str, after: bo
     if to >= from && to < from_end {
         return false; // can't drop a block inside itself
     }
-    let target_indent = blocks[to].indent;
+    let (target_indent, target_col) = (blocks[to].indent, blocks[to].place.col);
+    // The lines go into the column of the line they are let go at (or out
+    // of the columns, beside a plain line). A heading that takes columns
+    // with it keeps them, and goes nowhere into a column.
+    let one_column = blocks[from..from_end].iter().all(|b| b.place.col == blocks[from].place.col);
+    if !one_column && target_col > 0 {
+        return false;
+    }
     let group: Vec<Block> = blocks.drain(from..from_end).collect();
     let delta = target_indent as i16 - group[0].indent as i16;
     let group: Vec<Block> = group
         .into_iter()
         .map(|mut b| {
             b.indent = (b.indent as i16 + delta).clamp(0, MAX_INDENT as i16) as u8;
+            if one_column {
+                b.place.col = target_col;
+            }
             b
         })
         .collect();
@@ -1036,11 +1091,12 @@ pub fn move_lines(blocks: &mut Vec<Block>, from_id: &str, to_id: &str, after: bo
 
 /// Swap a block with the previous sibling (same nesting level).
 pub fn move_up(blocks: &mut Vec<Block>, idx: usize) -> bool {
-    let level = blocks[idx].indent;
+    let (level, col) = (blocks[idx].indent, blocks[idx].place.col);
     let mut i = idx;
     while i > 0 {
         i -= 1;
-        if blocks[i].indent < level {
+        // (Not out of its column: a drag does that.)
+        if blocks[i].indent < level || blocks[i].place.col != col {
             return false;
         }
         // Free pictures are not lines to change places with.
@@ -1059,7 +1115,7 @@ pub fn move_down(blocks: &mut Vec<Block>, idx: usize) -> bool {
     while end < blocks.len() && blocks[end].indent == level && blocks[end].floats() {
         end += 1;
     }
-    if end >= blocks.len() || blocks[end].indent != level {
+    if end >= blocks.len() || blocks[end].indent != level || blocks[end].place.col != blocks[idx].place.col {
         return false;
     }
     let (from, to) = (blocks[idx].id.clone(), blocks[end].id.clone());
@@ -1077,6 +1133,10 @@ pub fn keep_unchanged(old: &[Block], new: Vec<Block>) -> Vec<Block> {
         BlockKind::Image | BlockKind::Drawing => format!("media:{}", b.id),
         BlockKind::PageLink => format!("page:{}", b.target.as_deref().unwrap_or("")),
         BlockKind::Divider => "divider".to_string(),
+        // (A table by all that its Markdown says: one whose kinds, view or
+        // name changed and whose cells did not is a changed table. By its
+        // words alone, it stayed the old block, and the change was lost.)
+        BlockKind::Table => format!("table:{}", crate::markdown::table_markdown(b, "")),
         _ => format!("text:{}", b.plain_text().trim()),
     };
     let a: Vec<String> = old.iter().map(key).collect();
@@ -1102,10 +1162,40 @@ pub fn keep_unchanged(old: &[Block], new: Vec<Block>) -> Vec<Block> {
             j += 1;
         }
     }
+    // The column of each line that is no old line again: that of the old
+    // line it takes the place of (the first new line between two kept lines
+    // takes the place of the first old line between them, and so on), else
+    // that of the line before it. (Every such line came with no column, and
+    // a guess afterwards put the first line of a column at the foot of the
+    // column before.)
+    let mut cols: Vec<u8> = vec![0; m];
+    let mut j = 0;
+    while j < m {
+        if let Some(i) = same[j] {
+            cols[j] = old[i].place.col;
+            j += 1;
+            continue;
+        }
+        let from = (0..j).rev().find_map(|k| same[k]).map_or(0, |i| i + 1);
+        let start = j;
+        while j < m && same[j].is_none() {
+            j += 1;
+        }
+        let to = same.get(j).copied().flatten().unwrap_or(n);
+        for k in start..j {
+            cols[k] = match old.get(from + k - start).filter(|_| from + k - start < to) {
+                Some(was) => was.place.col,
+                None if k > 0 => cols[k - 1],
+                None => 0,
+            };
+        }
+    }
     let mut out: Vec<Block> = new
         .into_iter()
         .zip(same)
-        .map(|(fresh, was)| {
+        .zip(cols)
+        .map(|((mut fresh, was), col)| {
+            fresh.place.col = col;
             let Some(was) = was.map(|i| &old[i]) else { return fresh };
             // What Markdown cannot say stays as it was; what it can say
             // (a line made a heading, a to-do ticked, its nesting) is taken.
@@ -1132,6 +1222,8 @@ pub fn keep_unchanged(old: &[Block], new: Vec<Block>) -> Vec<Block> {
     // A table with a changed cell has other words, so above it came out as
     // a new block. It is the same table still.
     keep_tables(old, &mut out);
+    // (A line that changed stands among the lines of its column again.)
+    crate::columns::tidy(&mut out);
     out
 }
 
@@ -1188,6 +1280,7 @@ pub fn keep_tables(old: &[Block], new: &mut [Block]) {
         b.data = now[n].to_data();
         b.text = now[n].plain_text();
         b.place.beside |= spare[w].place.beside;
+        b.place.col = spare[w].place.col;
     }
 }
 
@@ -1198,11 +1291,13 @@ pub fn keep_tables(old: &[Block], new: &mut [Block]) {
 pub fn place_picture(blocks: &mut Vec<Block>, id: &str, place: Place, to: Option<&str>, after: bool) -> bool {
     let Some(from) = index_of(blocks, id).filter(|&i| blocks[i].kind == BlockKind::Image) else { return false };
     let before = blocks.clone();
-    blocks[from].place = place.tidy();
+    // (It stays in its column, or takes the column of the line it goes to.)
+    blocks[from].place = Place { col: blocks[from].place.col, ..place.tidy() };
     if let Some(to) = to.filter(|to| *to != id && index_of(blocks, to).is_some()) {
         let mut picture = blocks.remove(from);
         let at = index_of(blocks, to).expect("the line is still there");
         picture.indent = blocks[at].indent;
+        picture.place.col = blocks[at].place.col;
         let at = if after { subtree_end(blocks, at) } else { at };
         blocks.insert(at, picture);
     }
@@ -1710,7 +1805,7 @@ mod tests {
 
     #[test]
     fn a_picture_goes_to_the_line_it_is_let_go_at() {
-        let free = Place { free: true, right: true, x: 42, y: 0, w: 300, beside: false };
+        let free = Place { free: true, right: true, x: 42, y: 0, w: 300, beside: false, col: 0 };
         let mut blocks = vec![
             picture(Place::default()),
             Block::text("a"),
@@ -1738,13 +1833,13 @@ mod tests {
         assert!(!place_picture(&mut blocks, &pic, free, Some("gone"), false));
         assert!(!place_picture(&mut blocks, &c, free, None, false), "only pictures have a place");
         // Back in line: it keeps its width and its spot in the list.
-        assert!(place_picture(&mut blocks, &pic, Place { free: false, right: true, x: 9, y: 9, w: 300, beside: false }, None, false));
-        assert_eq!(blocks[3].place, Place { free: false, right: false, x: 0, y: 0, w: 300, beside: false });
+        assert!(place_picture(&mut blocks, &pic, Place { free: false, right: true, x: 9, y: 9, w: 300, beside: false, col: 0 }, None, false));
+        assert_eq!(blocks[3].place, Place { free: false, right: false, x: 0, y: 0, w: 300, beside: false, col: 0 });
         assert!(!blocks[3].floats());
         // Numbers out of range are brought in.
-        assert_eq!(Place { free: true, right: true, x: 999_999, y: -999_999, w: 3, beside: false }.tidy(), Place { free: true, right: true, x: 20_000, y: 0, w: 40, beside: false });
+        assert_eq!(Place { free: true, right: true, x: 999_999, y: -999_999, w: 3, beside: false, col: 0 }.tidy(), Place { free: true, right: true, x: 20_000, y: 0, w: 40, beside: false, col: 0 });
         // A file from the first form of free pictures (with a height) still reads.
-        assert_eq!(Place::from_column(r#"{"free":true,"x":120,"y":64,"w":300}"#), Place { free: true, right: false, x: 120, y: 0, w: 300, beside: false });
+        assert_eq!(Place::from_column(r#"{"free":true,"x":120,"y":64,"w":300}"#), Place { free: true, right: false, x: 120, y: 0, w: 300, beside: false, col: 0 });
         assert_eq!(Place::from_column(&free.to_column()), free);
         assert_eq!(Place::default().to_column(), "");
         assert_eq!(Place::from_column("not json"), Place::default());
@@ -1766,7 +1861,7 @@ mod tests {
             toggle.clone(),
             Block::text("hidden line").with_indent(1),
             todo.clone(),
-            picture(Place { free: true, right: true, x: 0, y: 0, w: 200, beside: false }),
+            picture(Place { free: true, right: true, x: 0, y: 0, w: 200, beside: false, col: 0 }),
             Block::text("Old closing line"),
         ];
         // As read back from the AI's Markdown: new ids, the toggle a bullet,
@@ -1883,7 +1978,7 @@ mod tests {
 
     #[test]
     fn a_free_picture_is_not_a_line() {
-        let free = picture(Place { free: true, right: false, x: 0, y: 0, w: 200, beside: false });
+        let free = picture(Place { free: true, right: false, x: 0, y: 0, w: 200, beside: false, col: 0 });
         // The count of a numbered list goes on past it.
         let blocks = vec![Block::new(BlockKind::Numbered, "one"), free.clone(), Block::new(BlockKind::Numbered, "two")];
         assert_eq!(list_numbers(&blocks), vec![Some(1), None, Some(2)]);

@@ -202,6 +202,14 @@ pub fn export_all(
                 let name = if caption.is_empty() { "Image" } else { caption.as_str() };
                 Some(format!("{}![{name}]({})", "  ".repeat(b.indent as usize), encode(&file)))
             }
+            // A table with a column that takes a total from the pages of its
+            // rows goes out with those totals in it.
+            BlockKind::Table if b.data.contains(r#""formula":"rollup "#) => {
+                let mut table = crate::table::Table::parse(&b.data);
+                table.beside = b.place.beside;
+                crate::state::roll_up(pages, blocks, &b.id, &mut table);
+                Some(table.to_markdown(&"  ".repeat(b.indent as usize)))
+            }
             _ => None,
         });
         let md = rewrite_page_urls(&md, link);

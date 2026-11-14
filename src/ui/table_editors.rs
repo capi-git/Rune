@@ -432,21 +432,37 @@ pub fn DatePicker(page_id: String, id: String, r: usize, c: usize, text: String)
 /// not typed in, and a click on it says so. From a cell of the table, the
 /// column's menu (where the formula is written) is a click away.
 #[component]
-pub fn WorkedOut(id: String, c: usize, heading: String, from: String, formula: bool, in_table: bool) -> Element {
+pub fn WorkedOut(
+    id: String,
+    c: usize,
+    heading: String,
+    from: String,
+    formula: bool,
+    /// It takes a total from the row's page (see `Kind::Rollup`).
+    #[props(default)]
+    rollup: bool,
+    in_table: bool,
+) -> Element {
     let state = use_context::<AppState>();
     rsx! {
         div { class: "popover table-menu worked-out", role: "dialog", "aria-label": "How {heading} is worked out", onclick: move |e| e.stop_propagation(),
             div { class: "ai-menu-label", if formula { "Formula" } else { "Worked out" } }
             div { class: if formula { "worked-from code" } else { "worked-from" }, "{from}" }
-            div { class: "menu-hint", "This cell is worked out from the other cells of its row. It cannot be typed in." }
-            if formula && in_table {
+            div { class: "menu-hint",
+                if rollup {
+                    "This cell is worked out from the row's page. It cannot be typed in."
+                } else {
+                    "This cell is worked out from the other cells of its row. It cannot be typed in."
+                }
+            }
+            if (formula || rollup) && in_table {
                 div { class: "ai-menu-sep" }
                 button {
                     class: "ai-menu-row",
                     role: "menuitem",
                     "data-item": "edit-formula",
                     onclick: move |_| state.set_popover(Some(Popover::TableColumn { block_id: id.clone(), column: c })),
-                    span { class: "ai-menu-value", Icon { name: "sigma", size: 14 } "Edit the formula" }
+                    span { class: "ai-menu-value", Icon { name: "sigma", size: 14 } if rollup { "Change what it takes" } else { "Edit the formula" } }
                 }
             }
         }

@@ -379,6 +379,9 @@ pub enum Back {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Popover {
     BlockMenu { block_id: Id },
+    /// "Move to…" for lines: the list of pages to move them to, at the
+    /// line `block`; `ids` are the lines that go (see `open_move_lines`).
+    MoveLines { page: Id, block: Id, ids: Vec<Id> },
     /// The ⋯ menu of a pane's page.
     PageMenu { pane: Id },
     IconPicker { page_id: Id },
@@ -590,7 +593,7 @@ fn tab_space(tab: &Tab, pages: &HashMap<Id, Page>) -> Option<Id> {
 /// it opened, and wrote that old copy back over the first window's at its
 /// next click on a tab.
 fn ui_settings(ui: &Ui, primary: bool) -> Vec<(&'static str, String)> {
-    let mut pairs = vec![("theme", ui.theme.as_str().to_string())];
+    let mut pairs = vec![("theme", ui.theme.as_str().to_string()), ("typewriter", if ui.typewriter { "1".into() } else { "0".into() })];
     if primary {
         let json = |v: &dyn erased::Json| v.json();
         pairs.extend([
@@ -684,6 +687,10 @@ pub struct Ui {
     /// Focus mode: only the page is shown, the lines around the caret are
     /// pale, and the line being written stays near the middle. Not kept.
     pub focus_mode: bool,
+    /// Typewriter mode (View ▸ Typewriter Mode): the line being written
+    /// stays in the middle of its pane (bridge.js). Kept, as the setting
+    /// "typewriter" ("1" when on; none in a Rune from before it: off).
+    pub typewriter: bool,
     /// The headings folded on each page (page id, then the ids of its
     /// folded headings): the lines under them are hidden, never changed
     /// (see `shown` in model.rs). Kept with the window's layout, not in the
@@ -890,6 +897,14 @@ fn page_as_given(pages: &HashMap<Id, Page>, page_id: &str, blocks: &[Block]) -> 
     if title.is_empty() { body } else { format!("# {title}\n\n{body}") }
 }
 
+/// The same, with what the tables of the page take from the pages of their
+/// rows, and what those pages start with (see `tables::roll_up`).
+fn page_as_given_with(pages: &HashMap<Id, Page>, all: &HashMap<Id, Vec<Block>>, page_id: &str, blocks: &[Block]) -> String {
+    let title = pages.get(page_id).map(|p| p.title.trim().to_string()).unwrap_or_default();
+    let body = crate::mcp::render_body_with(pages, Some(all), blocks);
+    if title.is_empty() { body } else { format!("# {title}\n\n{body}") }
+}
+
 /// The picked part of a page as the AI is given it (see `part_for_ai`).
 fn part_as_given(pages: &HashMap<Id, Page>, blocks: &[Block], part: &[Id]) -> String {
     let mut blocks: Vec<Block> = blocks.iter().filter(|b| part.contains(&b.id)).cloned().collect();
@@ -975,8 +990,10 @@ pub fn slash_items() -> Vec<SlashItem> {
     ]
 }
 
-pub fn filter_slash(query: &str) -> Vec<SlashItem> {
-    filter_slash_for(query, ai::shown())
+/// The rows of the "/" menu in a page. (No AI rows in a locked page, also
+/// while it is open: the AI is never given its words.)
+pub fn filter_slash(query: &str, page_id: &str) -> Vec<SlashItem> {
+    filter_slash_for(query, ai::shown() && !crate::lock::is_open(page_id))
 }
 
 /// The rows of the "/" menu for what is typed. Its AI rows are there only
@@ -1123,6 +1140,8 @@ pub enum Bridge {
     CopyPicture { name: String },
     /// Copy (or Cut) from the short text menu: put this on the clipboard.
     CopyText { text: String },
+    /// A press on the grey answer of math in a line: copy it, and say so.
+    CopyAnswer { text: String },
     /// A pane folded to a rail (or opened again) by dragging its divider.
     FoldPane { pane: String, on: bool },
     /// A sidebar page dropped on the tab strip.
@@ -1130,7 +1149,9 @@ pub enum Bridge {
     Block { page: String, id: String, action: String, #[serde(default)] pos: usize },
     Nav { page: String, id: String, dir: String },
     Menu { action: String },
-    Move { page: String, from: String, to: String, after: bool },
+    /// A line dragged above or below another (`after`), or to its left or
+    /// right side (`side`), where the two stand side by side.
+    Move { page: String, from: String, to: String, after: bool, #[serde(default)] side: Option<String> },
     Shortcut { name: String },
     Focus { page: String, id: String },
 }
@@ -1145,7 +1166,7 @@ pub const SIDEBAR_MAX: f64 = 320.0;
 
 // Typed tables and charts (state/tables.rs).
 mod tables;
-pub use tables::{stale_row_titles, written_row_pages, ChartSource, Open};
+pub use tables::{roll_up, rolled, rollup_sources, row_template, said_for_blocks, stale_row_titles, template_page_id, written_row_pages, ChartSource, Open};
 
 mod erased {
     pub trait Json {
@@ -1835,6 +1856,59 @@ pub fn pick_blocks(blocks: &[Block], from: Option<&[Id]>, id: &str) -> Vec<Id> {
         }
     }
     blocks[first..last.min(blocks.len())].iter().map(|b| b.id.clone()).collect()
+}
+
+/// Take lines out of a page, to move them to another (see `move_lines_to`):
+/// the blocks `ids`, each with what is nested in it (a toggle with its
+/// lines, a list item with its sub-items) and a folded heading (`folded`)
+/// with the lines it hides, in the order of the page. What goes keeps its
+/// indents, less those of the least indented of it, and is in no column
+/// (it comes to the other page as plain lines: see `put_at_end`).
+pub fn take_lines(blocks: &mut Vec<Block>, ids: &[Id], folded: impl Fn(&str) -> bool) -> Vec<Block> {
+    let mut going = vec![false; blocks.len()];
+    for i in 0..blocks.len() {
+        if going[i] || !ids.contains(&blocks[i].id) {
+            continue;
+        }
+        let mut end = subtree_end(blocks, i);
+        if folded(&blocks[i].id) {
+            end = end.max(section_end(blocks, i));
+        }
+        going[i..end].iter_mut().for_each(|g| *g = true);
+    }
+    let (mut out, mut kept) = (Vec::new(), Vec::new());
+    for (b, go) in std::mem::take(blocks).into_iter().zip(going) {
+        if go { out.push(b) } else { kept.push(b) }
+    }
+    *blocks = kept;
+    let least = out.iter().map(|b| b.indent).min().unwrap_or(0);
+    for b in &mut out {
+        b.indent -= least;
+        b.place.col = 0;
+    }
+    out
+}
+
+/// Put moved lines at the end of a page: after its last line, or above an
+/// empty line that ends it (a new page is one empty line). They are under
+/// a set of columns that ends the page, not in it: an empty line in a
+/// column is not the end (`columns::tidy` would put them in that column).
+pub fn put_at_end(blocks: &mut Vec<Block>, lines: Vec<Block>) {
+    let empty_end = blocks.last().is_some_and(|b| b.kind == BlockKind::Text && b.indent == 0 && b.place.col == 0 && b.text.trim().is_empty());
+    let at = if empty_end { blocks.len() - 1 } else { blocks.len() };
+    blocks.splice(at..at, lines);
+}
+
+/// The pages to offer in "Move to…" for lines, for what is typed: as for a
+/// link (this space, not the page itself, not the Trash; by name, then the
+/// pages changed last), and not a locked page, shut or open (`shut`), or the
+/// page of a row of a table (it is not in the sidebar, and the lines can
+/// hold that table).
+pub fn pages_to_move_to(pages: &HashMap<Id, Page>, space: &str, here: &str, query: &str, shut: impl Fn(&str) -> bool) -> Vec<Page> {
+    let mut found = pages_to_link(pages, space, here, query);
+    found.retain(|p| !shut(&p.id) && p.row_of.is_none());
+    found.truncate(6);
+    found
 }
 
 /// The pages to offer for a link, for what is typed after "@" or "[[": those
@@ -2861,6 +2935,7 @@ impl AppState {
             history: None,
             voice: VoiceFor::NewPage,
             focus_mode: false,
+            typewriter: store::setting("typewriter").is_some_and(|v| v == "1"),
             // (A Rune from before folded headings has no such setting. Pages
             // that are gone take their entries along; with no page read at
             // all, nothing is dropped.)
@@ -4427,6 +4502,105 @@ impl AppState {
         }
     }
 
+    /// "Move to…" for lines (in the menu of a line, and ⌘⇧P; not on a locked
+    /// page, shut or open: `locked_lines`): the picked
+    /// lines when `id` is one of them, or else that line with what is
+    /// nested in it. They are picked while the list of pages is open, and
+    /// the list hangs on the line `id`.
+    pub fn open_move_lines(mut self, page: &str, id: &str) {
+        let ids = match self.picked.peek().clone() {
+            Some(p) if p.page == page && p.ids.iter().any(|i| i == id) => p.ids,
+            _ => self.blocks.peek().get(page).map(|bs| pick_blocks(bs, None, id)).unwrap_or_default(),
+        };
+        if ids.is_empty() || self.locked_lines(page) {
+            return;
+        }
+        self.clear_slash();
+        self.picked.set(Some(Picked { page: page.to_string(), ids: ids.clone() }));
+        self.set_popover(Some(Popover::MoveLines { page: page.to_string(), block: id.to_string(), ids }));
+    }
+
+    /// The pages that "Move to…" offers for the lines of `page`.
+    pub fn move_lines_choices(&self, page: &str, query: &str) -> Vec<Page> {
+        let space = self.pages.read().get(page).map(|p| p.space_id.clone()).unwrap_or_else(|| self.ui.peek().space.clone());
+        pages_to_move_to(&self.pages.read(), &space, page, query, |id| self.locked_lines(id))
+    }
+
+    /// Move lines of `from` to the end of the page `to` (see `take_lines`
+    /// and `put_at_end`). It is one step of Undo in each of the two pages,
+    /// and Undo in either takes the move back whole while the other has no
+    /// later change (`History::join`). The page they left stays in view,
+    /// and a message with Undo says where they went. Each line gets a new
+    /// id, as a paste gives it; a table keeps its own, and the pages of its
+    /// rows come along (as a cut and a paste of it do).
+    pub fn move_lines_to(mut self, from: &str, ids: &[Id], to: &str) {
+        self.set_popover(None);
+        self.clear_picked();
+        let open = self.pages.peek().get(to).is_some_and(|p| !p.trashed);
+        if from == to || !open || self.locked_lines(to) {
+            return;
+        }
+        let folds = self.folds_of(from);
+        let from_was = self.history.peek().next_undo(from);
+        // The lines are taken from the page as this edit has it: it can be
+        // the page as it is on disk, newer than the window's (an AI tool
+        // added a sub-item to a picked line), and what goes is what leaves.
+        // The pages of the rows of their tables that are not in the Trash
+        // are noted before the edit, which drops those of tables that went.
+        let (lines, rows, caret) = self.edit_blocks(from, |bs| {
+            let first = bs.iter().position(|b| ids.contains(&b.id));
+            let lines = take_lines(bs, ids, |id| folds.contains(id));
+            let rows: Vec<Id> = {
+                let pages = self.pages.peek();
+                lines.iter().filter(|b| b.kind == BlockKind::Table).flat_map(|t| self.row_pages(&t.id).into_values()).filter(|id| pages.get(id).is_some_and(|p| !p.trashed)).collect()
+            };
+            ensure_not_empty(bs);
+            let caret = first.and_then(|first| (0..first.min(bs.len())).rev().find(|&i| bs[i].kind.is_editable()).or_else(|| bs.iter().position(|b| b.kind.is_editable()))).map(|at| Caret::end(&bs[at].id));
+            (lines, rows, caret)
+        });
+        // (A locked page keeps its lines.)
+        if lines.is_empty() || self.history.peek().next_undo(from) == from_was {
+            return;
+        }
+        let tables: Vec<Id> = lines.iter().filter(|b| b.kind == BlockKind::Table).map(|b| b.id.clone()).collect();
+        let count = lines.len();
+        let moved: Vec<Block> = lines
+            .into_iter()
+            .map(|mut b| {
+                if b.kind != BlockKind::Table {
+                    b.id = new_id();
+                }
+                b
+            })
+            .collect();
+        let to_was = self.history.peek().next_undo(to);
+        self.edit_blocks(to, |bs| put_at_end(bs, moved));
+        if self.history.peek().next_undo(to) == to_was {
+            // (They could not go there: they come back.)
+            self.step_on(from, true);
+            return;
+        }
+        for t in &tables {
+            self.bring_row_pages(to, t, &rows);
+        }
+        self.history.write().join(from, to, rows);
+        if let Some(caret) = caret {
+            self.focus(caret);
+        }
+        let name = self.page_title(to);
+        self.toast_step(if count == 1 { format!("Moved 1 line to {name}") } else { format!("Moved {count} lines to {name}") }, from, from_was);
+    }
+
+    /// "New page…" in "Move to…": a page with the typed name (made as
+    /// search makes it, see `make_page_at_path`), and the lines go there.
+    /// Undo in the page they left also puts the new page in the Trash.
+    pub fn move_lines_to_new(mut self, from: &str, ids: &[Id], typed: &str) {
+        let Some(page) = self.make_page_at_path(typed) else { return };
+        self.move_lines_to(from, ids, &page);
+        // (Its step is the last one now, when the lines went there.)
+        self.history.write().attach(&page, &[], std::slice::from_ref(&page));
+    }
+
     // ----- focus and DOM sync -------------------------------------------
 
     /// Put the caret in a block. Runs after the next render.
@@ -5360,8 +5534,17 @@ impl AppState {
     /// Plan" makes Plan inside the page Work (made too if there is none).
     /// The page opens with the caret on its first line.
     pub fn new_page_at_path(self, typed: &str) {
+        let Some(id) = self.make_page_at_path(typed) else { return };
+        self.open_in_new_tab(Route::Page(id.clone()));
+        if let Some(first) = self.blocks.peek().get(&id).and_then(|bs| bs.first()).map(|b| b.id.clone()) {
+            self.focus(Caret::end(&first));
+        }
+    }
+
+    /// Make the page that `new_page_at_path` opens, and give its id.
+    fn make_page_at_path(self, typed: &str) -> Option<Id> {
         let parts = path_parts(typed);
-        let Some((name, above)) = parts.split_last() else { return };
+        let (name, above) = parts.split_last()?;
         let (mut parent, missing) = {
             let pages = self.pages.peek();
             find_path(&pages, &self.ui.peek().space, above)
@@ -5371,11 +5554,7 @@ impl AppState {
             self.rename_page(&id, title.clone());
             parent = Some(id);
         }
-        let Some(id) = parent else { return };
-        self.open_in_new_tab(Route::Page(id.clone()));
-        if let Some(first) = self.blocks.peek().get(&id).and_then(|bs| bs.first()).map(|b| b.id.clone()) {
-            self.focus(Caret::end(&first));
-        }
+        parent
     }
 
     /// Focus mode on or off (⌘., Escape leaves it). The page script keeps
@@ -5390,6 +5569,22 @@ impl AppState {
         if on {
             self.toast("Focus mode. Esc leaves it.");
         }
+    }
+
+    /// Typewriter mode on or off (View ▸ Typewriter Mode, and search). It
+    /// is one setting for every window, kept between runs.
+    pub fn toggle_typewriter(mut self) {
+        let on = !self.ui.peek().typewriter;
+        self.set_typewriter(on);
+        self.save_ui();
+        sync::others(self.win.key, SyncMsg::Typewriter(on));
+        self.toast(if on { "Typewriter mode on" } else { "Typewriter mode off" });
+    }
+
+    fn set_typewriter(mut self, on: bool) {
+        self.ui.write().typewriter = on;
+        crate::check_typewriter(on);
+        document::eval(&format!("window.__rune && window.__rune.typewriter({on})"));
     }
 
     pub fn rename_page(mut self, id: &str, title: String) {
@@ -5635,6 +5830,8 @@ impl AppState {
             let mut all = self.blocks.write();
             let blocks = all.entry(page_id.to_string()).or_default();
             let r = f(blocks);
+            // (Lines side by side: see columns.rs.)
+            crate::columns::tidy(blocks);
             ensure_not_empty(blocks);
             (r, blocks.clone())
         };
@@ -8248,7 +8445,7 @@ impl AppState {
                     if sc.kind == BlockKind::Divider {
                         bs[i].text.clear();
                         bs[i].turn_into(BlockKind::Divider);
-                        let next = Block::text("").with_indent(bs[i].indent);
+                        let next = Block::text("").next_to(&bs[i]);
                         caret = Some(Caret::start(&next.id));
                         bs.insert(i + 1, next);
                     } else {
@@ -8282,7 +8479,7 @@ impl AppState {
         // caret was known, no list opened there at all. At the end of a
         // line the list says "No results", as it did.)
         if let Some((_, query, false, _)) = &slash {
-            if mid_line && filter_slash(query).is_empty() {
+            if mid_line && filter_slash(query, page_id).is_empty() {
                 slash = None;
             }
         }
@@ -8382,7 +8579,7 @@ impl AppState {
             Bridge::ImageData { page, id, data } => self.paste_image(&page, &id, &data),
             Bridge::CellPicture { page, id, r, c, data } => self.paste_cell_picture(&page, &id, r, c, &data),
             Bridge::ImagePlace { page, id, x, w, right, to, after } => {
-                let place = Place { free: true, right, x: x.round() as i32, y: 0, w: w.round().max(0.0) as u32, beside: false };
+                let place = Place { free: true, right, x: x.round() as i32, y: 0, w: w.round().max(0.0) as u32, beside: false, col: 0 };
                 self.edit_blocks(&page, |bs| place_picture(bs, &id, place, to.as_deref(), after));
             }
             Bridge::ImageSize { page, id, w } => {
@@ -8443,6 +8640,10 @@ impl AppState {
                     self.toast(format!("Couldn't copy: {e}"));
                 }
             }
+            Bridge::CopyAnswer { text } => {
+                let said = format!("Copied {text}");
+                self.copy_to_clipboard(text, &said);
+            }
             Bridge::CopyPicture { name } => self.copy_picture(&name),
             Bridge::PageStripDrop { page, to, mode } => self.drop_page_on_strip(&page, to.as_deref(), &mode),
             Bridge::PageMove { page, target, mode } => self.move_page(&page, target.as_deref(), &mode),
@@ -8467,21 +8668,44 @@ impl AppState {
                 let Some(i) = index_of(&blocks, &id) else { return };
                 // (Over the lines of a folded heading, as over those of a closed toggle.)
                 let vis = shown(&blocks, &self.folds_of(&page));
-                if dir == "up" {
-                    match prev_editable_of(&blocks, i, &vis) {
+                // Up and Down pass over the other columns of a set (Left and
+                // Right go on from line to line).
+                let side = dir == "left" || dir == "right";
+                if dir == "up" || dir == "left" {
+                    let j = prev_editable_of(&blocks, i, &vis);
+                    let j = match j.and_then(|j| crate::columns::across(&blocks, i, j)).filter(|_| !side) {
+                        Some(set) => prev_editable_of(&blocks, set.start, &vis),
+                        None => j,
+                    };
+                    match j {
                         Some(j) => self.focus(Caret::end(&blocks[j].id)),
                         None => self.focus_title(&page),
                     }
-                } else if let Some(j) = next_editable_of(&blocks, i, &vis) {
-                    self.focus(Caret::start(&blocks[j].id));
+                } else {
+                    let j = next_editable_of(&blocks, i, &vis);
+                    let j = match j.and_then(|j| crate::columns::across(&blocks, i, j)).filter(|_| !side) {
+                        Some(set) => next_editable_of(&blocks, set.end - 1, &vis),
+                        None => j,
+                    };
+                    if let Some(j) = j {
+                        self.focus(Caret::start(&blocks[j].id));
+                    }
                 }
             }
             Bridge::Menu { action } => self.slash_key(&action),
-            Bridge::Move { page, from, to, after } => {
+            Bridge::Move { page, from, to, after, side } => {
                 // A folded heading goes with the lines it hides. (A line let
                 // go under a folded heading opens it: `show_newly_hidden`.)
                 let section = self.is_folded(&page, &from);
-                self.edit_blocks(&page, |bs| move_lines(bs, &from, &to, after, section));
+                match side.as_deref() {
+                    Some(side) => {
+                        let to_section = self.is_folded(&page, &to);
+                        self.edit_blocks(&page, |bs| crate::columns::drop_beside(bs, &from, &to, side == "right", section, to_section));
+                    }
+                    None => {
+                        self.edit_blocks(&page, |bs| move_lines(bs, &from, &to, after, section));
+                    }
+                }
             }
             Bridge::Shortcut { name } => self.command(&name),
             Bridge::Focus { page, id } => {
@@ -8508,6 +8732,8 @@ impl AppState {
                 self.show_line(page, id);
                 return;
             }
+            // ⌘⇧P: "Move to…" for the picked lines, or this line.
+            "move_to" => return self.open_move_lines(page, id),
             _ => {}
         }
         let mut refocus = Some(Caret { id: id.to_string(), pos });
@@ -9159,7 +9385,7 @@ impl AppState {
             } else {
                 // After the line and what is nested in it (the lines of a
                 // toggle, sub-bullets), not between them.
-                let mut image = Block::new(BlockKind::Image, "").with_indent(bs[i].indent);
+                let mut image = Block::new(BlockKind::Image, "").next_to(&bs[i]);
                 image.data = name;
                 let at = subtree_end(bs, i);
                 bs.insert(at, image);
@@ -9168,7 +9394,7 @@ impl AppState {
             // An empty line right under the picture, to go on typing in: the
             // caret goes there, not into the text that came after.
             if !bs.get(at + 1).is_some_and(|next| next.kind == BlockKind::Text && next.text.trim().is_empty()) {
-                bs.insert(at + 1, Block::text("").with_indent(bs[at].indent));
+                bs.insert(at + 1, Block::text("").next_to(&bs[at]));
             }
             put = Some(bs[at].id.clone());
             Some(Caret::start(&bs[at + 1].id))
@@ -9386,7 +9612,7 @@ impl AppState {
         let new_id = self.edit_blocks(page, |bs| {
             let i = index_of(bs, id)?;
             let at = subtree_end(bs, i);
-            let b = Block::text("/").with_indent(bs[i].indent);
+            let b = Block::text("/").next_to(&bs[i]);
             let nid = b.id.clone();
             bs.insert(at, b);
             Some(nid)
@@ -9415,7 +9641,8 @@ impl AppState {
         let target = self.edit_blocks(page, |bs| {
             // The last line; free pictures kept after it are not lines.
             match bs.iter().rev().find(|b| !b.floats()) {
-                Some(last) if last.kind.is_editable() && last.text.is_empty() && last.indent == 0 => last.id.clone(),
+                // (Under columns: a new line under them, as wide as the page.)
+                Some(last) if last.kind.is_editable() && last.text.is_empty() && last.indent == 0 && last.place.col == 0 => last.id.clone(),
                 _ => {
                     let b = Block::text("");
                     let id = b.id.clone();
@@ -9465,9 +9692,9 @@ impl AppState {
                 let i = index_of(bs, id)?;
                 let kind = bs[i].kind;
                 if value.trim().is_empty() && kind == BlockKind::Text {
-                    let indent = bs[i].indent;
-                    bs[i] = Block::page_link(target.clone()).with_indent(indent);
-                    let next = Block::text("").with_indent(indent);
+                    let line = bs[i].clone();
+                    bs[i] = Block::page_link(target.clone()).next_to(&line);
+                    let next = Block::text("").next_to(&line);
                     let caret = Caret::start(&next.id);
                     bs.insert(i + 1, next);
                     return Some(caret);
@@ -9522,7 +9749,7 @@ impl AppState {
         let caret = self.edit_blocks(page, |bs| {
             let i = index_of(bs, id)?;
             let kind = bs[i].kind;
-            let base = bs[i].indent;
+            let (base, col) = (bs[i].indent, bs[i].place.col);
             let (before, after) = inline::split_for(kind, &value, pos);
             // (Pasted in an empty line, a list, a heading or a table takes
             // the place of the line: no empty line stays over it.)
@@ -9535,7 +9762,9 @@ impl AppState {
             let mut last = bs[i].id.clone();
             for (n, b) in items.into_iter().enumerate() {
                 let indent = b.indent;
-                let b = b.with_indent(base + indent);
+                let mut b = b.with_indent(base + indent);
+                // (In the column of the line it is pasted in.)
+                b.place.col = col;
                 last = b.id.clone();
                 bs.insert(i + 1 + n, b);
             }
@@ -9548,6 +9777,7 @@ impl AppState {
             // the caret. Joined to it, those words were not seen again.)
             if !bs[li].kind.is_editable() {
                 let mut tail = Block::text("").with_indent(base);
+                tail.place.col = col;
                 tail.text = inline::join_for(BlockKind::Text, "", kind, &after);
                 let id = tail.id.clone();
                 bs.insert(li + 1, tail);
@@ -9592,6 +9822,26 @@ impl AppState {
             self.toast(if undo { "Nothing to undo" } else { "Nothing to redo" });
             return;
         };
+        // Lines moved to another page: the step of each page goes back (or
+        // is done again) with the other, the one that takes the lines out of
+        // its page first (see `History::join`).
+        let joined = self.history.peek().partner(&e, undo);
+        // The other half is gone (that page changed since, was locked, or
+        // another window or program wrote it): a step that would take the
+        // lines out of this page is not taken, and is dropped, so that no
+        // line leaves this page without going back to the other. Older
+        // steps of this page are reached by the next Undo.
+        if History::half_alone(&e, joined.as_ref(), undo) {
+            self.toast(if undo { "The page they came from changed. They stay here." } else { "The page they went to changed. They stay here." });
+            return;
+        }
+        if let Some(j) = joined.as_ref().filter(|j| j.other_first(undo)) {
+            {
+                let mut h = self.history.write();
+                if undo { h.push_undo(e) } else { h.push_redo(e) }
+            }
+            return self.step_on(&j.page.clone(), undo);
+        }
         let current = self.blocks.peek().get(&page).cloned().unwrap_or_default();
         // Only what this step changed: a transcript or an AI's text that came
         // in after it is not part of the step, and stays.
@@ -9630,11 +9880,23 @@ impl AppState {
         for id in &e.created {
             self.set_trashed(id, undo);
         }
-        if let Some(c) = caret_between(&current, &target) {
+        // (Not in the other page of a move of lines, when it is not in view.)
+        if let Some(c) = caret_between(&current, &target).filter(|_| self.shows_page(&page)) {
             self.focus(c);
         }
-        let mut h = self.history.write();
-        if undo { h.push_redo(e) } else { h.push_undo(e) }
+        {
+            let mut h = self.history.write();
+            if undo { h.push_redo(e) } else { h.push_undo(e) }
+        }
+        // The lines go into the other page now, and the pages of the rows of
+        // their tables with them.
+        if let Some(j) = joined {
+            self.step_on(&j.page, undo);
+            let tables: Vec<Id> = self.blocks.peek().get(&j.page).map(|bs| bs.iter().filter(|b| b.kind == BlockKind::Table).map(|b| b.id.clone()).collect()).unwrap_or_default();
+            for t in tables.iter().filter(|t| self.row_pages(t).values().any(|p| j.rows.contains(p))) {
+                self.bring_row_pages(&j.page, t, &j.rows);
+            }
+        }
     }
 
     // ----- links -------------------------------------------------------------
@@ -9694,6 +9956,7 @@ impl AppState {
                 self.leave_pages(&ids);
             }
             SyncMsg::Theme(t) => self.ui.write().theme = Theme::parse(&t),
+            SyncMsg::Typewriter(on) => self.set_typewriter(on),
             SyncMsg::Spaces(spaces) => {
                 // A space was deleted in another window. This window leaves
                 // it, and what it holds of that space goes where the notes
@@ -9773,7 +10036,7 @@ impl AppState {
             let (found, create) = self.mention_items(&slash);
             found.len() + create.is_some() as usize
         } else {
-            filter_slash(&slash.query).len()
+            filter_slash(&slash.query, &slash.page_id).len()
         };
         match action {
             "down" | "up" if len > 0 => {
@@ -9872,7 +10135,7 @@ impl AppState {
 
     pub fn apply_slash(mut self, index: usize) {
         let Some(slash) = self.slash.peek().clone() else { return };
-        let Some(item) = filter_slash(&slash.query).into_iter().nth(index) else { return };
+        let Some(item) = filter_slash(&slash.query, &slash.page_id).into_iter().nth(index) else { return };
         self.slash.set(None);
         let page = slash.page_id.clone();
         let id = slash.block_id.clone();
@@ -9893,18 +10156,18 @@ impl AppState {
                 let caret = self.edit_blocks(&page, |bs| {
                     let i = index_of(bs, &id)?;
                     if !kind.is_editable() {
-                        let indent = bs[i].indent;
+                        let line = bs[i].clone();
                         let insert_at = if block_is_empty {
                             bs[i].text.clear();
                             bs[i].turn_into(kind);
                             i + 1
                         } else {
-                            let d = Block::new(kind, "").with_indent(indent);
+                            let d = Block::new(kind, "").next_to(&line);
                             let at = subtree_end(bs, i);
                             bs.insert(at, d);
                             at + 1
                         };
-                        let next = Block::text("").with_indent(indent);
+                        let next = Block::text("").next_to(&line);
                         let nid = next.id.clone();
                         bs.insert(insert_at, next);
                         return Some(Caret::start(&nid));
@@ -9914,7 +10177,7 @@ impl AppState {
                         bs[i].turn_into(kind);
                         Some(Caret::start(&id))
                     } else {
-                        let b = Block::new(kind, "").with_indent(bs[i].indent);
+                        let b = Block::new(kind, "").next_to(&bs[i]);
                         let nid = b.id.clone();
                         bs.insert(i + 1, b);
                         Some(Caret::start(&nid))
@@ -9929,12 +10192,11 @@ impl AppState {
                 let child_id = child.clone();
                 self.edit_blocks(&page, move |bs| {
                     let Some(i) = index_of(bs, &id) else { return };
+                    let link = Block::page_link(child_id).next_to(&bs[i]);
                     if block_is_empty {
-                        let indent = bs[i].indent;
-                        bs[i] = Block::page_link(child_id).with_indent(indent);
+                        bs[i] = link;
                     } else {
-                        let indent = bs[i].indent;
-                        bs.insert(i + 1, Block::page_link(child_id).with_indent(indent));
+                        bs.insert(i + 1, link);
                     }
                 });
                 self.history.write().attach(&page, &[], std::slice::from_ref(&child));
@@ -10367,6 +10629,10 @@ impl AppState {
             ));
         }
         asked.push_str(&crate::attach::for_request(&session.given));
+        // ("No, this is wrong": what was asked on this page just before.)
+        if session.action == AiAction::Ask && !self.locked_lines(&session.page_id) {
+            asked.push_str(&ai::earlier_note(&session.page_id, &session.prompt));
+        }
         // A request in the person's own words is run with the tools of Rune
         // (where the AI tool can use them): the AI can then do anything in
         // the app, and what it changes is written down for "Undo".
@@ -10438,6 +10704,10 @@ impl AppState {
                                 AiStatus::Done
                             };
                             s.task = None;
+                            // (For a request that follows it on this page: see `ai::earlier_note`.)
+                            if s.status == AiStatus::Done && s.action == AiAction::Ask {
+                                ai::remember_request(&s.page_id, &s.prompt);
+                            }
                             if s.status == AiStatus::Done && !dioxus::desktop::window().window.is_focused() {
                                 let first = ai::clean_reply(&s.output).0.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").trim_start_matches('#').trim().chars().take(120).collect::<String>();
                                 spawn(async move { crate::notify::show_now("ai", "AI reply ready", &first).await });
@@ -10642,7 +10912,8 @@ impl AppState {
         if crate::lock::is_open(page_id) {
             return page_as_given(&self.pages.peek(), page_id, &[Block::new(BlockKind::Locked, "")]);
         }
-        page_as_given(&self.pages.peek(), page_id, self.blocks.peek().get(page_id).map(|bs| bs.as_slice()).unwrap_or_default())
+        let all = self.blocks.peek();
+        page_as_given_with(&self.pages.peek(), &all, page_id, all.get(page_id).map(|bs| bs.as_slice()).unwrap_or_default())
     }
 
     /// The AI's reply is the page as it must be after a change: put it in
@@ -10695,14 +10966,16 @@ impl AppState {
         } else {
             let mut pages = self.pages.peek().clone();
             let now = self.blocks.peek().get(&session.page_id).cloned().unwrap_or_default();
+            let all = self.blocks.peek();
             crate::mcp::before_run(did, &session.page_id, &mut pages, now)
-                .map(|was| if whole { page_as_given(&pages, &session.page_id, &was) } else { part_as_given(&pages, &was, &session.part) })
+                .map(|was| if whole { page_as_given_with(&pages, &all, &session.page_id, &was) } else { part_as_given(&pages, &was, &session.part) })
         };
         if apart || (!session.sent.is_empty() && given_less_tools.as_deref() != Some(session.sent.as_str())) {
             return self.toast("The page was changed after you asked, so the AI's page was not put in its place. Ask again to get it with your changes.");
         }
         // The sub-pages first, so that the page can link to them.
         let mut made: Vec<(String, Id)> = Vec::new();
+        let mut written: Vec<(Id, String)> = Vec::new();
         for (name, text) in wanted {
             let id = self.create_page(Some(session.page_id.clone()));
             if let Some(p) = self.pages.write().get_mut(&id) {
@@ -10712,6 +10985,7 @@ impl AppState {
             let blocks = crate::mcp::parse_body(&self.pages.peek(), &crate::mcp::strip_title_heading(&text, &name));
             self.blocks.write().insert(id.clone(), if empty(&blocks) { vec![Block::text("")] } else { blocks });
             self.save_blocks(&id);
+            written.push((id.clone(), text));
             made.push((name, id));
         }
         let mut body = ai::link_pages(&body, &made);
@@ -10759,6 +11033,11 @@ impl AppState {
         }
         // (A row that the AI gave another name: its page takes the name.)
         self.name_row_pages_of(&session.page_id);
+        // (A new table whose Markdown said what each row's page starts with.)
+        self.make_row_templates(&session.page_id, &body);
+        for (id, text) in &written {
+            self.make_row_templates(id, text);
+        }
         *self.ai.write() = None;
         let made: Vec<Id> = made.into_iter().map(|(_, id)| id).collect();
         // One step: Undo takes back the change and the sub-pages together.
@@ -10829,7 +11108,7 @@ impl AppState {
         self.edit_blocks(&session.page_id, |bs| {
             let at = match index_of(bs, &session.anchor) {
                 Some(i) => {
-                    let base_indent = bs[i].indent;
+                    let (base_indent, col) = (bs[i].indent, bs[i].place.col);
                     let replace_anchor = replace
                         || (bs[i].kind == BlockKind::Text && bs[i].text.trim().is_empty());
                     let insert_at = if replace_anchor {
@@ -10839,7 +11118,7 @@ impl AppState {
                         subtree_end(bs, i)
                     };
                     let shifted: Vec<Block> =
-                        new_blocks.into_iter().map(|b| { let ind = b.indent; b.with_indent(base_indent + ind) }).collect();
+                        new_blocks.into_iter().map(|b| { let ind = b.indent; let mut b = b.with_indent(base_indent + ind); b.place.col = col; b }).collect();
                     (insert_at, shifted)
                 }
                 None => (bs.len(), new_blocks),
@@ -10849,6 +11128,8 @@ impl AppState {
                 bs.insert(insert_at + offset, b);
             }
         });
+        // (A new table whose Markdown said what each row's page starts with.)
+        self.make_row_templates(&session.page_id, &text);
         *self.ai.write() = None;
         self.ai_note_done(&session);
         if let Some(id) = last_id {
@@ -11101,6 +11382,7 @@ impl AppState {
             }
             "toggle_sidebar" => self.toggle_sidebar(),
             "focus_mode" => self.toggle_focus_mode(),
+            "typewriter" => self.toggle_typewriter(),
             "lock_page" => match self.current_page() {
                 Some(id) if self.listens_in(&id) => {}
                 Some(id) if !crate::lock::page_lock(&self, &id).is_locked() => self.set_modal(Some(Modal::LockPage)),
@@ -11368,6 +11650,7 @@ mod tests {
             history: None,
             voice: VoiceFor::NewPage,
             focus_mode: false,
+            typewriter: false,
             folds: HashMap::new(),
         }
     }
@@ -11602,9 +11885,13 @@ mod tests {
         ui.zoom = 1.5;
         ui.expanded.insert("a".into());
         let keys = |primary: bool| ui_settings(&ui, primary).into_iter().map(|(k, _)| k).collect::<Vec<_>>();
-        assert_eq!(keys(false), ["theme"], "a second window would write its old copy over the first window's");
-        assert_eq!(keys(true), ["theme", "expanded", "recent", "sidebar_open", "sidebar_width", "zoom", "tabs", "space_tabs", "folds"]);
+        // (Typewriter mode is one setting for every window: each one writes it.)
+        assert_eq!(keys(false), ["theme", "typewriter"], "a second window would write its old copy over the first window's");
+        assert_eq!(keys(true), ["theme", "typewriter", "expanded", "recent", "sidebar_open", "sidebar_width", "zoom", "tabs", "space_tabs", "folds"]);
         assert!(ui_settings(&ui, true).contains(&("zoom", "1.5".to_string())));
+        assert!(ui_settings(&ui, false).contains(&("typewriter", "0".to_string())));
+        ui.typewriter = true;
+        assert!(ui_settings(&ui, false).contains(&("typewriter", "1".to_string())));
         // The folded headings: by page, then by heading; read back as they were written.
         ui.folds.insert("p".into(), ["h1".to_string(), "h2".to_string()].into_iter().collect());
         let kept = ui_settings(&ui, true).into_iter().find(|(k, _)| *k == "folds").map(|(_, v)| v).unwrap_or_default();
@@ -12035,6 +12322,78 @@ mod tests {
         let old = serde_json::to_string(&said("Discord", t0)).unwrap();
         assert_eq!(read_declined(&old), vec![said("Discord", t0)]);
         assert_eq!(read_declined(""), Vec::new());
+    }
+
+    #[test]
+    fn lines_moved_to_another_page_take_what_is_in_them_and_go_to_its_end() {
+        let mut from = vec![
+            Block::text("a"),
+            Block::new(BlockKind::Toggle, "b"),
+            Block::text("b1").with_indent(1),
+            Block::new(BlockKind::Bulleted, "b2").with_indent(1),
+            Block::text("b2a").with_indent(2),
+            Block::new(BlockKind::Heading2, "Folded"),
+            Block::text("under it"),
+            Block::new(BlockKind::Heading2, "Next"),
+            Block::text("c"),
+        ];
+        let id = |bs: &[Block], t: &str| bs.iter().find(|b| b.text == t).unwrap().id.clone();
+        let texts = |bs: &[Block]| bs.iter().map(|b| format!("{}{}", " ".repeat(b.indent as usize), b.text)).collect::<Vec<_>>();
+        // A toggle with its lines, a list item with its sub-items (from its
+        // own indent), and a folded heading with the lines it hides.
+        let (toggle, item, folded) = (id(&from, "b"), id(&from, "b2"), id(&from, "Folded"));
+        let lines = take_lines(&mut from, &[toggle.clone(), item.clone(), folded.clone()], |i| i == folded);
+        assert_eq!(texts(&lines), ["b", " b1", " b2", "  b2a", "Folded", "under it"]);
+        assert_eq!(texts(&from), ["a", "Next", "c"]);
+        // A nested item alone loses the indent of what it was in.
+        let mut page = vec![Block::text("x"), Block::new(BlockKind::Bulleted, "y").with_indent(2), Block::text("z").with_indent(3)];
+        let y = id(&page, "y");
+        assert_eq!(texts(&take_lines(&mut page, &[y], |_| false)), ["y", " z"]);
+        // To the end of the page, above an empty line that ends it.
+        let mut to = vec![Block::text("1"), Block::text("")];
+        put_at_end(&mut to, vec![Block::text("m")]);
+        assert_eq!(texts(&to), ["1", "m", ""]);
+        let mut to = vec![Block::text("1")];
+        put_at_end(&mut to, vec![Block::text("m"), Block::text("n")]);
+        assert_eq!(texts(&to), ["1", "m", "n"]);
+    }
+
+    #[test]
+    fn moved_lines_come_to_the_end_of_the_other_page_out_of_its_columns() {
+        let col = |mut b: Block, c: u8| {
+            b.place.col = c;
+            b
+        };
+        // Taken from column 2 of a set: they are in no column now.
+        let mut from = vec![col(Block::text("left"), 1), col(Block::text("right"), 2), col(Block::text("under").with_indent(1), 2)];
+        let right = from[1].id.clone();
+        let lines = take_lines(&mut from, &[right], |_| false);
+        assert_eq!(lines.iter().map(|b| (b.text.as_str(), b.place.col)).collect::<Vec<_>>(), [("right", 0), ("under", 0)]);
+        // The other page ends in a set whose second column ends in an empty
+        // line: that is no end of the page. They come under the set, plain.
+        let mut to = vec![Block::text("top"), col(Block::text("one"), 1), col(Block::text("two"), 2), col(Block::text(""), 2)];
+        put_at_end(&mut to, lines);
+        crate::columns::tidy(&mut to);
+        assert_eq!(to.iter().map(|b| (b.text.as_str(), b.place.col)).collect::<Vec<_>>(), [("top", 0), ("one", 1), ("two", 2), ("", 2), ("right", 0), ("under", 0)]);
+    }
+
+    #[test]
+    fn lines_can_move_to_a_page_of_this_space_that_is_not_shut() {
+        let (_, mut pages) = two_spaces();
+        pages.insert("locked".into(), place_page("locked", "Locked notes", "trading", None, 3.0));
+        let mut row = place_page("row", "Rent", "trading", Some("call"), 1.0);
+        row.row_of = Some("table/r1".into());
+        pages.insert("row".into(), row);
+        let names = |query: &str| {
+            let mut v: Vec<String> = pages_to_move_to(&pages, "trading", "call", query, |id| id == "locked").into_iter().map(|p| p.id).collect();
+            v.sort();
+            v
+        };
+        // Not the page itself, not the Trash, not a locked page that is shut,
+        // not the page of a row, not another space.
+        assert_eq!(names(""), ["inside", "notes"]);
+        assert_eq!(names("meet"), ["notes"]);
+        assert!(names("locked").is_empty());
     }
 
     #[test]

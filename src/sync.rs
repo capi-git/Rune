@@ -18,6 +18,8 @@ pub enum SyncMsg {
     Blocks(Id, Vec<Block>),
     Removed(Vec<Id>),
     Theme(String),
+    /// Typewriter mode was turned on or off (see `toggle_typewriter`).
+    Typewriter(bool),
     Spaces(Vec<Space>),
     Event(Event),
     EventRemoved(Id),

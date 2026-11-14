@@ -344,6 +344,81 @@ await run('Typing, formatting, Enter, shortcuts', async () => {
   check('⌘⇧Z redoes it', await until(() => $('.block-row.kind-bulleted')?.textContent.includes('item')));
 });
 
+await run('Math in a line', async () => {
+  const title = await newPage('Math test');
+  key(title, 'Enter');
+  const first = await until(() => document.activeElement?.classList.contains('blk') && document.activeElement);
+  const fresh = async (from) => {
+    T().setSel(from, from.textContent.length);
+    key(from, 'Enter');
+    return until(() => document.activeElement?.classList.contains('blk') && document.activeElement !== from && document.activeElement);
+  };
+  typeIn(first, '12 × 4.5 =');
+  check('A line that ends with = shows its answer', await until(() => first.dataset.calc === '54'), first.dataset.calc);
+  const after = getComputedStyle(first, '::after');
+  check('…in grey, in the letters of the line', after.color !== getComputedStyle(first).color && after.fontSize === getComputedStyle(first).fontSize && after.fontFamily === getComputedStyle(first).fontFamily, `${after.color} ${after.fontSize}`);
+  check('The answer is no part of the text of the line, and the caret stays where it was', first.textContent === '12 × 4.5 =' && T().selIn(first)?.start === 10, `${JSON.stringify(first.textContent)} caret ${T().selIn(first)?.start}`);
+  {
+    const shown = first.getBoundingClientRect().height;
+    delete first.dataset.calc;
+    const bare = first.getBoundingClientRect().height;
+    first.dataset.calc = '54';
+    check('The line is as tall with the answer as without it', shown === bare, `${shown} ${bare}`);
+  }
+  // A press on the answer, which starts where the text ends.
+  const end = () => {
+    const r = document.createRange();
+    r.selectNodeContents(first);
+    const rects = r.getClientRects();
+    return rects[rects.length - 1];
+  };
+  const e = end();
+  delete document.body.dataset.copied;
+  const down = new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, clientX: e.right + 8, clientY: (e.top + e.bottom) / 2 });
+  first.dispatchEvent(down);
+  check('A press on the answer copies it', (await until(() => document.body.dataset.copied)) === '54', document.body.dataset.copied);
+  check('…and the app says so', await until(() => $('.toast')?.textContent.includes('Copied 54')), $('.toast')?.textContent);
+  check('The press leaves the caret where it was', down.defaultPrevented && document.activeElement === first && T().selIn(first)?.start === 10, `${down.defaultPrevented} ${T().selIn(first)?.start}`);
+  delete document.body.dataset.copied;
+  const onWords = new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, clientX: e.right - 30, clientY: (e.top + e.bottom) / 2 });
+  first.dispatchEvent(onWords);
+  await wait(200);
+  check('A press on the words copies nothing', !onWords.defaultPrevented && !document.body.dataset.copied, document.body.dataset.copied);
+  // Tab at the end of the line keeps the answer as text.
+  T().setSel(first, 10);
+  key(first, 'Tab');
+  check('Tab at the end of the line puts the answer in it', await until(() => first.textContent === '12 × 4.5 = 54' && !first.dataset.calc), `${JSON.stringify(first.textContent)} ${first.dataset.calc}`);
+  check('…and does not indent the line', first.closest('.block-row').style.paddingLeft === '0px', first.closest('.block-row').style.paddingLeft);
+  // A line that only ends with "=" stays calm, and so does a heading.
+  const words = await fresh(first);
+  typeIn(words, 'Plan: maybe later =');
+  const heading = await fresh(words);
+  typeIn(heading, '# ');
+  const h1 = await until(() => document.activeElement?.closest('.kind-heading1') && document.activeElement);
+  if (h1) typeIn(h1, '2 + 2 =');
+  await wait(400);
+  check('A line of words that ends with = shows nothing', !words.dataset.calc, words.dataset.calc);
+  check('A heading shows no answer', h1?.textContent === '2 + 2 =' && !h1.dataset.calc, `${h1?.textContent} ${h1?.dataset.calc}`);
+  // The total of a list, and it follows a change above it.
+  const one = await fresh(h1 || heading);
+  typeIn(one, '- ');
+  const coffee = await until(() => document.activeElement?.closest('.kind-bulleted') && document.activeElement);
+  typeIn(coffee, 'Coffee $4.50');
+  const lunch = await fresh(coffee);
+  typeIn(lunch, 'Lunch $12');
+  const sum = await fresh(lunch);
+  typeIn(sum, 'sum');
+  check('"sum" under a list shows its total, with its money sign', await until(() => sum.dataset.calc === '= $16.50'), sum.dataset.calc);
+  T().setSel(lunch, lunch.textContent.length);
+  typeIn(lunch, '0');
+  check('…and the total follows a change in the list', await until(() => sum.dataset.calc === '= $124.50'), sum.dataset.calc);
+  await wait(150);
+  snap('math-line');
+  // Back to the page the next groups write in.
+  treeItem('Typing test')?.click();
+  await until(() => $('.pagebar .crumb.current')?.textContent.includes('Typing test'), 1500);
+});
+
 await run('Slash menu', async () => {
   const last = $$('.blk').pop();
   last.focus();
@@ -542,7 +617,8 @@ await run('Block menu', async () => {
     const column = row.closest('.page');
     column.style.paddingBottom = '1500px';
     const lineAt = () => Math.round(row.getBoundingClientRect().top);
-    scroller.scrollTop = lineAt() - scroller.getBoundingClientRect().top - 40;
+    // (Close to the top: the menu has "Move to…" too, and is that much taller.)
+    scroller.scrollTop = lineAt() - scroller.getBoundingClientRect().top - 10;
     await wait(150);
     row.querySelector('.handle').click();
     const open = await until(() => $('.block-menu.anchored'));
@@ -732,7 +808,7 @@ await run('Pages side by side', async () => {
   check('Clicking a part of the tab focuses that page', await until(() => $$('.pane')[0]?.classList.contains('focused')));
   $('.tab').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
   const tm = await until(() => $('.tab-menu'));
-  check('Tab menu is short', tm && $$('.menu-item', tm).length <= 4, tm && $$('.menu-item', tm).map((m) => m.textContent).join(' | '));
+  check('Tab menu is short', tm && $$('.menu-item', tm).length <= 6, tm && $$('.menu-item', tm).map((m) => m.textContent).join(' | '));
   menuItem(tm, 'Separate Pages').click();
   check('Separate Pages makes two tabs again', await until(() => $$('.tab').length === 2 && !$('.panes.split')));
   tabs = $$('.tab');
@@ -2368,6 +2444,31 @@ await run('Split view', async () => {
   await wait(250);
   snap('split');
 
+  // Each page is a card of its own (a bubble), with the window between
+  // them; the gap is the line to drag; the tab's parts are small bubbles too.
+  const clear = 'rgba(0, 0, 0, 0)';
+  const bubble = (el, r) => parseFloat(getComputedStyle(el).borderTopRightRadius) >= r && getComputedStyle(el).backgroundColor !== clear;
+  const gapOf = () => {
+    const [a, b] = $$('.pane').map((p) => p.getBoundingClientRect());
+    return b.left - a.right;
+  };
+  check('Each page is a card of its own, with the window between them', $$('.pane').every((p) => bubble(p, 8)) && getComputedStyle($('.work-card')).backgroundColor === clear && Math.abs(gapOf() - 6) <= 1, `gap ${gapOf()}, card ${getComputedStyle($('.work-card')).backgroundColor}`);
+  {
+    const [a, b] = $$('.pane').map((p) => p.getBoundingClientRect());
+    const grip = $('.split-group.split-row > .split-cell > .sash');
+    const g = grip.getBoundingClientRect();
+    check('The gap between them is the line to drag', g.left < a.right && g.right > b.left && Math.abs((g.left + g.right) / 2 - (a.right + b.left) / 2) <= 1 && getComputedStyle(grip).cursor === 'col-resize', `${g.left}-${g.right} over ${a.right}-${b.left}`);
+    const segs = $$('.tab.active.split .tab-seg');
+    const [s0, s1] = segs.map((x) => x.getBoundingClientRect());
+    check("The tab's parts are two small joined bubbles", segs.length === 2 && segs.every((x) => getComputedStyle(x).backgroundColor !== clear) && parseFloat(getComputedStyle(segs[0]).borderTopLeftRadius) > parseFloat(getComputedStyle(segs[0]).borderTopRightRadius) && s1.left - s0.right >= 1 && s1.left - s0.right <= 4, `${s1.left - s0.right} apart`);
+  }
+  T().command('zoom_in');
+  T().command('zoom_in');
+  await wait(300);
+  check('Zoomed, the gap stays as wide', Math.abs(gapOf() - 6) <= 1, gapOf());
+  T().command('zoom_reset');
+  await wait(300);
+
   // Fold the right pane to a rail: pull its divider to the right edge.
   const line = $('.split-group.split-row > .split-cell > .sash');
   const right = line.parentElement;
@@ -2389,7 +2490,8 @@ await run('Split view', async () => {
   await wait(200);
   const railBox = right.getBoundingClientRect();
   check('The rail is 28 wide and names its page', Math.abs(railBox.width - 28) <= 2 && right.querySelector('.rail-title')?.textContent === 'Getting Started', `${Math.round(railBox.width)} ${right.querySelector('.rail-title')?.textContent}`);
-  check('The other pane takes the room', Math.abs(left.getBoundingClientRect().width + railBox.width - group.width) <= 3, `${Math.round(left.getBoundingClientRect().width)} of ${Math.round(group.width)}`);
+  const railGap = railBox.left - left.getBoundingClientRect().right;
+  check('The other pane takes the room', Math.abs(left.getBoundingClientRect().width + railGap + railBox.width - group.width) <= 3 && Math.abs(railGap - 6) <= 1, `${Math.round(left.getBoundingClientRect().width)} + ${railGap} of ${Math.round(group.width)}`);
   await wait(200);
   snap('rail');
   right.querySelector('.pane-rail').click();
@@ -2411,6 +2513,7 @@ await run('Split view', async () => {
 
   $$('.pane')[1].querySelector('.pagebar .icon-btn[title="Close pane"]').click();
   check('Closing the split leaves one page', await until(() => !$('.panes.split') && $$('.pane').length === 1));
+  check('A page alone is one card, as before', !$('.work-card').classList.contains('bubbles') && getComputedStyle($('.work-card')).backgroundColor !== clear && getComputedStyle($('.pane')).backgroundColor === clear && parseFloat(getComputedStyle($('.work-card')).borderTopLeftRadius) === 10);
 });
 
 await run('A code block has a copy button', async () => {
@@ -3869,7 +3972,7 @@ await run('Tables as databases', async () => {
   // A formula column, with bars.
   $('[data-add-column]', wrap()).click();
   const kinds = await until(() => $('.kinds-menu', wrap()));
-  check('A new column can be one of fifteen kinds, in a menu on top of the page', kinds && $$('[data-item]', kinds).length === 15 && onTop($('[data-item="text"]', kinds)), String($$('[data-item]', kinds || document).length));
+  check('A new column can be one of sixteen kinds, in a menu on top of the page', kinds && $$('[data-item]', kinds).length === 16 && onTop($('[data-item="text"]', kinds)), String($$('[data-item]', kinds || document).length));
   await wait(150);
   snap('table-kinds');
   $('[data-item="formula"]', kinds).click();
@@ -5454,6 +5557,125 @@ await run('Move a page in the sidebar by a drag', async () => {
   check('A moved page opens as before, with its place shown in its bar', await until(() => shownPane('Drag Third') && /Drag Parent/.test($('.pagebar', shownPane('Drag Third'))?.textContent || ''), 3000), $('.pagebar')?.textContent);
 });
 
+await run('Two columns', async () => {
+  await oneTab();
+  T().command('zoom_reset');
+  const title = await newPage('Columns test');
+  key(title, 'Enter');
+  const first = await until(() => document.activeElement?.classList.contains('blk') && document.activeElement);
+  const clip = new DataTransfer();
+  clip.setData('text/plain', ['Top', 'One', 'Two', 'Three', 'Under'].join('\n'));
+  first.dispatchEvent(new ClipboardEvent('paste', { clipboardData: clip, bubbles: true, cancelable: true }));
+  const pane = () => shownPane('Columns test');
+  const rows = () => $$('.block-row', pane());
+  const words = (row) => row.querySelector('.blk')?.textContent.replace(/​/g, '') ?? '';
+  const rowOf = (text) => rows().find((r) => words(r) === text);
+  const blkOf = (text) => rowOf(text)?.querySelector('.blk');
+  // The page as it shows: plain lines by their words, a set as [a|b] with
+  // the lines of each column joined by commas.
+  const seen = () =>
+    [...$('.blocks', pane()).children]
+      .map((el) => (el.classList.contains('columns') ? `[${[...el.children].map((c) => $$('.block-row', c).map(words).join(',')).join('|')}]` : words(el)))
+      .filter(Boolean)
+      .join(' ');
+  check('The test page has its lines', await until(() => seen() === 'Top One Two Three Under', 4000), seen());
+  // Hold a line by its handle over a side of another (or its upper half),
+  // say what is marked, then let it go there (or not).
+  const drag = async (from, to, where, drop = true) => {
+    const row = rowOf(to);
+    const r = row.getBoundingClientRect();
+    const [x, y] = [where === 'left' ? r.left + 4 : where === 'right' ? r.right - 4 : r.left + r.width / 2, r.top + (where === 'above' ? 3 : r.height / 2)];
+    const handle = rowOf(from).querySelector('.gutter [data-drag]');
+    const dt = new DataTransfer();
+    handle.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: dt }));
+    // (The dragged line is dimmed in the next frame, and lit again at the end.)
+    await new Promise(requestAnimationFrame);
+    row.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, clientX: x, clientY: y, dataTransfer: dt }));
+    const marked = $('.drop-left, .drop-right, .drop-before, .drop-after', pane());
+    const marks = marked ? `${marked.classList.contains('column') ? 'column' : 'line'} ${['left', 'right', 'before', 'after'].find((m) => marked.classList.contains(`drop-${m}`))}` : '';
+    if (drop) row.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, clientX: x, clientY: y, dataTransfer: dt }));
+    handle.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: dt }));
+    await wait(200);
+    return marks;
+  };
+
+  // Two lines side by side.
+  let marks = await drag('Two', 'One', 'right');
+  check('A line held at the right edge of another shows a line at that edge', marks === 'line right', marks);
+  check('Let go there, the two stand side by side, the dragged one at the right', await until(() => seen() === 'Top [One|Two] Three Under', 2000), seen());
+  {
+    const [a, b] = $$('.columns > .column', pane()).map((c) => c.getBoundingClientRect());
+    const page = $('.blocks', pane()).getBoundingClientRect();
+    check('The two columns have one width, side by side, across the page', a && b && Math.abs(a.width - b.width) < 1 && Math.abs(a.top - b.top) < 1 && b.left > a.right + 40 && Math.abs(b.right - page.right) < 1, a && b ? `${Math.round(a.left)}–${Math.round(a.right)} and ${Math.round(b.left)}–${Math.round(b.right)} in ${Math.round(page.left)}–${Math.round(page.right)}` : 'no columns');
+  }
+  check('No drop line is left', !$('.drop-left, .drop-right, .drop-before, .drop-after'));
+  T().command('undo');
+  check('Undo puts them back under each other in one step', await until(() => seen() === 'Top One Two Three Under', 2000), seen());
+  T().command('redo');
+  check('…and Redo side by side again', await until(() => seen() === 'Top [One|Two] Three Under', 2000), seen());
+
+  // A third column, and no fourth.
+  marks = await drag('Three', 'Two', 'left');
+  check('Held at the left edge of a line in a column, the side of that column is marked', marks === 'column left', marks);
+  check('Let go there, it is a third column, between the two', await until(() => seen() === 'Top [One|Three|Two] Under', 2000), seen());
+  marks = await drag('Under', 'Two', 'right', false);
+  check('Three columns are the most: no side line shows for a fourth', marks === 'line before' || marks === 'line after', marks);
+  marks = await drag('Under', 'Top', 'middle', false);
+  check('…and a line held over the middle of another shows the line above or below it', marks === 'line before' || marks === 'line after', marks);
+
+  // Typing in a column.
+  {
+    const blk = blkOf('Two');
+    blk.focus();
+    T().setSel(blk, 3);
+    key(blk, 'Enter');
+    const next = await until(() => document.activeElement !== blk && document.activeElement?.classList.contains('blk') && document.activeElement);
+    typeIn(next, 'Two b');
+    check('Return at the end of the last column makes the next line in that column', await until(() => seen() === 'Top [One|Three|Two,Two b] Under', 2000), seen());
+  }
+  {
+    const blk = blkOf('One');
+    blk.focus();
+    T().setSel(blk, 3);
+    key(blk, 'ArrowDown');
+    check('Down at the end of a column goes to the line under the columns', await until(() => document.activeElement === blkOf('Under'), 1500), document.activeElement?.textContent);
+    const two = blkOf('Two');
+    two.focus();
+    T().setSel(two, 0);
+    key(two, 'ArrowUp');
+    check('Up at the top of a column goes to the line above the columns', await until(() => document.activeElement === blkOf('Top'), 1500), document.activeElement?.textContent);
+    const three = blkOf('Three');
+    three.focus();
+    T().setSel(three, 0);
+    key(three, 'Backspace');
+    await wait(300);
+    check('Backspace at the start of a column joins it to no other column', seen() === 'Top [One|Three|Two,Two b] Under', seen());
+  }
+
+  // One under the other in a narrow pane; the look, for the pictures.
+  await wait(150);
+  snap('columns');
+  {
+    const p = pane();
+    p.style.maxWidth = '520px';
+    await wait(100);
+    const [a, b] = $$('.columns > .column', p).map((c) => c.getBoundingClientRect());
+    check('In a narrow pane the columns stand one under the other', a && b && b.top >= a.bottom - 1 && Math.abs(a.left - b.left) < 1, a && b ? `${Math.round(a.top)}–${Math.round(a.bottom)} then ${Math.round(b.top)}` : 'no columns');
+    const one = blkOf('One');
+    one.focus();
+    T().setSel(one, 3);
+    key(one, 'ArrowDown');
+    check('…and Down at the end of a column goes into the column under it', await until(() => document.activeElement === blkOf('Three'), 1500), document.activeElement?.textContent);
+    p.style.maxWidth = '';
+  }
+
+  // Out of the columns again.
+  await drag('Three', 'Under', 'above');
+  check('A line dragged out of a set of three leaves two', await until(() => seen() === 'Top [One|Two,Two b] Three Under', 2000), seen());
+  await drag('One', 'Under', 'above');
+  check('When the last line of a column goes, the lines of the other are plain lines again', await until(() => seen() === 'Top Two Two b Three One Under' && !$('.columns', pane()), 2000), seen());
+});
+
 await run('The AI changes what is on the page', async () => {
   await oneTab();
   const title = await newPage('Workout');
@@ -5669,6 +5891,170 @@ await run('The AI makes a database', async () => {
   check('The ticks show as ticks', $$('tbody .cell-check.on', block).length === 2, $$('tbody .cell-check.on', block).length);
   await wait(250);
   snap('ai-database');
+});
+
+await run('A table takes a total from the pages of its rows', async () => {
+  await oneTab();
+  const title = await newPage('Budget home');
+  key(title, 'Enter');
+  const first = await until(() => document.activeElement?.classList.contains('blk') && document.activeElement);
+  typeIn(first, 'Money.');
+  await wait(200);
+  askAi();
+  let box = await until(() => $('.ai-dock #ai-input'));
+  // A month's budget as the AI is told to make one: a row for each day, what
+  // was spent on the day's own page, a colour for a day over its budget.
+  const md = [
+    'Open a day to write what you spent; Spent adds it up.',
+    '',
+    '| Date | Budget | Spent | Left |',
+    '| --- | --- | --- | --- |',
+    '| 2026-11-01 | $60.00 |  |  |',
+    '| 2026-11-02 | $60.00 |  |  |',
+    '| 2026-11-03 | $60.00 |  |  |',
+    '| 2026-11-04 | $60.00 |  |  |',
+    '<!-- columns: date | number USD sum | rollup Amount sum USD sum | formula USD sum = Budget - Spent -->',
+    '<!-- table: November | icon calendar:green | color Left below 0 red | page: Item | Amount USD sum | Category choice {Food:orange; Fun:purple; Bills:gray} -->',
+  ].join('\n');
+  box.value = `a budget for November: every day has its own table of what I spent, and the day shows the sum [[tool: create_page ${JSON.stringify({ title: 'November budget', markdown: md })}]] [[reply: I made the page November budget.]]`;
+  box.dispatchEvent(new Event('input', { bubbles: true }));
+  await until(() => $('#ai-send'));
+  key(box, 'Enter');
+  check('The AI makes the budget in one go', await until(() => treeItem('November budget'), 8000));
+  (await until(() => $('#ai-ok') || $('#ai-done-run'), 4000))?.click();
+  // "No, this is wrong" on the same page: the AI is told what was asked just before.
+  await until(() => !$('.ai-output') && ($('.pane.focused .ai-dock-btn') || $$('.ai-dock-btn').find((b) => b.offsetParent)), 3000);
+  askAi();
+  box = await until(() => $('.ai-dock #ai-input'));
+  box.value = 'no, this is wrong [[reply: You asked for: {earlier}]]';
+  box.dispatchEvent(new Event('input', { bubbles: true }));
+  await until(() => $('#ai-send'));
+  key(box, 'Enter');
+  const told = await until(() => $('.ai-output')?.textContent.includes('You asked for: a budget for November: every day has its own table'), 6000);
+  check('Told that it is wrong, the AI is given what was asked on the page just before', told, $('.ai-output')?.textContent);
+  $$('.ai-actions .ghost-btn').find((b) => b.textContent.trim() === 'Discard')?.click();
+  await until(() => !$('.ai-output'), 2000);
+  treeItem('November budget')?.click();
+  const pane = await until(() => shownPane('November budget'), 3000);
+  const block = () => $('.table-block', shownPane('November budget') || pane);
+  check('Its table is there', await until(block, 3000));
+  if (!block()) return;
+  const cell = (b, r, c) => b && $(`.cell[data-r="${r}"][data-c="${c}"]`, b);
+  const kindOf = $$('.th', block())[2]?.querySelector('.th-kind')?.title;
+  check('Spent is a column that takes its total from the page of each row', kindOf === 'From its page', kindOf);
+  check('A day with no page has nothing in Spent yet, and it cannot be typed in', cell(block(), 1, 2)?.value === '' && cell(block(), 1, 2)?.readOnly, cell(block(), 1, 2)?.value);
+  // A day: its page starts with the table the AI said.
+  const headsOf = (p) => $$('.th .cell', $('.table-block', p)).map((h) => h.value).join('|');
+  const openDay = async (r) => {
+    $(`tr[data-r="${r}"] .row-open`, block()).click();
+    return until(() => $$('.pane').find((p) => p.offsetParent && /\b\d Nov/.test(p.querySelector('.title-input')?.value || '') && $('.table-block', p)), 4000);
+  };
+  const closeDay = async (day) => {
+    $('[data-peek="close"]', day)?.click();
+    await until(() => !day.isConnected || !day.offsetParent, 2000);
+  };
+  let day = await openDay(1);
+  check('A day opens as a page with a table of its spending', day && headsOf(day) === 'Item|Amount|Category', day && headsOf(day));
+  if (!day) return;
+  const spend = async (page, n, item, amount) => {
+    const t = () => $('.table-block', page);
+    if (!cell(t(), n, 0)) {
+      $('[data-new-row]', page).click();
+      await until(() => cell(t(), n, 0));
+    }
+    fillCell(cell(t(), n, 0), item);
+    fillCell(cell(t(), n, 1), amount);
+    await wait(120);
+  };
+  await spend(day, 1, 'Lunch', '12.50');
+  await spend(day, 2, 'Cinema', '8');
+  const foot = (b) => $('.table-totals', b)?.textContent || '';
+  check('The day’s own table adds it up', await until(() => foot($('.table-block', day)).includes('$20.50'), 2000), foot($('.table-block', day)));
+  check('Back on the month, the day shows the sum of its spending', await until(() => cell(block(), 1, 2)?.value === '$20.50', 3000), cell(block(), 1, 2)?.value);
+  check('…and what is left of its budget', await until(() => cell(block(), 1, 3)?.value === '$39.50', 2000), cell(block(), 1, 3)?.value);
+  check('The foot of the month adds up the days', await until(() => foot(block()).includes('$20.50'), 2000), foot(block()));
+  check('A day under its budget has no colour', !$('tr[data-r="1"].painted', block()));
+  await closeDay(day);
+  day = await openDay(2);
+  if (!day) return;
+  await spend(day, 1, 'Concert', '$75.00');
+  check('A day over its budget turns red', await until(() => $('tr[data-r="2"].painted', block())?.getAttribute('style')?.includes('red'), 3000), $('tr[data-r="2"]', block())?.getAttribute('style'));
+  check('…its Left below zero', cell(block(), 2, 3)?.value === '-$15.00', cell(block(), 2, 3)?.value);
+  check('…and the month’s sum takes both days', await until(() => foot(block()).includes('$95.50'), 2000), foot(block()));
+  await closeDay(day);
+  // The column's menu says what it takes, and offers the columns of a day's table.
+  await columnDo(block(), 2, 'rollup-of');
+  const offered = await until(() => {
+    const rows = $$('.column-sub .ai-menu-row', block().parentElement).map((r) => r.textContent.trim());
+    return rows.length && rows;
+  });
+  check('Its menu offers the columns of the table of each day', offered && offered.includes('Amount') && offered.includes('Category'), offered && offered.join('|'));
+  await wait(200);
+  snap('table-rollup-menu');
+  $('.backdrop')?.click();
+  await until(() => !$('.table-menu'));
+  // The page written again with other words after `page:`: a template
+  // that is there stays as it is (`page:` only makes one).
+  askAi();
+  box = await until(() => $('.ai-dock #ai-input'));
+  const fixed = ['@replace', '# November budget', '', ...md.split('\n').map((l) => l.replace('Bills:gray}', 'Bills:gray} | Note'))].join('\\n');
+  box.value = `tidy the page [[reply: ${fixed}]]`;
+  box.dispatchEvent(new Event('input', { bubbles: true }));
+  await until(() => $('#ai-send'));
+  key(box, 'Enter');
+  const go = await until(() => $('#ai-replace'), 6000);
+  check('The AI writes the page again', go);
+  go?.click();
+  await wait(400);
+  day = await openDay(3);
+  check('`page:` words do not change a template that is there', day && headsOf(day) === 'Item|Amount|Category', day && headsOf(day));
+  if (day) await closeDay(day);
+  // "Each day also needs a note": the AI changes the template's page itself.
+  const wrapOf = () => block().closest('.table-wrap');
+  $('.table-head .table-more', wrapOf()).click();
+  (await until(() => $('.own-menu [data-item="template"]', wrapOf()), 2000))?.click();
+  const tpl = await until(() => shownPane('Template') && $('.table-wrap', shownPane('Template')), 3000);
+  const tplId = tpl?.dataset.page;
+  check('The template of the days is a page of its own', tplId, tplId);
+  if (tplId) await closeDay(shownPane('Template'));
+  const note = ['| Item | Amount | Category | Note |', '| --- | --- | --- | --- |', '|  |  |  |  |', '<!-- columns: text | number USD sum | choice {Food:orange; Fun:purple; Bills:gray} | text -->'].join('\n');
+  askAi();
+  box = await until(() => $('.ai-dock #ai-input'));
+  box.value = `each day also needs a note [[tool: replace_page_content ${JSON.stringify({ page_id: tplId, markdown: note })}]] [[reply: Each new day now has a Note column.]]`;
+  box.dispatchEvent(new Event('input', { bubbles: true }));
+  await until(() => $('#ai-send'));
+  key(box, 'Enter');
+  (await until(() => $('#ai-ok') || $('#ai-done-run'), 6000))?.click();
+  await wait(300);
+  day = await openDay(4);
+  check('A day opened after that starts with the new table', day && headsOf(day) === 'Item|Amount|Category|Note', day && headsOf(day));
+  check('The days before keep what was spent', cell(block(), 1, 2)?.value === '$20.50' && cell(block(), 2, 2)?.value === '$75.00', `${cell(block(), 1, 2)?.value} ${cell(block(), 2, 2)?.value}`);
+  await wait(250);
+  snap('table-rollup');
+  if (day) await closeDay(day);
+  // A table with such a column and nothing said of the pages of its rows:
+  // the page of a row starts with a table of what the column takes from.
+  const trips = ['| Trip | Cost |', '| --- | --- |', '| Lisbon |  |', '<!-- columns: text | rollup Price sum EUR sum -->'].join('\n');
+  askAi();
+  box = await until(() => $('.ai-dock #ai-input'));
+  box.value = `trips [[tool: create_page ${JSON.stringify({ title: 'Trips', markdown: trips })}]] [[reply: I made the page Trips.]]`;
+  box.dispatchEvent(new Event('input', { bubbles: true }));
+  await until(() => $('#ai-send'));
+  key(box, 'Enter');
+  await until(() => treeItem('Trips'), 8000);
+  ($('#ai-ok') || $('#ai-done-run'))?.click();
+  treeItem('Trips')?.click();
+  const tripsPane = await until(() => shownPane('Trips'), 3000);
+  const tripsTable = tripsPane && (await until(() => $('.table-block', tripsPane), 3000));
+  if (!tripsTable) return check('A table with a rollup and no template is made', false);
+  $('tr[data-r="1"] .row-open', tripsTable).click();
+  const lisbon = await until(() => shownPane('Lisbon') && $('.table-block', shownPane('Lisbon')) && shownPane('Lisbon'), 4000);
+  check('With no template, the page of a row starts with a table of what the column takes from', lisbon && headsOf(lisbon) === 'Item|Price', lisbon && headsOf(lisbon));
+  if (!lisbon) return;
+  await spend(lisbon, 1, 'Hotel', '120');
+  const cost = () => cell($('.table-block', shownPane('Trips')), 1, 1)?.value;
+  check('…and what is typed there shows in the row, as money', await until(() => cost() === '€120.00', 3000), `${cost()} (Trips ${shownPane('Trips') ? 'shown' : 'not shown'})`);
+  await closeDay(lisbon);
 });
 
 await run('Diagrams', async () => {
@@ -6615,6 +7001,136 @@ await run('Select all, copy and delete', async () => {
     }
     check('Undo, Redo and Undo of a cut whose table is in another page leave one copy, not two', counts.join(',') === '1,0,1', counts.join(','));
   }
+});
+
+await run('Move lines to another page', async () => {
+  await oneTab();
+  // The page they go to has one line.
+  const goal = await newPage('Moving Target');
+  key(goal, 'Enter');
+  const here = await until(() => document.activeElement?.classList.contains('blk') && document.activeElement);
+  typeIn(here, 'Already here');
+  await wait(300);
+  const title = await newPage('Move from');
+  key(title, 'Enter');
+  const top = await until(() => document.activeElement?.classList.contains('blk') && document.activeElement);
+  const from = () => shownPane('Move from');
+  const clip = new DataTransfer();
+  clip.setData('text/plain', ['Keep me', '- Item', '  - Sub item', '', '| Item | Note |', '| --- | --- |', '| Rent | home |', '| Food | shop |', '', 'Stays'].join('\n'));
+  top.dispatchEvent(new ClipboardEvent('paste', { clipboardData: clip, bubbles: true, cancelable: true }));
+  await until(() => $('.table-block', from()), 4000);
+  // The lines of a page by their words ("table" for a table), without an empty line at its end.
+  const lines = (p) => {
+    const all = p ? $$('.blocks > .block-row', p).map((r) => (r.classList.contains('kind-table') ? 'table' : (r.querySelector('.blk')?.textContent || '').replace(/​/g, ''))) : [];
+    while (all.length && !all[all.length - 1]) all.pop();
+    return all.join('|');
+  };
+  const picked = () => $$('.block-row.picked', from());
+  const list = () => $('.move-menu');
+  const names = () => $$('.move-menu .ai-menu-row[data-page]').map((r) => r.textContent.trim());
+  const panes = () => $$('.pane').filter((p) => p.offsetParent).length;
+  const type = (box, text) => {
+    box.value = text;
+    box.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  check('The page to move from has its lines, a list with an item in it, and a table', lines(from()) === 'Keep me|Item|Sub item|table|Stays', lines(from()));
+  // Something is written in the page of a row of the table: it must come along.
+  $('tr[data-r="1"] .row-open', $('.table-block', from())).click();
+  const rent = await until(() => shownPane('Rent'), 4000);
+  const body = rent && $('.blk', rent);
+  if (body) typeIn(body, 'Paid on the first');
+  await wait(400);
+  $('[data-peek="close"]', shownPane('Rent'))?.click();
+  await until(() => panes() === 1, 3000);
+
+  // Escape picks the item (with its sub-item); Shift with the down arrow the table too.
+  const item = $$('.blk', from()).find((b) => b.textContent.replace(/​/g, '') === 'Item');
+  item.focus();
+  T().setSel(item, 2);
+  key(item, 'Escape');
+  await until(() => picked().length === 2, 3000);
+  key(document.body, 'ArrowDown', { shiftKey: true });
+  await until(() => picked().length === 3, 3000);
+  key(document.body, 'P', { metaKey: true, shiftKey: true });
+  check('⌘⇧P with lines picked opens a list of pages to move them to, with a box to find one', (await until(list, 2000)) && (await until(() => $('.move-menu .menu-search-input') === document.activeElement, 1000)), document.activeElement?.className);
+  check('…which says how many lines go, and keeps them picked', $('.move-menu .ai-menu-label')?.textContent === 'Move 3 lines to' && picked().length === 3, `${$('.move-menu .ai-menu-label')?.textContent} / ${picked().length}`);
+  check('…lists the other pages, not this one, and ends with "New page…"', names().includes('Moving Target') && !names().includes('Move from') && $('#move-new-page')?.textContent.trim() === 'New page…', `${names().join(', ')} / ${$('#move-new-page')?.textContent}`);
+  snap('move-lines');
+  const box = $('.move-menu .menu-search-input');
+  type(box, 'movi');
+  check('What is typed finds the page, and names a new page by it', (await until(() => names().join() === 'Moving Target', 2000)) && $('#move-new-page')?.textContent.trim() === 'New page “movi”', `${names().join(', ')} / ${$('#move-new-page')?.textContent}`);
+  key(box, 'Enter');
+  check('Return moves the lines, and the page they left keeps the others', await until(() => !list() && lines(from()) === 'Keep me|Stays', 3000), lines(from()));
+  check('…with a message that says where they went, with "Undo"', await until(() => $('.toast .toast-text')?.textContent === 'Moved 3 lines to Moving Target' && $('#toast-undo'), 2000), $('.toast')?.textContent);
+  check('…and the page they left stays in view, and no other opens', shownPane('Move from') && panes() === 1 && !shownPane('Moving Target'), `${panes()} panes`);
+  // They are at the end of the other page, with their kinds and the pages of the rows.
+  treeItem('Moving Target').click();
+  const goalPane = await until(() => shownPane('Moving Target'), 3000);
+  check('They are at the end of the other page', lines(goalPane) === 'Already here|Item|Sub item|table', lines(goalPane));
+  {
+    const rowOf = (t) => $$('.block-row', goalPane).find((r) => (r.querySelector('.blk')?.textContent || '').replace(/​/g, '') === t);
+    const a = rowOf('Item');
+    const b = rowOf('Sub item');
+    check('…a list item with its sub-item still in it', a?.classList.contains('kind-bulleted') && b && b.querySelector('.blk').getBoundingClientRect().left > a.querySelector('.blk').getBoundingClientRect().left + 8);
+  }
+  const rowPage = async (p) => {
+    $('tr[data-r="1"] .row-open', $('.table-block', p)).click();
+    const pane = await until(() => shownPane('Rent'), 4000);
+    const words = pane ? $$('.blk', pane).map((b) => b.textContent.replace(/​/g, '')).join('|') : 'no page';
+    const crumbs = pane ? $$('.crumb', pane).map((c) => c.textContent.trim()).join(' / ') : '';
+    $('[data-peek="close"]', shownPane('Rent'))?.click();
+    await until(() => panes() === 1, 3000);
+    return { words, crumbs };
+  };
+  let got = await rowPage(goalPane);
+  check('…and the table has the page of its row, with what was written in it, in its new page', got.words === 'Paid on the first' && got.crumbs.includes('Moving Target'), JSON.stringify(got));
+
+  // Undo in the page they left brings them back, and takes them out of the other.
+  treeItem('Move from').click();
+  await until(() => shownPane('Move from'), 3000);
+  T().command('undo');
+  check('Undo in the page they left brings them back where they were', await until(() => lines(from()) === 'Keep me|Item|Sub item|table|Stays', 3000), lines(from()));
+  got = await rowPage(from());
+  check('…the table with the page of its row', got.words === 'Paid on the first' && got.crumbs.includes('Move from'), JSON.stringify(got));
+  treeItem('Moving Target').click();
+  await until(() => shownPane('Moving Target'), 3000);
+  check('…and the other page is as it was', lines(shownPane('Moving Target')) === 'Already here', lines(shownPane('Moving Target')));
+  // Redo there moves them again; Undo there brings them back again.
+  T().command('redo');
+  check('Redo in the other page moves them there again', await until(() => lines(shownPane('Moving Target')) === 'Already here|Item|Sub item|table', 3000), lines(shownPane('Moving Target')));
+  T().command('undo');
+  check('Undo in the other page takes them back to the page they left', await until(() => lines(shownPane('Moving Target')) === 'Already here', 3000), lines(shownPane('Moving Target')));
+  treeItem('Move from').click();
+  await until(() => shownPane('Move from'), 3000);
+  check('…where they are again', lines(from()) === 'Keep me|Item|Sub item|table|Stays', lines(from()));
+
+  // One line, from its own menu, to a new page; "Undo" in the message takes it all back.
+  const keep = $$('.block-row', from()).find((r) => r.textContent.includes('Keep me'));
+  keep.querySelector('.handle').click();
+  const menu = await until(() => $('.block-menu:not(.move-menu)'), 2000);
+  check('The menu of a line has "Move to…", with its keys', menu && $('#move-lines', menu)?.textContent.includes('⌘⇧P'), menu?.textContent);
+  $('#move-lines', menu)?.click();
+  await until(list, 2000);
+  check('With no line picked, it is for that line', $('.move-menu .ai-menu-label')?.textContent === 'Move 1 line to' && picked().length === 1 && picked()[0] === keep, $('.move-menu .ai-menu-label')?.textContent);
+  $('#move-new-page').click();
+  check('"New page…" with nothing typed asks for the name', await until(() => $('.move-menu .menu-search-input')?.placeholder === 'Name of the new page' && !names().length, 2000));
+  type($('.move-menu .menu-search-input'), 'A fresh place');
+  await until(() => $('#move-new-page')?.textContent.includes('A fresh place'), 2000);
+  $('#move-new-page').click();
+  check('…and makes a page by that name, and the line goes there', (await until(() => treeItem('A fresh place') && lines(from()) === 'Item|Sub item|table|Stays', 3000)) && $('.toast .toast-text')?.textContent === 'Moved 1 line to A fresh place', `${lines(from())} / ${$('.toast')?.textContent}`);
+  $('#toast-undo')?.click();
+  check('"Undo" in the message brings it back, and the new page goes to the Trash', await until(() => lines(from()) === 'Keep me|Item|Sub item|table|Stays' && !treeItem('A fresh place'), 3000), `${lines(from())} / ${!!treeItem('A fresh place')}`);
+
+  // ⌘⇧P with the caret in a line: that line. Escape puts the list away.
+  const stays = $$('.blk', from()).find((b) => b.textContent.includes('Stays'));
+  stays.focus();
+  T().setSel(stays, 2);
+  key(stays, 'P', { metaKey: true, shiftKey: true });
+  check('⌘⇧P with the caret in a line opens the list for that line', (await until(list, 2000)) && picked().length === 1 && picked()[0].contains(stays));
+  key($('.move-menu .menu-search-input'), 'Escape');
+  check('Escape puts the list away and moves nothing', (await until(() => !list(), 2000)) && lines(from()) === 'Keep me|Item|Sub item|table|Stays');
+  key(document.body, 'Escape');
+  await until(() => picked().length === 0, 2000);
 });
 
 await run('Links between notes', async () => {
@@ -8854,7 +9370,9 @@ await run('Dates on to-dos and the day of the calendar', async () => {
   const clear = (p, q) => p.right <= q.left + 0.5 || q.right <= p.left + 0.5 || p.bottom <= q.top + 0.5 || q.bottom <= p.top + 0.5;
   check('On Home, the day stays one line: two events at one time have their bars on it', da && db && $$('#day-line .day-rail').length === 1 && Math.abs(boxOf(da, '.day-bar').top - boxOf(db, '.day-bar').top) < 0.5 && Math.abs(boxOf(da, '.day-bar').top - $('.day-rail').getBoundingClientRect().top) < 0.5 && $('.day-track').getBoundingClientRect().height <= 84, da && db && `rails ${$$('#day-line .day-rail').length}, height ${$('.day-track').getBoundingClientRect().height}`);
   check('…and their names are one under the other, each with its time on its line', da && db && da.dataset.row !== db.dataset.row && da.classList.contains('together') && db.classList.contains('together') && clear(boxOf(da, '.day-name'), boxOf(db, '.day-name')) && clear(boxOf(da, '.day-when'), boxOf(db, '.day-name')) && clear(boxOf(db, '.day-when'), boxOf(da, '.day-name')) && Math.abs(boxOf(da, '.day-name').left - boxOf(db, '.day-name').left) < 1 && boxOf(da, '.day-when').top < boxOf(da, '.day-name').bottom, da && db && `rows ${da.dataset.row} and ${db.dataset.row}`);
-  const every = $$('#day-line .day-event:not(.unnamed)');
+  // (Only events whose name shows on the line: one drawn small, at the end
+  // of the day's line late in the evening, has none.)
+  const every = $$('#day-line .day-event:not(.unnamed)').filter((e) => e.querySelector('.day-name'));
   let over = '';
   for (const a of every) for (const b of every) if (a !== b && !clear(boxOf(a, '.day-name'), boxOf(b, '.day-name'))) over = `${a.title} / ${b.title}`;
   check('No name on the line of the day lies over another', !over, over);
@@ -9387,10 +9905,16 @@ await run('Drag an event in the calendar', async () => {
     const named = () => $$('.cal-event[data-event]').filter((e) => e.querySelector('.ev-title')?.textContent === 'Move me');
     await until(() => named().length === 1, 3000);
     const one = named()[0];
+    // (The hours open at the time of now: the event and the time it is put
+    // at must be in view, as for a person who points at them.)
+    one.scrollIntoView({ block: 'center' });
+    await wait(60);
     const r = one.getBoundingClientRect();
     window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: r.left + r.width / 2, clientY: r.top + 6 }));
     key(document.body, 'c', { metaKey: true });
     check('⌘C with the pointer on an event copies it', await until(() => /Copied “Move me”/.test($('.toast')?.textContent || ''), 3000), $('.toast')?.textContent);
+    $('.cal-scroll').scrollTop = 14 * 48 - 120;
+    await wait(60);
     const target = cols()[5].getBoundingClientRect();
     window.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: target.left + 10, clientY: target.top + 14 * 48 + 3 }));
     key(document.body, 'v', { metaKey: true });
@@ -9987,6 +10511,97 @@ await run('Focus mode', async () => {
   key(blk, 'Escape');
   check('Escape leaves focus mode', await until(() => !$('.app.focus-mode'), 1500));
   check('…and the page bar is back', !shownNot($('.pane .pagebar')));
+});
+
+await run('Typewriter mode', async () => {
+  await oneTab();
+  const title = await newPage('Quire Typewriter');
+  key(title, 'Enter');
+  const top = await until(() => document.activeElement?.classList.contains('blk') && document.activeElement);
+  const pane = () => shownPane('Quire Typewriter');
+  const clip = new DataTransfer();
+  clip.setData('text/plain', [...Array(40).keys()].map((n) => `Line ${n + 1}`).join('\n'));
+  top.dispatchEvent(new ClipboardEvent('paste', { clipboardData: clip, bubbles: true, cancelable: true }));
+  await until(() => $$('.blk', pane()).length >= 40, 4000);
+  const scroller = () => $('.scroller', pane());
+  // Where the line of a block is in its pane, as a part of the pane's height.
+  const at = (blk) => {
+    const s = scroller().getBoundingClientRect();
+    const r = blk.getBoundingClientRect();
+    return (r.top + Math.min(r.height, 30) / 2 - s.top) / s.height;
+  };
+  const line = (n) => $$('.blk', pane()).find((b) => b.textContent.replace(/​/g, '') === `Line ${n}`);
+  // A key is pressed, and the caret goes to a line (the engine moves the
+  // caret by itself; an arrow sent by script would take it to the next line too).
+  const keyTo = async (blk, pos = 2) => {
+    key(blk, 'Shift');
+    blk.focus();
+    T().setSel(blk, pos);
+    await wait(400);
+  };
+  scroller().scrollTop = 0;
+  check('Typewriter mode is off at first', !$('.app.typewriter'));
+  T().command('typewriter');
+  check('The command turns it on', await until(() => $('.app.typewriter'), 1500));
+  check('…and the page has room at its end for its last line to come to the middle', $('.page-tail', pane()).getBoundingClientRect().height >= scroller().getBoundingClientRect().height * 0.55 - 2, `${Math.round($('.page-tail', pane()).getBoundingClientRect().height)} of ${Math.round(scroller().getBoundingClientRect().height)}`);
+  await keyTo(line(31));
+  check('A key brings the line with the caret to the middle of the pane', Math.abs(at(line(31)) - 0.45) < 0.03, at(line(31)).toFixed(3));
+  await keyTo(line(32));
+  check('…and the next line too: the line stays there, the page moves', Math.abs(at(line(32)) - 0.45) < 0.03, at(line(32)).toFixed(3));
+  // Return: a new line, at the middle too.
+  const last = line(40);
+  last.focus();
+  T().setSel(last, 7);
+  key(last, 'Enter');
+  const fresh = await until(() => document.activeElement?.classList.contains('blk') && document.activeElement !== last && document.activeElement, 2000);
+  await wait(450);
+  check('Return at the end of the last line: the new line is at the middle', fresh && Math.abs(at(fresh) - 0.45) < 0.03, fresh ? at(fresh).toFixed(3) : 'no new line');
+  snap('typewriter');
+  // The mouse moves nothing, even right after a key.
+  const before = scroller().scrollTop;
+  const above = line(37);
+  key(fresh || above, 'Shift');
+  above.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 }));
+  T().setSel(above, 1);
+  await wait(300);
+  window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, button: 0 }));
+  await wait(200);
+  check('A press of the mouse in a line moves nothing', Math.abs(scroller().scrollTop - before) < 1 && document.activeElement === above, `${before} → ${scroller().scrollTop}`);
+  // The title: nothing moves.
+  const name = $('.title-input', pane());
+  scroller().scrollTop = 200;
+  await wait(100);
+  name.focus();
+  key(name, 'ArrowLeft');
+  name.setSelectionRange(1, 1);
+  await wait(400);
+  check('The caret in the title moves nothing', Math.abs(scroller().scrollTop - 200) < 1, String(scroller().scrollTop));
+  // At another zoom of the page, the line still comes to the middle.
+  T().command('zoom_in');
+  await until(() => Number(getComputedStyle($('.app')).getPropertyValue('--zoom')) > 1, 1500);
+  await wait(300);
+  await keyTo(line(20));
+  check('On a zoomed page the line comes to the middle too', Math.abs(at(line(20)) - 0.45) < 0.03, at(line(20)).toFixed(3));
+  T().command('zoom_reset');
+  await wait(300);
+  // In search: a command, which says how to leave it while it is on.
+  T().command('quick_find');
+  const input = await until(() => $('.qf-input'));
+  input.value = 'typewriter';
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  check('Search has the command, which leaves it while it is on', await until(() => $$('.qf-item').some((i) => i.textContent.includes('Leave typewriter mode')), 2000), $$('.qf-item').map((i) => i.textContent).join(' | '));
+  key(input, 'Escape');
+  await until(() => !$('.modal'));
+  // With focus mode too.
+  T().command('focus_mode');
+  await until(() => $('.app.focus-mode'), 1500);
+  await wait(300);
+  await keyTo(line(12));
+  check('With focus mode on, the line comes to the middle of the pane too', Math.abs(at(line(12)) - 0.45) < 0.03 && $('.block-row.fm-here')?.contains(line(12)), at(line(12)).toFixed(3));
+  T().command('focus_mode');
+  await until(() => !$('.app.focus-mode'), 1500);
+  T().command('typewriter');
+  check('The command turns it off again', await until(() => !$('.app.typewriter'), 1500));
 });
 
 await run('Accent colour', async () => {

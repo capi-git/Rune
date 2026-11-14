@@ -652,6 +652,23 @@ button.table-chip:hover,
 .cell.pick.open {
   background: var(--hover);
 }
+/* In a table the whole box of the cell lights up: the cell's own button
+   is as high as one line and has round corners, so a row made taller by
+   another cell showed a small rounded patch at its top. (Over the box's
+   own colour, so that a frozen cell stays solid.) */
+.table-block td .cell.pick,
+.table-block td .cell.computed {
+  border-radius: 0;
+}
+.table-block td .cell.pick:hover,
+.table-block td .cell.pick.open,
+.table-block td .cell.computed:hover,
+.table-block td .cell.computed.open {
+  background: transparent;
+}
+.table-block td:has(.cell.pick:hover, .cell.pick.open, .cell.computed:hover, .cell.computed.open) {
+  background-image: linear-gradient(var(--hover), var(--hover));
+}
 .row-values .value-cell {
   position: relative;
 }

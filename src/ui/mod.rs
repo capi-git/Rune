@@ -448,6 +448,9 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
         std::process::exit(0);
     });
 
+    // The check mark of View ▸ Typewriter Mode, as the setting has it.
+    use_hook(move || crate::check_typewriter(state.ui.peek().typewriter));
+
     // Menu bar commands go to the window in front.
     dioxus::desktop::use_muda_event_handler(move |event| {
         if dioxus::desktop::window().window.is_focused() {
@@ -520,6 +523,7 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
     let width = ui.sidebar_width;
     let modal = ui.modal;
     let focus_mode = ui.focus_mode;
+    let typewriter = ui.typewriter;
     let tab = ui.tab().clone();
     let popover_open = ui.popover.is_some() || state.slash.read().is_some();
     drop(ui);
@@ -528,7 +532,7 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
 
     rsx! {
         div {
-            class: format!("app {theme}{}{}", if pinned { " pinned" } else { "" }, if focus_mode { " focus-mode" } else { "" }),
+            class: format!("app {theme}{}{}{}", if pinned { " pinned" } else { "" }, if focus_mode { " focus-mode" } else { "" }, if typewriter { " typewriter" } else { "" }),
             style: "--sidebar-w: {width}px; --zoom: {zoom}; {glass}",
             "data-accent": "{accent}",
             chrome::TopRow {}
@@ -541,7 +545,9 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
                     }
                 }
                 sidebar::Sidebar {}
-                main { class: "work-card",
+                // A tab of several pages: each page is a card of its own
+                // (`bubbles`, style.css), with the window between them.
+                main { class: if tab.is_split() { "work-card bubbles" } else { "work-card" },
                     // While something is dragged over a pane: where it will
                     // land (placed by bridge.js).
                     div { class: "pane-drop" }

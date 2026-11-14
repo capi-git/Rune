@@ -14,7 +14,9 @@ mod ai;
 mod attach;
 mod aven;
 mod backup;
+mod calc;
 mod chart;
+mod columns;
 mod dictation;
 mod repeat;
 mod transfer;
@@ -49,7 +51,7 @@ mod video;
 mod when;
 
 use dioxus::desktop::muda::accelerator::Accelerator;
-use dioxus::desktop::muda::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+use dioxus::desktop::muda::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use dioxus::desktop::tao::platform::macos::WindowBuilderExtMacOS;
 use dioxus::desktop::{Config, LogicalPosition, LogicalSize, WindowBuilder};
 
@@ -60,6 +62,17 @@ const TABLE_CSS: &str = include_str!("../assets/tables.css");
 thread_local! {
     /// One menu bar for the whole app, shared by every window.
     static MENU: Menu = build_menu();
+    /// View ▸ Typewriter Mode: its check mark (see `check_typewriter`).
+    static TYPEWRITER: CheckMenuItem = CheckMenuItem::with_id("typewriter", "Typewriter Mode", true, false, None);
+}
+
+/// The check mark of View ▸ Typewriter Mode says whether it is on.
+pub fn check_typewriter(on: bool) {
+    TYPEWRITER.with(|item| {
+        if item.is_checked() != on {
+            item.set_checked(on);
+        }
+    });
 }
 
 fn main() {
@@ -298,6 +311,7 @@ fn build_menu() -> Menu {
         &[
             &item("toggle_sidebar", "Show/Hide Sidebar", Some("CmdOrCtrl+\\")),
             &item("focus_mode", "Focus Mode", Some("CmdOrCtrl+.")),
+            &TYPEWRITER.with(|t| t.clone()),
             &item("calendar", "Calendar", Some("CmdOrCtrl+Shift+C")),
             &item("read_aloud", "Read Page Aloud / Stop", Some("CmdOrCtrl+Shift+R")),
             &item("close_split", "Close Pane", None),

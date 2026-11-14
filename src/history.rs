@@ -30,6 +30,30 @@ pub struct Entry {
     /// The number of this step: no other step of this window has it. A
     /// message that offers to undo one step knows that step by it.
     pub id: u64,
+    /// Lines that were moved to another page are a step in each of the two
+    /// pages: this is the other one (see `History::join`).
+    pub joined: Option<Joined>,
+}
+
+/// The other half of a move of lines from one page to another.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Joined {
+    pub page: Id,
+    pub step: u64,
+    /// This step is in the page the lines left (the other in the page they went to).
+    pub left: bool,
+    /// The pages of the rows of the moved tables that were not in the Trash
+    /// before the move: they come along again, each way (see `bring_row_pages`).
+    pub rows: Vec<Id>,
+}
+
+impl Joined {
+    /// Which half is taken back or done again first: the one that takes the
+    /// lines out of its page. (A table that is in the other page still would
+    /// come back as a copy, and the pages of its rows would stay there.)
+    pub fn other_first(&self, undo: bool) -> bool {
+        undo == self.left
+    }
 }
 
 impl Entry {
@@ -74,6 +98,7 @@ impl History {
             trashed: Vec::new(),
             created: Vec::new(),
             id: self.made,
+            joined: None,
         });
         self.made += 1;
         if self.undo.len() > LIMIT {
@@ -113,6 +138,42 @@ impl History {
     /// change of the page is a later step, with another number.
     pub fn next_undo(&self, page: &str) -> Option<u64> {
         self.undo.iter().rfind(|e| e.page == page).map(|e| e.id)
+    }
+
+    /// The number of the step that Redo would do again on `page` now.
+    pub fn next_redo(&self, page: &str) -> Option<u64> {
+        self.redo.iter().rfind(|e| e.page == page).map(|e| e.id)
+    }
+
+    /// The last steps of two pages are one move of lines from `left` to
+    /// `went`: Undo or Redo in either page does both, while the other's step
+    /// is still the next one there (see `partner`).
+    pub fn join(&mut self, left: &str, went: &str, rows: Vec<Id>) {
+        let (Some(a), Some(b)) = (self.next_undo(left), self.next_undo(went)) else { return };
+        for e in self.undo.iter_mut() {
+            if e.page == left && e.id == a {
+                e.joined = Some(Joined { page: went.to_string(), step: b, left: true, rows: rows.clone() });
+            } else if e.page == went && e.id == b {
+                e.joined = Some(Joined { page: left.to_string(), step: a, left: false, rows: rows.clone() });
+            }
+        }
+    }
+
+    /// A half of a move of lines that would take the lines out of its page
+    /// (Undo in the page they went to, Redo in the page they left), while
+    /// the other half (`partner`) is not there to put them in the other
+    /// page: taken alone, it would lose them.
+    pub fn half_alone(e: &Entry, partner: Option<&Joined>, undo: bool) -> bool {
+        e.joined.as_ref().is_some_and(|j| undo != j.left) && partner.is_none()
+    }
+
+    /// The other half of a move of lines, when it is still the step that
+    /// Undo (or Redo) would take next in its page. (A change made there
+    /// since is a later step: each page then goes back on its own.)
+    pub fn partner(&self, e: &Entry, undo: bool) -> Option<Joined> {
+        let j = e.joined.clone()?;
+        let next = if undo { self.next_undo(&j.page) } else { self.next_redo(&j.page) };
+        (next == Some(j.step)).then_some(j)
     }
 
     pub fn take_undo(&mut self, page: &str) -> Option<Entry> {
@@ -262,6 +323,74 @@ mod tests {
         h.record("p", a, b, None, 10);
         assert!(h.take_redo("p").is_none());
         assert!(h.take_undo("q").is_some());
+    }
+
+    #[test]
+    fn lines_moved_to_another_page_go_back_and_forth_together() {
+        let mut h = History::default();
+        let (a, b, c) = (vec![Block::text("a")], vec![Block::text("b")], vec![Block::text("c")]);
+        h.record("from", a.clone(), b.clone(), None, 0);
+        h.record("to", a.clone(), b.clone(), None, 0);
+        h.join("from", "to", vec!["row".into()]);
+        // Undo in either page finds the other half; the page they went to goes first.
+        let e = h.take_undo("from").unwrap();
+        let j = h.partner(&e, true).unwrap();
+        assert_eq!((j.page.as_str(), j.left, j.other_first(true), j.rows.clone()), ("to", true, true, vec!["row".to_string()]));
+        h.push_undo(e);
+        let e = h.take_undo("to").unwrap();
+        let j = h.partner(&e, true).unwrap();
+        assert_eq!((j.page.as_str(), j.left, j.other_first(true)), ("from", false, false));
+        // Taken back: Redo goes the other way round (the page they left first).
+        h.push_redo(e);
+        let e = h.take_undo("from").unwrap();
+        h.push_redo(e);
+        let e = h.take_redo("from").unwrap();
+        assert!(!h.partner(&e, false).unwrap().other_first(false));
+        h.push_redo(e);
+        // A change made in the other page since: each page goes back on its own.
+        let mut h = History::default();
+        h.record("from", a.clone(), b.clone(), None, 0);
+        h.record("to", a, b.clone(), None, 0);
+        h.join("from", "to", Vec::new());
+        h.record("to", b, c, None, 10);
+        let e = h.take_undo("from").unwrap();
+        assert!(e.joined.is_some() && h.partner(&e, true).is_none());
+    }
+
+    #[test]
+    fn half_of_a_move_is_not_taken_back_alone_when_it_would_lose_the_lines() {
+        let (a, b) = (vec![Block::text("a")], vec![Block::text("b")]);
+        let made = || {
+            let mut h = History::default();
+            h.record("from", a.clone(), b.clone(), None, 0);
+            h.record("to", a.clone(), b.clone(), None, 0);
+            h.join("from", "to", Vec::new());
+            h
+        };
+        // The page they left was locked, or written by another window: its
+        // half is gone. Undo in the page they went to would take them out.
+        let mut h = made();
+        h.forget("from");
+        let e = h.take_undo("to").unwrap();
+        let p = h.partner(&e, true);
+        assert!(History::half_alone(&e, p.as_ref(), true));
+        // Undo in the page they left puts them back: no line is lost.
+        let mut h = made();
+        h.forget("to");
+        let e = h.take_undo("from").unwrap();
+        assert!(!History::half_alone(&e, h.partner(&e, true).as_ref(), true));
+        // Both halves there: the move goes back whole.
+        let mut h = made();
+        let e = h.take_undo("to").unwrap();
+        assert!(!History::half_alone(&e, h.partner(&e, true).as_ref(), true));
+        // Redo in the page they left would take them out again: not once the
+        // other page's half is gone (a change there clears its Redo).
+        h.push_redo(e);
+        let e = h.take_undo("from").unwrap();
+        h.push_redo(e);
+        h.record("to", b.clone(), a.clone(), None, 10);
+        let e = h.take_redo("from").unwrap();
+        assert!(History::half_alone(&e, h.partner(&e, false).as_ref(), false));
     }
 
     #[test]
