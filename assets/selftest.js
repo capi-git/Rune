@@ -629,6 +629,83 @@ await run('Tabs and the sliding highlight', async () => {
   await until(() => $$('.tab').length === 1);
 });
 
+await run('Ctrl+Tab in the order of use', async () => {
+  await oneTab();
+  const front = () => $('.tab.active')?.title;
+  const tabOf = (name) => $$('.tab').find((t) => t.title === name);
+  // (Control held: Ctrl+Tab; Control let go: its own key up.)
+  const ctrlTab = (shift = false) => key(document.activeElement || document.body, 'Tab', { ctrlKey: true, shiftKey: shift });
+  const letGo = () => document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Control', bubbles: true }));
+  treeItem('Getting Started').click();
+  await until(() => front() === 'Getting Started');
+  treeItem('Reading List').click();
+  await until(() => front() === 'Reading List' && $$('.tab').length === 3);
+  // The row: Home | Getting Started | Reading List, used in that order.
+  ctrlTab();
+  letGo();
+  check('Ctrl+Tab goes to the tab used before this one (the row would go to Home)', await until(() => front() === 'Getting Started'), front());
+  ctrlTab();
+  letGo();
+  check('…and a second Ctrl+Tab goes back again', await until(() => front() === 'Reading List'), front());
+  ctrlTab();
+  await until(() => front() === 'Getting Started');
+  ctrlTab();
+  check('With Control held, Tab again goes further back', await until(() => front() === 'Home'), front());
+  letGo();
+  await wait(100);
+  ctrlTab();
+  letGo();
+  check('Let go there, that tab is the one used last', await until(() => front() === 'Reading List'), front());
+  ctrlTab(true);
+  letGo();
+  check('Ctrl+Shift+Tab goes the other way: to the tab used longest ago', await until(() => front() === 'Getting Started'), front());
+  tabOf('Home').click();
+  await until(() => front() === 'Home');
+  ctrlTab();
+  letGo();
+  check('A tab chosen by a press is used too', await until(() => front() === 'Getting Started'), front());
+  // The list while Control is held: the tabs in the order of use, the one reached marked.
+  const rows = () => $$('.tab-walk .tab-walk-row').map((r) => (r.classList.contains('on') ? '>' : '') + r.querySelector('.tab-walk-name').textContent).join(' | ');
+  const listShown = () => !!$('.tab-walk') && document.body.dataset.tabWalk === '1' && getComputedStyle($('.tab-walk')).opacity === '1';
+  ctrlTab();
+  await wait(300);
+  check('Control held a moment after Ctrl+Tab: a list of the tabs in the order of use, the one reached marked', (await until(listShown)) && rows() === 'Getting Started | >Home | Reading List' && front() === 'Home', `${rows()}; ${front()}`);
+  snap('tab-walk');
+  ctrlTab();
+  check('…another Tab moves the mark down, and that tab is in front', await until(() => rows() === 'Getting Started | Home | >Reading List' && front() === 'Reading List'), `${rows()}; ${front()}`);
+  key(document.activeElement || document.body, 'Escape', { ctrlKey: true });
+  check('…Escape closes it, and the tab of the start is in front again', await until(() => !$('.tab-walk') && !document.body.dataset.tabWalk && front() === 'Getting Started'), `${rows()}; ${front()}`);
+  letGo();
+  ctrlTab();
+  letGo();
+  check('…and the order is as it was', await until(() => front() === 'Home'), front());
+  ctrlTab();
+  await until(listShown, 1000);
+  const row = $$('.tab-walk .tab-walk-row').find((r) => r.textContent.includes('Reading List'));
+  row?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, ctrlKey: true }));
+  check('A press on a row of the list brings that tab forward, and the list goes', row && (await until(() => front() === 'Reading List' && !$('.tab-walk'))), `${rows()}; ${front()}`);
+  letGo();
+  let flashed = false;
+  const watch = new MutationObserver(() => (flashed ||= !!document.body.dataset.tabWalk));
+  watch.observe(document.body, { attributes: true, attributeFilter: ['data-tab-walk'] });
+  ctrlTab();
+  letGo();
+  await wait(300);
+  watch.disconnect();
+  check('A quick Ctrl+Tab switches with no list showing', !flashed && !$('.tab-walk') && front() === 'Home', front());
+  // A tab closed while the list is open (one before the mark): the mark stays on the tab reached.
+  ctrlTab();
+  await until(listShown, 1000);
+  tabOf('Home').querySelector('.tab-close').click();
+  check('A tab closed while the list is open leaves it, and the mark stays on the tab reached', await until(() => rows() === '>Reading List | Getting Started' && front() === 'Reading List'), `${rows()}; ${front()}`);
+  letGo();
+  await until(() => !$('.tab-walk'));
+  ctrlTab();
+  letGo();
+  check('A closed tab leaves the order', await until(() => front() === 'Getting Started' && $$('.tab').length === 2 && !tabOf('Home')), `${front()}; ${$$('.tab').length} tabs`);
+  await oneTab();
+});
+
 await run('Pages open in their own tab', async () => {
   await oneTab();
   treeItem('Getting Started').click();
@@ -1149,6 +1226,57 @@ await run('Pin a tab', async () => {
   check('A pinned tab whose page goes to the Trash is a plain Home tab: nothing stays pinned', !$('.tab.pinned') && $$('.tab').filter((t) => t.title === 'Home').length === 1 && !!tabOf('Home')?.querySelector('.tab-close') && !tabOf('quiet page'), order());
   } finally {
     // (Whatever went wrong above: no pinned tab stays for the groups after this one.)
+    if ($('.tab-menu')) $('.tab.active').click();
+    while ($('.tab.pinned')) {
+      const n = $$('.tab.pinned').length;
+      menuItem(await menuOf($('.tab.pinned')), 'Unpin Tab').click();
+      await until(() => $$('.tab.pinned').length < n);
+    }
+  }
+  await oneTab();
+});
+
+await run('Duplicate a tab', async () => {
+  await oneTab();
+  treeItem('Getting Started').click();
+  await until(() => $$('.tab').length === 2);
+  treeItem('Reading List').click();
+  await until(() => $$('.tab').length === 3 && $('.tab.active')?.title === 'Reading List');
+  const tabOf = (name) => $$('.tab').find((t) => t.title === name);
+  const order = () => $$('.tab').map((t) => (t.classList.contains('pinned') ? '*' : '') + t.title + (t.classList.contains('active') ? '<' : '')).join(' | ');
+  const menuOf = async (tab) => {
+    tab.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    return until(() => $('.tab-menu'));
+  };
+  const says = (menu) => $$('.menu-item', menu).map((m) => m.querySelector('span').textContent);
+  const choose = async (name, words) => {
+    const menu = await menuOf(tabOf(name));
+    menuItem(menu, words).click();
+    await until(() => !$('.tab-menu'));
+  };
+  const shown = () => $$('.pane').filter((p) => p.offsetParent).map((p) => p.querySelector('.title-input')?.value).join(' | ');
+  try {
+    let menu = await menuOf(tabOf('Getting Started'));
+    check('The menu of a tab has "Duplicate Tab", right after "Pin Tab"', menu && says(menu).join(' | ').startsWith('Pin Tab | Duplicate Tab |'), menu && says(menu).join(' | '));
+    menuItem(menu, 'Duplicate Tab').click();
+    check('"Duplicate Tab" puts a copy of the tab right after it, in front', await until(() => order() === 'Home | Getting Started | Getting Started< | Reading List' && !$('.tab-menu')), order());
+    check('…showing the same page', await until(() => shown() === 'Getting Started'), shown());
+    menu = await menuOf(tabOf('Home'));
+    check('The tab of Home has no "Duplicate Tab" (there is one Home tab)', menu && !says(menu).includes('Duplicate Tab') && says(menu).includes('Pin Tab'), menu && says(menu).join(' | '));
+    $('.tab.active').click();
+    await until(() => !$('.tab-menu'));
+    $('.tab.active .tab-close').click();
+    await until(() => $$('.tab').length === 3);
+    // A tab of several pages is copied whole; a pinned one gives a copy that is not pinned.
+    await dragTab(tabOf('Getting Started'), tabOf('Reading List'), 'middle');
+    const names = 'Reading List | Getting Started';
+    await until(() => tabOf(names));
+    await choose(names, 'Pin Tab');
+    await until(() => tabOf(names)?.classList.contains('pinned'));
+    await choose(names, 'Duplicate Tab');
+    check('A pinned tab of several pages is copied whole, not pinned, after the pinned tabs', await until(() => order() === `*${names} | ${names}< | Home`), order());
+    check('…its pages in the same layout', await until(() => shown() === names && $('.tab.active.split') && $$('.tab.active .tab-seg').length === 2 && $('.panes.split')), `${shown()}; ${$$('.tab.active .tab-seg').length} parts`);
+  } finally {
     if ($('.tab-menu')) $('.tab.active').click();
     while ($('.tab.pinned')) {
       const n = $$('.tab.pinned').length;
@@ -2727,6 +2855,13 @@ await run('A page keeps its scroll place', async () => {
   check('…and it stays there', at('Place one') === 900, at('Place one'));
   await show('Place two');
   check('…and the other page is where it was left too', at('Place two') === 400, at('Place two'));
+  // A copy of the tab ("Duplicate Tab") shows the page at that place too.
+  tabOf('Place two').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+  menuItem(await until(() => $('.tab-menu')), 'Duplicate Tab').click();
+  await until(() => $$('.tab').filter((t) => t.textContent.includes('Place two')).length === 2 && $('.tab.active')?.textContent.includes('Place two'));
+  check('A copy of a tab shows its page at the place it was left at', await until(() => at('Place two') === 400, 1500), at('Place two'));
+  $('.tab.active .tab-close').click();
+  await until(() => $$('.tab').filter((t) => t.textContent.includes('Place two')).length === 1);
 
   // On a zoomed page (the place is in the units of the box that scrolls).
   for (let i = 0; i < 3; i++) T().command('zoom_in');
@@ -2852,6 +2987,79 @@ await run('A page keeps its scroll place', async () => {
     await wait(300);
     check('…and a place set after that is kept again', Math.round(third?.scrollTop ?? -1) === left, `${Math.round(third?.scrollTop ?? -1)} of ${left}`);
   }
+  await oneTab();
+});
+
+await run('Back and Forward by the side buttons of a mouse and by two fingers', async () => {
+  await oneTab();
+  // A pane that went from Ideas to Getting Started (by the bar of the page) to the graph.
+  treeItem('Getting Started').click();
+  await until(() => $('.tab.active')?.title === 'Getting Started');
+  const showing = () => $$('.pane').filter((p) => p.offsetParent).map((p) => (p.querySelector('.graph') ? 'graph' : p.querySelector('.title-input')?.value)).join(' | ');
+  const link = await until(() => $$('.page-link:not(.missing)').find((l) => l.offsetParent && l.textContent.includes('Ideas')), 2000);
+  link.click();
+  await until(() => showing() === 'Ideas');
+  const pane = $$('.pane').find((p) => p.offsetParent).dataset.pane;
+  $$(`.pane[data-pane="${pane}"] .crumb`).find((c) => c.textContent.trim() === 'Getting Started').click();
+  await until(() => showing() === 'Getting Started');
+  $$('.tile').find((t) => t.title.startsWith('Graph')).click();
+  await until(() => showing() === 'graph');
+  const tabs = $$('.tab').length;
+  const inPane = () => $(`.pane[data-pane="${pane}"] .scroller`);
+  // A side button: a press and its release, as WebKit sends them (button 3 Back, 4 Forward).
+  const side = (el, button) => {
+    for (const type of ['pointerdown', 'pointerup', 'auxclick']) el.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, button, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+  };
+  // (No button is held from an earlier group.)
+  window.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0, pointerId: 1, pointerType: 'mouse' }));
+  side(inPane(), 3);
+  check('The Back button of a mouse goes Back in the pane under the pointer', await until(() => showing() === 'Getting Started'), showing());
+  side($('.sidebar .tree-item') || $('.sidebar'), 4);
+  check('…its Forward button over the sidebar goes Forward in the pane in front', await until(() => showing() === 'graph'), showing());
+  side($('.tab.active'), 3);
+  check('…a side button on a tab never closes it (the middle button does)', (await until(() => showing() === 'Getting Started')) && $$('.tab').length === tabs, `${showing()}; ${$$('.tab').length} tabs`);
+  await openSettings();
+  side($('.settings-view'), 3);
+  await wait(300);
+  const stayed = !!$('.settings-view');
+  $('.settings-back').click();
+  await until(() => !$('.settings-view'));
+  check('…and under Settings nothing goes back: Settings stays, and so does the page under it', stayed && (await until(() => showing() === 'Getting Started')), `${stayed}; ${showing()}`);
+  // Two fingers sideways: steps of the trackpad as wheel events.
+  const swipe = async (el, dx, n, dy = 0) => {
+    for (let i = 0; i < n; i++) {
+      el.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaX: dx, deltaY: dy, deltaMode: 0 }));
+      await wait(16);
+    }
+  };
+  const line = () => $$(`.pane[data-pane="${pane}"] .blk`).find((b) => b.offsetParent);
+  await wait(400);
+  await swipe(line(), -16, 3);
+  check('Two fingers moving right: the page leans, with an arrow at its edge', $('.swipe-sign') && parseFloat($('.swipe-sign').style.opacity) > 0 && showing() === 'Getting Started', `${showing()}; ${$('.swipe-sign')?.style.opacity}`);
+  await wait(400);
+  check('…and a move that stops short goes back and does nothing', !$('.swipe-sign') && !inPane().style.transform && showing() === 'Getting Started', `${showing()}; ${inPane().style.transform}`);
+  await swipe(line(), -30, 4);
+  // (The glide after the fingers left: smaller and smaller steps, no pause.)
+  await swipe(line(), -12, 1);
+  await swipe(line(), -6, 1);
+  await swipe(line(), -3, 2);
+  check('A longer move goes Back, one page only, with the glide after it', await until(() => showing() === 'Ideas'), showing());
+  await wait(400);
+  await swipe(line(), 30, 4);
+  await swipe(line(), 12, 1);
+  await swipe(line(), 6, 1);
+  check('Two fingers moving left go Forward, one page only', await until(() => showing() === 'Getting Started') && (await wait(300), showing() === 'Getting Started'), showing());
+  await wait(400);
+  await swipe(line(), -12, 6, 40);
+  await wait(300);
+  check('A move mostly up or down is a scroll: no step', showing() === 'Getting Started' && !$('.swipe-sign'), showing());
+  await wait(400);
+  side(inPane(), 4);
+  await until(() => showing() === 'graph');
+  await wait(400);
+  await swipe($(`.pane[data-pane="${pane}"] .graph canvas`) || $(`.pane[data-pane="${pane}"] .graph`), -30, 5);
+  await wait(300);
+  check('Over the graph (it moves with two fingers itself) no step', showing() === 'graph', showing());
   await oneTab();
 });
 
@@ -3888,6 +4096,94 @@ await run('A table with many columns', async () => {
   box(0).scrollLeft = box(0).scrollWidth;
   await wait(200);
   snap('table-wide-end');
+});
+
+await run('The row of names stays in view', async () => {
+  // A table taller than the window: the row of its column names stays at the
+  // top of the page while its rows scroll under it, moves sideways with them
+  // under a frozen column, opens the menus of its columns, and goes with the
+  // table's end. (A real wheel on it is driven on the hidden page.)
+  await oneTab();
+  const title = await newPage('Long log');
+  key(title, 'Enter');
+  const first = await until(() => document.activeElement?.classList.contains('blk') && document.activeElement);
+  const pane = () => shownPane('Long log');
+  const md = [
+    'Before',
+    '',
+    '| Date | Ticker | Market | Side | Setup | Session | Entry | Stop | Target | Exit | Size | Notes |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+    ...Array.from({ length: 40 }, (_, i) => `| 2026-10-${String(1 + (i % 28)).padStart(2, '0')} | T${i + 1} | Crypto | ${i % 2 ? 'Short' : 'Long'} | Breakout | London | ${100 + i} | 90 | 120 | 110 | 1 | Row ${i + 1} |`),
+    '<!-- columns: date | text | choice | choice | choice | choice | number | number | number | number | number | text -->',
+    '<!-- table: Long log | frozen 1 -->',
+    '',
+    ...Array.from({ length: 20 }, (_, i) => `After ${i + 1}\n`),
+  ].join('\n');
+  const clip = new DataTransfer();
+  clip.setData('text/plain', md);
+  first.dispatchEvent(new ClipboardEvent('paste', { clipboardData: clip, bubbles: true, cancelable: true }));
+  const box = () => $('.table-block', pane());
+  const s = () => $('.scroller', pane());
+  await until(() => box() && $$('tr[data-r]', box()).length === 41 && $$('td.frozen', box()).length > 0, 4000);
+  await wait(250);
+  const rect = (el) => el.getBoundingClientRect();
+  const stuck = () => $('.table-stick > .table-block', box().parentElement);
+  // (By points of the window, at any zoom.)
+  const scrollBy = async (dy) => {
+    s().scrollTop += dy / (rect(s()).height / s().offsetHeight || 1);
+    await wait(200);
+  };
+  await scrollBy(rect(box()).top - rect(s()).top - 60);
+  check('With the top of a long table in view, its row of names is its own, over no row', !stuck() && rect(box()).height > rect(s()).height, `${Math.round(rect(box()).height)} high in ${Math.round(rect(s()).height)}, copy: ${!!stuck()}`);
+  await scrollBy(400);
+  const copy = await until(stuck, 1500);
+  const c = copy && rect(copy);
+  const hit = c && document.elementFromPoint(c.left + c.width / 2, c.top + c.height / 2);
+  const names = copy ? $$('textarea', copy).map((t) => t.value).join(',') : '';
+  const real = $$('tr.head-row textarea.cell', box()).map((t) => t.value).join(',');
+  check('Scrolled down, the row of names stays at the top of the page, over the rows', copy && Math.abs(c.top - rect(s()).top) < 1.5 && names === real && copy.contains(hit), `${c && Math.round(c.top)} at ${Math.round(rect(s()).top)}, ${names}, hit ${hit?.className}`);
+  box().scrollLeft = 300;
+  await wait(200);
+  const fz = (root) => $('td.frozen', root);
+  check('…it moves sideways with the table, and its frozen column stays', stuck() && box().scrollLeft > 100 && Math.abs(stuck().scrollLeft - box().scrollLeft) < 1 && Math.abs(rect(fz(stuck())).left - rect(fz(box())).left) < 1 && stuck().hasAttribute('data-slid'), `${box().scrollLeft} / ${stuck()?.scrollLeft}`);
+  box().scrollLeft = 0;
+  await wait(150);
+  // (A press as the engine sends it: the release and the click are the copy's
+  // only for a press that began on it.)
+  const pressOn = (el) => {
+    const r = rect(el);
+    const at = { bubbles: true, cancelable: true, button: 0, clientX: r.left + 6, clientY: r.top + r.height / 2 };
+    el.dispatchEvent(new PointerEvent('pointerdown', at));
+    el.dispatchEvent(new MouseEvent('mousedown', { ...at, buttons: 1 }));
+    el.dispatchEvent(new PointerEvent('pointerup', at));
+    el.dispatchEvent(new MouseEvent('mouseup', at));
+    el.dispatchEvent(new MouseEvent('click', at));
+  };
+  pressOn($('.th-menu', $$('td.head', stuck())[2]));
+  const menu = await until(() => $('.table-hung .column-menu', box().parentElement));
+  const head = stuck() && $$('td.head', stuck())[2];
+  check('A press on the chevron of a name in that row opens the menu of its column, under it', menu && head && Math.abs(rect(menu).top - rect(head).bottom - 4) < 3 && Math.abs(rect(menu).left - rect(head).left) < 3, menu && head ? `menu at ${Math.round(rect(menu).left)},${Math.round(rect(menu).top)}, heading ${Math.round(rect(head).left)},${Math.round(rect(head).bottom)}` : `menu: ${!!menu}`);
+  $('.backdrop')?.click();
+  await until(() => !$('.table-menu'));
+  snap('table-head-stuck');
+  // A press on a name is a press on the real name: the table's own row comes
+  // to the top of the page, and its name has the caret (to rename it there).
+  pressOn($('textarea', $$('td.head', stuck())[2]));
+  const named = await until(() => !stuck() && box().contains(document.activeElement) && document.activeElement.closest('tr.head-row'), 1500);
+  check('A press on a name there puts the caret in the table’s own name, brought to the top', named && Math.abs(rect(box()).top - rect(s()).top) < 1.5, `${document.activeElement?.className} ${Math.round(rect(box()).top)} at ${Math.round(rect(s()).top)}`);
+  document.activeElement?.blur();
+  await scrollBy(400);
+  await until(stuck, 1500);
+  await scrollBy(rect(box()).bottom - rect(s()).top + 20);
+  check('…and it goes with the table once the table’s end has passed', !stuck(), `${Math.round(rect(box()).bottom)} / ${Math.round(rect(s()).top)}`);
+  T().command('zoom_in');
+  T().command('zoom_in');
+  await wait(300);
+  await scrollBy(rect(box()).top - rect(s()).top + 300);
+  const zoomed = await until(stuck, 1500);
+  check('In a page made bigger, it stays at the top all the same', zoomed && Math.abs(rect(zoomed).top - rect(s()).top) < 1.5 && Math.abs(rect(zoomed).left - rect(box()).left) < 1.5, zoomed ? `${Math.round(rect(zoomed).top)} at ${Math.round(rect(s()).top)}` : 'no copy');
+  T().command('zoom_reset');
+  await wait(200);
 });
 
 await run('Table menus, handles and picking', async () => {
@@ -5922,8 +6218,12 @@ await run('Select all, copy and delete', async () => {
   check('With the caret in a line, the first ⌘A is left for the text of the line', picked().length === 0);
   // With all of the line selected, ⌘A picks the whole page.
   T().setSel(third, 0, 9);
+  // (The words of what is selected show at the foot of the pane, as the page counts its own.)
+  const selCount = () => $('.sel-words.on', pane())?.textContent;
+  check('With words of a line selected, their count shows quietly at the foot of the pane', await until(() => selCount() === '2 words', 1500), String(selCount()));
   cmd(third, 'a');
   check('⌘A again picks every block of the page', await until(() => picked().length === 3, 3000), String(picked().length));
+  check('…and the count is of the words of the picked lines', await until(() => selCount() === '4 words', 1500), String(selCount()));
   check('The picked blocks are marked, and no line has the caret', picked().every((r) => getComputedStyle(r).backgroundColor !== 'rgba(0, 0, 0, 0)') && !document.activeElement?.classList.contains('blk'));
   delete document.body.dataset.copied;
   cmd(document.body, 'c');
@@ -5931,6 +6231,7 @@ await run('Select all, copy and delete', async () => {
   check('They stay picked after the copy', picked().length === 3);
   key(document.body, 'Escape');
   check('Escape lets them go', await until(() => picked().length === 0, 3000));
+  check('…and the count of their words goes with them', await until(() => !selCount(), 1500), String(selCount()));
 
   // A drag of the text selection from one line into another picks the lines it goes over.
   {

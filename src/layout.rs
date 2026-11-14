@@ -280,6 +280,17 @@ impl Layout {
         mine == want && self.well_formed()
     }
 
+    /// The same arrangement, its panes named anew by `name`, each row and
+    /// column with a new id: the layout of a copy of a tab.
+    pub fn renamed(&self, name: &dyn Fn(&str) -> Id) -> Layout {
+        match self {
+            Layout::Pane { id } => Layout::Pane { id: name(id) },
+            Layout::Split { dir, children, sizes, .. } => {
+                Layout::Split { id: new_id(), dir: *dir, children: children.iter().map(|c| c.renamed(name)).collect(), sizes: sizes.clone() }
+            }
+        }
+    }
+
     fn well_formed(&self) -> bool {
         match self {
             Layout::Pane { .. } => true,

@@ -239,6 +239,30 @@ impl Tab {
         }
         out
     }
+    /// Whether "Duplicate Tab" can copy it: not a tab of Home, the calendar
+    /// or the graph alone (there is one of each in a row of tabs).
+    pub fn can_duplicate(&self) -> bool {
+        view_tab(self).is_none()
+    }
+    /// A copy of the tab ("Duplicate Tab"): the same pages with their Back
+    /// and Forward, in the same layout, with the same pane in focus and the
+    /// same panes folded; new ids for the tab and each pane, and not
+    /// pinned. Gives the copy, and each pane's id with the id of its copy.
+    pub fn copied(&self) -> (Tab, Vec<(Id, Id)>) {
+        let names: Vec<(Id, Id)> = self.panes.iter().map(|p| (p.id.clone(), new_id())).collect();
+        let name = |id: &str| names.iter().find(|(old, _)| old == id).map(|(_, new)| new.clone()).unwrap_or_else(|| id.to_string());
+        let panes = self.panes.iter().map(|p| Pane { id: name(&p.id), ..p.clone() }).collect();
+        let tab = Tab {
+            id: new_id(),
+            panes,
+            layout: self.layout.renamed(&name),
+            focus: name(&self.focus),
+            folded: self.folded.iter().map(|f| name(f)).collect(),
+            peek: None,
+            pinned: false,
+        };
+        (tab, names)
+    }
 }
 
 /// A tab as saved, including saves from before tabs could hold any number of
@@ -481,6 +505,76 @@ fn pins_first(tabs: &mut Vec<Tab>, active: &mut usize) -> bool {
     true
 }
 
+/// The order in which a window's tabs were used, for Ctrl+Tab (see
+/// `AppState::walk_tabs`). Kept in memory only, never saved.
+#[derive(Default)]
+struct TabUse {
+    /// Tab ids, the one used last first. The tabs of every space of the
+    /// window are in it; a walk takes those in front.
+    order: Vec<Id>,
+    /// While Control is held after Ctrl+Tab: the order as it was at the
+    /// first press, and how far along it the walk is.
+    walk: Option<(Vec<Id>, usize)>,
+}
+
+thread_local! {
+    /// The order of use of each window's tabs, by the window's key.
+    static TAB_USE: std::cell::RefCell<HashMap<u64, TabUse>> = std::cell::RefCell::new(HashMap::new());
+}
+
+/// This tab was used now: it comes first.
+fn note_use(order: &mut Vec<Id>, id: &str) {
+    order.retain(|o| o != id);
+    order.insert(0, id.to_string());
+}
+
+/// The tabs of a row in the order of use: those used, the last first, then
+/// the others in the order of the row.
+fn used_first(order: &[Id], tabs: &[Tab]) -> Vec<Id> {
+    let mut out: Vec<Id> = order.iter().filter(|id| tabs.iter().any(|t| &t.id == *id)).cloned().collect();
+    out.extend(tabs.iter().filter(|t| !order.contains(&t.id)).map(|t| t.id.clone()));
+    out
+}
+
+impl TabUse {
+    /// One press of Ctrl+Tab (`by` 1) or Ctrl+Shift+Tab (-1), with `front`
+    /// in front of the row `tabs`: the tab to bring forward. The first press
+    /// takes the order as it is; the next ones, while Control is held, go on
+    /// along that same order. A tab that closed meanwhile starts it again.
+    fn walk(&mut self, front: &str, tabs: &[Tab], by: i64) -> Option<Id> {
+        let (list, at) = match self.walk.take() {
+            Some((list, at)) if list.get(at).is_some_and(|id| id == front) && list.iter().all(|id| tabs.iter().any(|t| &t.id == id)) => (list, at),
+            _ => {
+                note_use(&mut self.order, front);
+                (used_first(&self.order, tabs), 0)
+            }
+        };
+        if list.len() < 2 {
+            return None;
+        }
+        let next = (at as i64 + by).rem_euclid(list.len() as i64) as usize;
+        let to = list[next].clone();
+        self.walk = Some((list, next));
+        Some(to)
+    }
+
+    /// `front` is in front now (of `every` tab the window has, in all its
+    /// spaces): it comes first. Not while Control is held after Ctrl+Tab
+    /// (the order waits for it to be let go); a tab that came forward by
+    /// another way meanwhile (a press on it) ends that walk. A tab that
+    /// closed leaves the order.
+    fn used(&mut self, front: &str, every: &[&Tab]) {
+        if let Some((list, at)) = &self.walk {
+            if list.get(*at).is_some_and(|id| id == front) {
+                return;
+            }
+            self.walk = None;
+        }
+        note_use(&mut self.order, front);
+        self.order.retain(|id| every.iter().any(|t| &t.id == id));
+    }
+}
+
 /// The space of the page a tab shows. Home, the calendar and the graph are
 /// in no space of their own.
 fn tab_space(tab: &Tab, pages: &HashMap<Id, Page>) -> Option<Id> {
@@ -612,6 +706,18 @@ impl Ui {
             tab.pinned = on;
             pins_first(&mut self.tabs, &mut self.active);
         }
+    }
+    /// A copy of a tab, right after it and in front (after the pinned tabs,
+    /// for a pinned one: the copy is not pinned). A tab that shows only
+    /// Home, the calendar or the graph has none: there is one such tab.
+    /// Gives each pane's id with the id of its copy.
+    fn duplicate(&mut self, index: usize) -> Option<Vec<(Id, Id)>> {
+        let tab = self.tabs.get(index).filter(|t| t.can_duplicate())?;
+        let (copy, names) = tab.copied();
+        self.tabs.insert(index + 1, copy);
+        self.active = index + 1;
+        pins_first(&mut self.tabs, &mut self.active);
+        Some(names)
     }
     /// Close every tab but one, and but the pinned ones. Gives the tabs
     /// that went.
@@ -917,6 +1023,9 @@ pub enum Bridge {
     ZoomWindow,
     SidebarWidth { w: f64 },
     TabDrop { from: String, #[serde(default)] to: Option<String>, mode: String },
+    /// Back (`back`) or Forward from a mouse's side button or a swipe of two
+    /// fingers, in the pane under the pointer if it was over one.
+    PaneStep { #[serde(default)] pane: Option<String>, back: bool },
     /// A drawing's frame saved its scene.
     DrawingSave { page: String, id: String, data: String },
     /// A picture pasted or dropped at a block (base64).
@@ -1136,6 +1245,10 @@ pub struct AppState {
     /// The pad of the meeting in progress: a card of its own on the screen,
     /// outside this window (see pad.rs). The first window keeps it.
     pub pad: Signal<Option<crate::pad::Pad>>,
+    /// While Control is held after Ctrl+Tab: the tabs in the order of use
+    /// and the one reached, for the list in the middle of the window (see
+    /// `walk_tabs`; the order itself is kept in `TAB_USE`).
+    pub tab_walk: Signal<Option<(Vec<Id>, usize)>>,
 }
 
 /// Blocks of one page picked as a whole (Command-A a second time, or a press
@@ -2195,7 +2308,9 @@ fn spaces_told(mine: &[Space], told: Vec<Space>, in_file: Option<Vec<Space>>) ->
 /// stayed on, unread, until the app quit. The words heard since the last
 /// write to the page (20 seconds at the most) and the notes are not
 /// written; the next notes of that page are written from all its transcript.
+/// (The order of use of its tabs goes too: see `walk_tabs`.)
 pub fn window_gone(key: u64) {
+    TAB_USE.with(|u| u.borrow_mut().remove(&key));
     let Some((_, page)) = LISTENER_WINDOW.with(|w| w.borrow_mut().take_if(|(of, _)| *of == key)) else { return };
     LISTENER.with(|l| l.borrow_mut().take());
     heard_not_noted(&page, None);
@@ -2801,6 +2916,7 @@ impl AppState {
             player_dock: Signal::new(store::setting("player_dock").and_then(|s| serde_json::from_str::<DockPlace>(&s).ok()).unwrap_or_default().tidy()),
             day_page: Signal::new(None),
             pad: Signal::new(None),
+            tab_walk: Signal::new(None),
         }
     }
 
@@ -2951,6 +3067,7 @@ impl AppState {
             }
         }
         store::set_settings(&ui_settings(&self.ui.peek(), self.win.primary));
+        self.note_tab_use();
     }
 
     /// Typing changed only this block's text: save just that.
@@ -4910,6 +5027,98 @@ impl AppState {
         self.select_tab((active + delta).rem_euclid(len) as usize);
     }
 
+    /// Ctrl+Tab (`by` 1) and Ctrl+Shift+Tab (-1): the tabs in the order
+    /// they were used, the last first. One press goes to the tab used before
+    /// this one; more presses while Control is held go further along that
+    /// order (it stays as it was at the first press). When Control is let
+    /// go (`walk_tabs_done`) the tab reached is first in the order.
+    pub fn walk_tabs(self, by: i64) {
+        let to = {
+            let ui = self.ui.peek();
+            TAB_USE.with(|u| u.borrow_mut().entry(self.win.key).or_default().walk(&ui.tab().id, &ui.tabs, by))
+        };
+        let index = to.and_then(|id| self.ui.peek().tabs.iter().position(|t| t.id == id));
+        if let Some(i) = index {
+            self.select_tab(i);
+        }
+        self.show_walk();
+    }
+
+    /// Control was let go after Ctrl+Tab (or a new Ctrl+Tab begins): the
+    /// tab in front comes first in the order of use.
+    pub fn walk_tabs_done(self) {
+        TAB_USE.with(|u| u.borrow_mut().entry(self.win.key).or_default().walk = None);
+        self.note_tab_use();
+    }
+
+    /// Escape while Control is held after Ctrl+Tab: the tab that was in
+    /// front at the first Tab comes back, and the order is as it was.
+    pub fn walk_tabs_cancel(self) {
+        let first = TAB_USE.with(|u| u.borrow_mut().get_mut(&self.win.key).and_then(|used| used.walk.take()).and_then(|(list, _)| list.into_iter().next()));
+        let index = first.and_then(|id| self.ui.peek().tabs.iter().position(|t| t.id == id));
+        match index {
+            Some(i) => self.select_tab(i),
+            None => self.note_tab_use(),
+        }
+        self.show_walk();
+    }
+
+    /// A press on a row of that list: its tab comes forward, as the one used last.
+    pub fn walk_tabs_to(self, id: &str) {
+        TAB_USE.with(|u| u.borrow_mut().entry(self.win.key).or_default().walk = None);
+        let index = self.ui.peek().tabs.iter().position(|t| t.id == id);
+        match index {
+            Some(i) => self.select_tab(i),
+            None => self.note_tab_use(),
+        }
+        self.show_walk();
+    }
+
+    /// After each change of the tabs (`save_ui`): the tab in front was used.
+    fn note_tab_use(&self) {
+        {
+            let ui = self.ui.peek();
+            let every: Vec<&Tab> = ui.tabs.iter().chain(ui.parked.values().flat_map(|set| set.0.iter())).collect();
+            TAB_USE.with(|u| u.borrow_mut().entry(self.win.key).or_default().used(&ui.tab().id, &every));
+        }
+        self.show_walk();
+    }
+
+    /// The list of the walk (`TabWalk` in chrome.rs) shows what `TAB_USE`
+    /// holds: the walk's order and the tab reached, or nothing.
+    fn show_walk(&self) {
+        let walk = TAB_USE.with(|u| u.borrow().get(&self.win.key).and_then(|used| used.walk.clone()));
+        if *self.tab_walk.peek() == walk {
+            return;
+        }
+        let moved = walk.is_some();
+        let mut shown = self.tab_walk;
+        shown.set(walk);
+        if moved {
+            // (Beyond the rows in view, the list follows the mark.)
+            document::eval("requestAnimationFrame(() => requestAnimationFrame(() => { const el = document.querySelector('.tab-walk-row.on'); if (el) el.scrollIntoView({ block: 'nearest' }); }))");
+        }
+    }
+
+    /// A mouse's side button (Back or Forward), or a swipe of two fingers
+    /// on the trackpad: Back or Forward in the pane under the pointer
+    /// (`pane`), else in the pane in front, as ⌘[ and ⌘] do. Only pages go
+    /// back: with Settings or another sheet open nothing happens (the step
+    /// would change the page under it, out of sight).
+    pub fn step_pane(self, pane: Option<&str>, back: bool) {
+        if self.ui.peek().modal.is_some() {
+            return;
+        }
+        if let Some(pane) = pane {
+            self.focus_pane(pane);
+        }
+        if back {
+            self.back()
+        } else {
+            self.forward()
+        }
+    }
+
     /// Close a tab as the person asked (⌘W, its ×, its menu, a middle
     /// click): the message says so, and can open the tab again. A pinned tab
     /// stays (nothing happens: no sound, no shake); it closes once it is
@@ -4981,6 +5190,24 @@ impl AppState {
             ui.popover = None;
         }
         self.save_ui();
+    }
+
+    /// "Duplicate Tab": a copy of the tab right after it, in front. Each
+    /// page of the copy starts at the place it has in the tab it came from
+    /// (the page script keeps places by pane: `placeCopy` in bridge.js).
+    pub fn duplicate_tab(mut self, index: usize) {
+        let names = {
+            let mut ui = self.ui.write();
+            ui.popover = None;
+            ui.duplicate(index)
+        };
+        let Some(names) = names else { return };
+        self.save_ui();
+        for (from, to) in names {
+            let (from, to) = (serde_json::to_string(&from).unwrap_or_default(), serde_json::to_string(&to).unwrap_or_default());
+            document::eval(&format!("window.__rune && window.__rune.placeCopy && window.__rune.placeCopy({from}, {to})"));
+        }
+        self.flash_active_tab();
     }
 
     pub fn reopen_closed_tab(mut self) {
@@ -8150,6 +8377,7 @@ impl AppState {
             Bridge::Drag => dioxus::desktop::window().drag(),
             Bridge::ZoomWindow => dioxus::desktop::window().toggle_maximized(),
             Bridge::TabDrop { from, to, mode } => self.drop_tab(&from, to.as_deref(), &mode),
+            Bridge::PaneStep { pane, back } => self.step_pane(pane.as_deref(), back),
             Bridge::DrawingSave { page, id, data } => self.save_drawing(&page, &id, data),
             Bridge::ImageData { page, id, data } => self.paste_image(&page, &id, &data),
             Bridge::CellPicture { page, id, r, c, data } => self.paste_cell_picture(&page, &id, r, c, &data),
@@ -10913,6 +11141,12 @@ impl AppState {
             "forward" => self.forward(),
             "next_tab" => self.cycle_tab(1),
             "prev_tab" => self.cycle_tab(-1),
+            // Ctrl+Tab and Ctrl+Shift+Tab: the order of use (bridge.js
+            // sends "tab_walk_done" when Control is let go).
+            "tab_walk" => self.walk_tabs(1),
+            "tab_walk_back" => self.walk_tabs(-1),
+            "tab_walk_done" => self.walk_tabs_done(),
+            "tab_walk_cancel" => self.walk_tabs_cancel(),
             "favorite" => {
                 if let Some(id) = self.current_page() {
                     self.toggle_favorite(&id);
@@ -11216,6 +11450,102 @@ mod tests {
         ui.parked.insert("two".into(), (vec![pin("p")], 0));
         ui.leave_pages(&["p".to_string()]);
         assert!(!ui.parked["two"].0[0].pinned);
+    }
+
+    #[test]
+    fn duplicate_tab_copies_its_pages_layout_and_history_beside_it() {
+        // A tab of two pages, the left one with a page to go Back to, the
+        // right one folded and in focus; it is pinned.
+        let mut two = Tab::new(Route::Page("a".into()));
+        two.push(Route::Page("b".into()));
+        let right = Pane::new(Route::Page("c".into()));
+        let right_id = right.id.clone();
+        two.add_pane(right, None, Edge::Right);
+        two.folded.push(right_id.clone());
+        two.pinned = true;
+        let mut ui = ui_with(vec![two, Tab::new(Route::Page("x".into())), Tab::new(Route::Home)], "one");
+        let names = ui.duplicate(0).expect("a tab of pages is copied");
+        // The copy is not pinned: it stands after the pinned tabs, in front.
+        assert_eq!((titles(&ui.tabs), ui.active), (vec!["c".into(), "c".into(), "x".into(), "home".into()], 1));
+        let (from, copy) = (&ui.tabs[0], &ui.tabs[1]);
+        assert!(from.pinned && !copy.pinned);
+        assert_ne!(from.id, copy.id);
+        // Each pane is a copy with its own id, its history and its place in it.
+        assert_eq!(names.len(), 2);
+        for (old, new) in &names {
+            assert_ne!(old, new);
+            let (o, n) = (from.pane(old).unwrap(), copy.pane(new).unwrap());
+            assert_eq!((&o.history, o.cursor), (&n.history, n.cursor));
+        }
+        let renamed = |id: &str| names.iter().find(|(o, _)| o == id).unwrap().1.clone();
+        assert_eq!(copy.layout.panes(), from.layout.panes().iter().map(|p| renamed(p)).collect::<Vec<_>>());
+        assert!(copy.layout.fits(&copy.panes.iter().map(|p| p.id.clone()).collect::<Vec<_>>()));
+        assert_ne!(copy.layout.key(), from.layout.key(), "the row of the copy is a row of its own");
+        assert_eq!((copy.focus.clone(), copy.folded.clone()), (renamed(&right_id), vec![renamed(&right_id)]));
+        assert!(copy.ordered()[0].can_back());
+        // A tab of one page: right after it.
+        assert!(ui.duplicate(2).is_some());
+        assert_eq!((titles(&ui.tabs), ui.active), (vec!["c".into(), "c".into(), "x".into(), "x".into(), "home".into()], 3));
+        // Home (and the calendar, the graph) has one tab: no copy.
+        assert!(ui.duplicate(4).is_none() && ui.duplicate(9).is_none());
+        assert_eq!(ui.tabs.len(), 5);
+    }
+
+    #[test]
+    fn ctrl_tab_goes_in_the_order_of_use_and_holding_control_walks_further() {
+        let tabs: Vec<Tab> = ["a", "b", "c", "d"].iter().map(|p| Tab::new(Route::Page(p.to_string()))).collect();
+        let id = |name: &str| tabs[["a", "b", "c", "d"].iter().position(|n| *n == name).unwrap()].id.clone();
+        let name = |id: &Option<Id>| id.as_ref().map(|id| ["a", "b", "c", "d"][tabs.iter().position(|t| &t.id == id).unwrap()]);
+        let every: Vec<&Tab> = tabs.iter().collect();
+        let mut u = TabUse::default();
+        // Used: a, then c, then d (b never).
+        for n in ["a", "c", "d"] {
+            u.used(&id(n), &every);
+        }
+        // Ctrl+Tab: the tab used before this one. Control let go, it is
+        // first; a second Ctrl+Tab goes back again.
+        assert_eq!(name(&u.walk(&id("d"), &tabs, 1)), Some("c"));
+        u.walk = None;
+        u.used(&id("c"), &every);
+        assert_eq!(name(&u.walk(&id("c"), &tabs, 1)), Some("d"));
+        u.walk = None;
+        u.used(&id("d"), &every);
+        // Control held, Tab again and again: further back, then the tabs
+        // never used (in the order of the row), then round. The order does
+        // not change meanwhile (each step brings a tab forward: `used`).
+        let mut front = id("d");
+        let mut walked = Vec::new();
+        for _ in 0..4 {
+            let to = u.walk(&front, &tabs, 1);
+            front = to.clone().unwrap();
+            u.used(&front, &every);
+            walked.push(name(&to).unwrap());
+        }
+        assert_eq!(walked, ["c", "a", "b", "d"]);
+        // Shift goes the other way along the same order; let go at b, b is first.
+        let to = u.walk(&front, &tabs, -1);
+        assert_eq!(name(&to), Some("b"));
+        u.used(&id("b"), &every);
+        u.walk = None;
+        u.used(&id("b"), &every);
+        assert_eq!(u.order.iter().map(|i| name(&Some(i.clone())).unwrap()).collect::<Vec<_>>(), ["b", "d", "c", "a"]);
+        // Ctrl+Shift+Tab at once: the tab used longest ago.
+        assert_eq!(name(&u.walk(&id("b"), &tabs, -1)), Some("a"));
+        // A press on another tab in the middle of a walk ends it: that tab is first.
+        u.used(&id("c"), &every);
+        assert!(u.walk.is_none());
+        assert_eq!(u.order[0], id("c"));
+        // A closed tab leaves the order, and the walk passes it by.
+        let left: Vec<Tab> = tabs.iter().filter(|t| t.id != id("b")).cloned().collect();
+        u.used(&id("c"), &left.iter().collect::<Vec<_>>());
+        assert!(!u.order.contains(&id("b")));
+        assert_eq!(name(&u.walk(&id("c"), &left, 1)), Some("d"));
+        u.walk = None;
+        // Only the tabs of the row in front (the space in front) are walked;
+        // one tab alone has nowhere to go.
+        assert_eq!(name(&u.walk(&id("c"), &tabs[2..], 1)), Some("d"));
+        u.walk = None;
+        assert_eq!(u.walk(&id("c"), &tabs[2..3], 1), None);
     }
 
     #[test]

@@ -291,6 +291,35 @@ button.table-chip:hover,
 .table-bar[data-held] .table-thumb {
   filter: brightness(1.25) contrast(1.1);
 }
+/* The row of the names of a long table, at the top of the view while its
+   rows scroll under it: a copy in a rail over the table, held by the engine
+   (see `placeSticks` in bridge.js). On the page's own colour, so that the
+   rows under it do not show through; under the bar of what is picked. */
+.table-stick {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+.table-stick > .table-block {
+  position: sticky;
+  top: 0;
+  overflow: hidden;
+}
+/* (On each cell, under its own tint: a cell under a frozen one is cut with
+   it, and the strip at the left of the table stays clear, and a press there
+   goes to what is under it.) */
+.table-stick .head-check:not(.some):not(.all) {
+  pointer-events: none;
+}
+.table-stick tr.head-row:hover .head-check {
+  pointer-events: auto;
+}
+.table-stick > .table-block td.head {
+  pointer-events: auto;
+  background: linear-gradient(var(--fill-4), var(--fill-4)), linear-gradient(var(--card), var(--card)), var(--bg);
+}
 .table-side {
   position: absolute;
   top: 4px;

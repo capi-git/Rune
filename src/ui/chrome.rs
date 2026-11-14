@@ -220,7 +220,7 @@ pub fn TopRow() -> Element {
 fn TabMenu(index: usize) -> Element {
     let state = use_context::<AppState>();
     let ui = state.ui.read();
-    let (pinned, split) = ui.tabs.get(index).map(|t| (t.pinned, t.is_split())).unwrap_or_default();
+    let (pinned, split, copies) = ui.tabs.get(index).map(|t| (t.pinned, t.is_split(), t.can_duplicate())).unwrap_or_default();
     // (Tabs that "Close Other Tabs" would close: a pinned one stays.)
     let others = ui.tabs.iter().enumerate().any(|(i, t)| i != index && !t.pinned);
     drop(ui);
@@ -230,6 +230,12 @@ fn TabMenu(index: usize) -> Element {
             onclick: move |e| e.stop_propagation(),
             div { class: "menu-item compact", onclick: move |_| state.pin_tab(index, !pinned),
                 span { if pinned { "Unpin Tab" } else { "Pin Tab" } }
+            }
+            // (Not for the tab of Home, the calendar or the graph: there is one of each.)
+            if copies {
+                div { class: "menu-item compact", onclick: move |_| state.duplicate_tab(index),
+                    span { "Duplicate Tab" }
+                }
             }
             // (A pinned tab does not close: unpin it first.)
             if !pinned {
@@ -267,6 +273,64 @@ fn TabMenu(index: usize) -> Element {
                     }
                 },
                 span { "Move to New Window" }
+            }
+        }
+    }
+}
+
+/// While Control is held after Ctrl+Tab: the tabs of this window and space
+/// in the order of use, the one reached marked. It shows only when Control
+/// is still held a moment after the first Tab (bridge.js sets
+/// `body[data-tab-walk]`), so a quick Ctrl+Tab does not flash it. A press
+/// on a row brings that tab forward.
+#[component]
+pub fn TabWalk() -> Element {
+    let state = use_context::<AppState>();
+    let Some((list, at)) = state.tab_walk.read().clone() else { return rsx! {} };
+    let ui = state.ui.read();
+    let pages = state.pages.read();
+    // (id, icon, letter, name) of each tab, as its tab in the row shows it.
+    let rows: Vec<(String, Option<String>, Option<String>, String)> = list
+        .iter()
+        .filter_map(|id| ui.tabs.iter().find(|t| &t.id == id))
+        .map(|t| {
+            let ordered = t.ordered();
+            let first = ordered.first().map(|p| p.route().clone()).unwrap_or(Route::Home);
+            let (icon, _) = label(&first, &pages);
+            let name = ordered.iter().map(|p| label(p.route(), &pages).1).collect::<Vec<_>>().join(" | ");
+            (t.id.clone(), icon, pin_letter(&first, &pages), name)
+        })
+        .collect();
+    drop(pages);
+    drop(ui);
+    // The row of the tab reached, by its id: a tab that closed meanwhile has
+    // no row, and the places in the list are not those of the rows.
+    let reached = list.get(at).cloned();
+    rsx! {
+        div { class: "tab-walk", role: "listbox", "aria-label": "Tabs in the order of use",
+            for (id, icon, letter, name) in rows {
+                div {
+                    key: "{id}",
+                    class: if Some(&id) == reached.as_ref() { "tab-walk-row on" } else { "tab-walk-row" },
+                    role: "option",
+                    "aria-selected": "{Some(&id) == reached.as_ref()}",
+                    // (A press, not a click: with Control held a click is
+                    // the Mac's right click, and no click comes.)
+                    onmousedown: {
+                        let id = id.clone();
+                        move |e: MouseEvent| {
+                            e.prevent_default();
+                            state.walk_tabs_to(&id);
+                        }
+                    },
+                    oncontextmenu: move |e| e.prevent_default(),
+                    if let Some(letter) = letter {
+                        span { class: "tab-icon", span { class: "tab-letter space-badge", "{letter}" } }
+                    } else {
+                        span { class: "tab-icon", PageIcon { icon, size: 14 } }
+                    }
+                    span { class: "tab-walk-name", "{name}" }
+                }
             }
         }
     }

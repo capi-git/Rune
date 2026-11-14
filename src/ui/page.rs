@@ -615,6 +615,9 @@ pub fn PageView(page_id: String) -> Element {
     let numbers = list_numbers(&blocks);
     // The blocks picked as a whole on this page.
     let picked: Vec<Id> = state.picked.read().as_ref().filter(|p| p.page == page_id).map(|p| p.ids.clone()).unwrap_or_default();
+    // Their words, which the page script shows while they are picked (see
+    // `showSelWords` in bridge.js).
+    let picked_words: usize = blocks.iter().filter(|b| picked.contains(&b.id)).map(Block::words).sum();
     let backlinks = crate::state::linked_from(&state.pages.read(), &state.blocks.read(), &page_id);
     // Children of a toggle that was just opened ease in, one after another
     // (and so do the lines under a heading that was just opened).
@@ -835,7 +838,7 @@ pub fn PageView(page_id: String) -> Element {
             if let Some(v) = voices {
                 MeetingBand { page_id: page_id.clone(), voices: v }
             }
-            div { class: "blocks",
+            div { class: "blocks", "data-picked-words": "{picked_words}",
                 for (block, number, kids, appear, (side, side_last), fold) in rows {
                     BlockRow {
                         key: "{block.id}",

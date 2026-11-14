@@ -390,6 +390,13 @@ impl Block {
         crate::inline::plain_for(self.kind, &self.text)
     }
 
+    /// Its words, as the page's word count counts them: what is between
+    /// white space in the text as shown. (The page script counts the words
+    /// of a selection the same way: `wordsIn` in bridge.js.)
+    pub fn words(&self) -> usize {
+        self.plain_text().split_whitespace().count()
+    }
+
     pub fn page_link(target: Id) -> Block {
         let mut b = Block::new(BlockKind::PageLink, "");
         b.target = Some(target);
@@ -1266,6 +1273,15 @@ mod tests {
 
     fn kinds(blocks: &[Block]) -> Vec<(BlockKind, &str, u8)> {
         blocks.iter().map(|b| (b.kind, b.text.as_str(), b.indent)).collect()
+    }
+
+    #[test]
+    fn words_are_counted_in_the_text_as_shown() {
+        assert_eq!(Block::new(BlockKind::Text, "**Bold** and [a link](https://example.com/a b) here").words(), 5);
+        assert_eq!(Block::new(BlockKind::Text, "  spaces\tand\u{a0}no-break  ").words(), 3);
+        assert_eq!(Block::new(BlockKind::Code, "let x = **y**;").words(), 4);
+        assert_eq!(Block::new(BlockKind::Text, "").words(), 0);
+        assert_eq!(Block::new(BlockKind::Text, "日本語 です").words(), 2);
     }
 
     /// A page for the folded headings: an H1, text, an H2 with two lines,

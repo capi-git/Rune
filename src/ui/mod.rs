@@ -579,6 +579,7 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
                 Some(Modal::Settings) | None => rsx! {},
             }
             Toast {}
+            chrome::TabWalk {}
             FormatBar {}
             LineMic {}
             TextMenu {}
@@ -625,10 +626,14 @@ fn LayoutView(node: Layout, tab: Tab) -> Element {
                 matches!(route, Route::Page(_)) && tab.ordered().iter().take_while(|p| p.id != id).any(|p| *p.route() == route);
             let pid = id.clone();
             let place = route.place_key();
+            // (For a swipe of two fingers: whether it can go back or forward.)
+            let (can_back, can_forward) = (pane.can_back(), pane.can_forward());
             rsx! {
                 div {
                     class: if focused { "pane focused" } else { "pane" },
                     "data-pane": "{id}",
+                    "data-back": "{can_back}",
+                    "data-forward": "{can_forward}",
                     onmousedown: move |_| state.focus_pane(&pid),
                     chrome::PageBar { route: route.clone(), pane: id.clone(), multi }
                     if let Route::Page(page) = &route {

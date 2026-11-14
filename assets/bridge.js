@@ -867,6 +867,51 @@ const keepNav = (dir) => {
 // (Any other key, a press of the mouse: the place is forgotten.)
 document.addEventListener('mousedown', () => (navKeep = null), true);
 
+// Ctrl+Tab walks the tabs in the order of use while Control is held (see
+// `walk_tabs` in state.rs); when Control is let go, the tab reached is the
+// one used last. (A key let go with no Control, or the window put away,
+// also ends it: the release of Control itself can be missed.)
+// The list of the tabs in that order (`TabWalk` in chrome.rs) shows only when
+// Control is still held a moment after the first Tab: a quick Ctrl+Tab
+// switches with no list flashing up.
+let tabWalking = false;
+let tabWalkSoon = 0;
+const TAB_WALK_LIST_MS = 150;
+const tabWalkStart = () => {
+  tabWalking = true;
+  clearTimeout(tabWalkSoon);
+  tabWalkSoon = setTimeout(() => {
+    if (tabWalking) document.body.dataset.tabWalk = '1';
+  }, TAB_WALK_LIST_MS);
+};
+const tabWalkEnd = (name = 'tab_walk_done') => {
+  if (!tabWalking) return;
+  tabWalking = false;
+  clearTimeout(tabWalkSoon);
+  delete document.body.dataset.tabWalk;
+  send({ t: 'shortcut', name });
+};
+// (A press on a row of the list ends the walk there: see `walk_tabs_to`.)
+document.addEventListener(
+  'mousedown',
+  (e) => {
+    if (tabWalking && e.target instanceof Element && e.target.closest('.tab-walk-row')) {
+      tabWalking = false;
+      clearTimeout(tabWalkSoon);
+      delete document.body.dataset.tabWalk;
+    }
+  },
+  true,
+);
+document.addEventListener(
+  'keyup',
+  (e) => {
+    if (tabWalking && (e.key === 'Control' || (!e.ctrlKey && e.key !== 'Escape'))) tabWalkEnd();
+  },
+  true,
+);
+window.addEventListener('blur', () => tabWalkEnd());
+
 document.addEventListener(
   'keydown',
   (e) => {
@@ -901,9 +946,23 @@ document.addEventListener(
     }
 
     // App shortcuts that are not on the menu bar.
+    // Ctrl+Tab: the tab used before this one; Tab again while Control is
+    // held goes further back in the order of use, Shift the other way.
+    // (A walk left from before, whose Control was let go unseen, ends first.)
     if (e.ctrlKey && !e.metaKey && e.key === 'Tab') {
       e.preventDefault();
-      send({ t: 'shortcut', name: e.shiftKey ? 'prev_tab' : 'next_tab' });
+      if (!tabWalking) {
+        send({ t: 'shortcut', name: 'tab_walk_done' });
+        tabWalkStart();
+      }
+      send({ t: 'shortcut', name: e.shiftKey ? 'tab_walk_back' : 'tab_walk' });
+      return;
+    }
+    // Escape while walking: the list goes, and the tab of the first Tab is in front again.
+    if (tabWalking && e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      tabWalkEnd('tab_walk_cancel');
       return;
     }
     if (cmd && e.altKey && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
@@ -1742,7 +1801,9 @@ const hangsFrom = (menu) => {
   }
   const { hang, r, c } = hung.dataset;
   const b = box.getBoundingClientRect();
-  const tr = box.querySelector(`tr[data-r="${hang === 'column' ? 0 : r}"]`);
+  // (The menu of a column hangs from the row of names that stays at the top
+  // of the view, while that shows: see `placeSticks`.)
+  const tr = ((hang === 'column' && stickOf(box)) || box).querySelector(`tr[data-r="${hang === 'column' ? 0 : r}"]`);
   const el = hang === 'row' ? tr : tr && tr.querySelector(`:scope > td[data-col="${c}"]`);
   if (!el) return { left: b.left, bottom: b.top, edge: all, el: box };
   const a = el.getBoundingClientRect();
@@ -2718,6 +2779,11 @@ window.__rune.freezeColumns = (id) =>
     // (Drawn again while scrolled sideways, with other columns frozen,
     // hidden or wider: what is under the frozen cells is another part now.)
     cutTable(box);
+    // (And the row of names at the top of the view is drawn again with it.)
+    const stuck = stickOf(box);
+    if (stuck) copyHead(box, stuck);
+    const scroller = box.closest('.scroller');
+    if (scroller) placeSticks(scroller);
   });
 window.addEventListener('resize', () => {
   for (const box of document.querySelectorAll('.table-block[data-frozen]:not([data-frozen="0"])')) window.__rune.freezeColumns(box.dataset.table);
@@ -2725,6 +2791,7 @@ window.addEventListener('resize', () => {
     if (box.scrollLeft > 0) queueCut(box);
     else syncBar(box);
   }
+  for (const scroller of document.querySelectorAll('.scroller')) placeSticks(scroller);
 });
 // A table scrolled sideways. Its frozen cells and the strip of the boxes
 // that pick rows are see-through (the page shows under them, as in Notion,
@@ -2833,7 +2900,7 @@ const cutTable = (box) => {
     const cs = getComputedStyle(box);
     let edge = box.getBoundingClientRect().left + (box.clientLeft + (parseFloat(cs.paddingLeft) || 0)) * zoomOf(box) * (parseFloat(cs.zoom) || 1);
     for (const td of heads) if (td.classList.contains('frozen')) edge = Math.max(edge, td.getBoundingClientRect().right);
-    const cells = (i) => `.table-block[data-table="${id}"][data-slid] > table > * > tr:not(.group-row) > td:nth-child(${i + 1}):not(.frozen)`;
+    const cells = (i) => `.table-block:is([data-table="${id}"], [data-of="${id}"])[data-slid] > table > * > tr:not(.group-row) > td:nth-child(${i + 1}):not(.frozen)`;
     const under = [];
     heads.forEach((td, i) => {
       if (td.classList.contains('frozen')) return;
@@ -2849,6 +2916,14 @@ const cutTable = (box) => {
     if (under.length) rules += `${under.join(',\n')}{clip-path:inset(50%)}\n`;
     if (!box.hasAttribute('data-slid')) box.setAttribute('data-slid', '');
   } else if (box.hasAttribute('data-slid')) box.removeAttribute('data-slid');
+  // (The row of names that stays at the top of the view moves with the table.)
+  const stuck = stickOf(box);
+  if (stuck) {
+    if (stuck.scrollLeft !== box.scrollLeft) stuck.scrollLeft = box.scrollLeft;
+    stuck.toggleAttribute('data-slid', box.hasAttribute('data-slid'));
+    const cut = box.style.getPropertyValue('--cut');
+    if (stuck.style.getPropertyValue('--cut') !== cut) stuck.style.setProperty('--cut', cut);
+  }
   if ((tableCuts.get(id) || '') === rules) return;
   if (rules) tableCuts.set(id, rules);
   else tableCuts.delete(id);
@@ -2878,7 +2953,8 @@ document.addEventListener(
 // under the frozen column for an instant, again and again.) A swipe up or
 // down, and one at the end of the table, stay with WebKit.
 const wheelTable = (e) => {
-  const box = e.currentTarget;
+  // (Also on the copy of its row of names at the top of the view: see `placeSticks`.)
+  const box = stuckOf.get(e.currentTarget) || e.currentTarget;
   // (Once the engine has a swipe, its steps cannot be stopped: moving the
   // table here too would move it twice.)
   if (e.ctrlKey || e.defaultPrevented || !e.cancelable) return;
@@ -2904,7 +2980,7 @@ document.addEventListener(
   'mouseover',
   (e) => {
     const box = e.target.closest && e.target.closest('.table-block');
-    if (!box) return;
+    if (!box || stuckOf.has(box)) return;
     wheelOwn(box);
     // (A table put in another place is at its start again, with no word
     // of that from the engine.)
@@ -2912,6 +2988,210 @@ document.addEventListener(
   },
   true,
 );
+// The row of the names of a table taller than the page's view stays at the
+// top of the view while the rows scroll under it, and goes when the table's
+// end passes. (WebKit holds a sticky thing to the nearest box that scrolls,
+// and for the row of names that is the box that scrolls the table sideways.)
+// What stays is a copy of the row, in a rail over the table beside that box,
+// held at the top by the engine (`position: sticky`): in a fast scroll a row
+// moved by the script was behind the page in most frames, and the copy is
+// steady in all. The script shows it only while the table's own row is above
+// the top of the view (so the first row is never under it), keeps it in step
+// sideways with its cuts (`cutTable`), and hands its presses to the row of the
+// table: a press on a name opens the menu of its column (which hangs from the
+// copy, see `hangsFrom`), the box of the names picks all rows, ⌘ or ⇧ and a
+// press picks the column. It is drawn on the page's own colour, so the rows
+// under it do not show through.
+const sticks = new Map(); // the box of a table -> the rail of its copy
+const stuckOf = new WeakMap(); // a copy -> the box of its table
+const stickOf = (box) => {
+  const rail = sticks.get(box);
+  return rail && rail.isConnected ? rail.firstElementChild : null;
+};
+const headOf = (box) => {
+  const table = box.firstElementChild;
+  const head = table && table.tBodies && table.tBodies[0] && table.tBodies[0].rows[0];
+  return head && head.classList.contains('head-row') ? head : null;
+};
+const copyHead = (box, copy) => {
+  const head = headOf(box);
+  if (!head) return;
+  if (copy.className !== box.className) copy.className = box.className;
+  copy.style.cssText = box.style.cssText;
+  copy.toggleAttribute('data-slid', box.hasAttribute('data-slid'));
+  const table = document.createElement('table');
+  table.style.cssText = box.firstElementChild.style.cssText;
+  const row = head.cloneNode(true);
+  const names = head.querySelectorAll('textarea');
+  row.querySelectorAll('textarea').forEach((t, i) => {
+    t.value = names[i] ? names[i].value : '';
+    t.readOnly = true;
+  });
+  // (No second place to type in, and no second of what the app and the page
+  // script find by its marks.)
+  row.removeAttribute('data-dioxus-id');
+  for (const el of row.querySelectorAll('[data-dioxus-id], [data-r], [data-c], [data-check], [id]')) {
+    for (const name of ['data-dioxus-id', 'data-r', 'data-c', 'data-check', 'id']) el.removeAttribute(name);
+  }
+  for (const el of row.querySelectorAll('textarea, button')) el.tabIndex = -1;
+  table.appendChild(document.createElement('tbody')).appendChild(row);
+  copy.replaceChildren(table);
+  copy.scrollLeft = box.scrollLeft;
+};
+const dropStick = (box) => {
+  const rail = sticks.get(box);
+  if (!rail) return;
+  rail.remove();
+  sticks.delete(box);
+};
+// (The page's height changes with no scroll and no new drawing of a table: a
+// picture that loads above, a toggle opened by sync. The row is placed again.)
+const pageSizes = new ResizeObserver((entries) => {
+  for (const entry of entries) {
+    const scroller = entry.target.parentElement;
+    if (scroller && scroller.isConnected) placeSticks(scroller);
+  }
+});
+const sizedPage = new WeakMap(); // a scroller -> its page that is watched
+const placeSticks = (scroller) => {
+  const page = scroller.querySelector(':scope > .page');
+  if (page && sizedPage.get(scroller) !== page) {
+    if (sizedPage.get(scroller)) pageSizes.unobserve(sizedPage.get(scroller));
+    sizedPage.set(scroller, page);
+    pageSizes.observe(page);
+  }
+  for (const [box, rail] of sticks) if (!box.isConnected || rail.parentElement !== box.parentElement) dropStick(box);
+  const s = scroller.getBoundingClientRect();
+  let held = 0;
+  for (const box of [...scroller.getElementsByClassName('table-block')]) {
+    if (!box.dataset.table) continue;
+    const b = box.getBoundingClientRect();
+    const head = b.top < s.top && b.bottom > s.top && b.height > s.height ? headOf(box) : null;
+    const end = head ? head.parentElement.getBoundingClientRect().bottom : 0;
+    if (!head || end <= s.top) {
+      dropStick(box);
+      continue;
+    }
+    let rail = sticks.get(box);
+    if (!rail) {
+      rail = document.createElement('div');
+      rail.className = 'table-stick';
+      rail.setAttribute('aria-hidden', 'true');
+      const copy = rail.appendChild(document.createElement('div'));
+      copy.dataset.of = box.dataset.table;
+      stuckOf.set(copy, box);
+      copy.addEventListener('wheel', wheelTable, { passive: false });
+      copyHead(box, copy);
+      box.parentElement.appendChild(rail);
+      sticks.set(box, rail);
+    }
+    // (Over the head and the rows of the table, not its totals: the copy
+    // leaves with the last row.)
+    const z = b.height / box.offsetHeight || 1;
+    const top = `${box.offsetTop}px`;
+    const high = `${((end - b.top) / z).toFixed(1)}px`;
+    if (rail.style.top !== top) rail.style.top = top;
+    if (rail.style.height !== high) rail.style.height = high;
+    held = Math.max(held, head.getBoundingClientRect().height);
+  }
+  // (A cell that the keyboard goes to is brought into view under the copy,
+  // not behind it.)
+  const pad = held ? `${(held / (s.height / scroller.offsetHeight || 1)).toFixed(1)}px` : '';
+  if (scroller.style.scrollPaddingTop !== pad) scroller.style.scrollPaddingTop = pad;
+};
+document.addEventListener(
+  'scroll',
+  (e) => {
+    const scroller = e.target;
+    if (scroller instanceof Element && scroller.classList.contains('scroller')) placeSticks(scroller);
+  },
+  { capture: true, passive: true },
+);
+// (Before every other listener: a press on the copy is for the row it copies.)
+// A press on a name is a press on the real name: the page scrolls so that
+// the table's own row is where the copy is (at the top of the view), and the
+// real name gets the caret, or the words, that WebKit gave the copy's name
+// for that press (a second press of a double press then lands on the real
+// one). A right press does the same and opens the menu of a text box there.
+// The chevron opens the menu of its column; ⌘ or ⇧ picks the column; the box
+// picks all rows. Only a press that began on the copy is the copy's: a
+// release over it of a press made elsewhere (a drag) goes on as usual, and
+// so do the side buttons of a mouse.
+let stickPress = null; // what of the copy the button went down on
+const realHead = (copy, el) => {
+  const box = stuckOf.get(copy);
+  const td = el.closest('td[data-col]');
+  return box && td ? box.querySelector(`:scope > table > tbody > tr.head-row > td[data-col="${td.dataset.col}"]`) : null;
+};
+// The table's own row of names to where the copy is, and the copy away.
+const toHead = (copy) => {
+  const box = stuckOf.get(copy);
+  const s = box && box.closest('.scroller');
+  if (!s) return;
+  const sr = s.getBoundingClientRect();
+  s.scrollTop += (box.getBoundingClientRect().top - sr.top) / (sr.height / s.offsetHeight || 1);
+  placeSticks(s);
+};
+const toRealName = (copy, name) => {
+  const real = realHead(copy, name);
+  const into = real && real.querySelector('textarea');
+  if (!into) return null;
+  const [start, end] = [name.selectionStart, name.selectionEnd];
+  toHead(copy);
+  into.focus({ preventScroll: true });
+  into.setSelectionRange(start, end);
+  return into;
+};
+for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick', 'auxclick', 'contextmenu', 'focusin', 'focusout', 'focus', 'blur']) {
+  window.addEventListener(
+    type,
+    (e) => {
+      const t = e.target instanceof Element ? e.target : null;
+      const copy = t && t.closest('.table-stick > .table-block');
+      // (Its name has the caret for a moment in a press: no one else is told.)
+      if (type.startsWith('focus') || type === 'blur') {
+        if (copy) e.stopImmediatePropagation();
+        return;
+      }
+      if (e.button === 3 || e.button === 4) return;
+      // (A right press is always the copy's when it is on it.)
+      if (type === 'pointerdown' || (type === 'contextmenu' && copy)) stickPress = copy ? t : null;
+      const from = stickPress;
+      if (type === 'mouseup' && from && e.button === 0) {
+        const name = from.closest('textarea');
+        const of = from.closest('.table-stick > .table-block');
+        if (name && of && !e.metaKey && !e.shiftKey && !e.ctrlKey) {
+          stickPress = null;
+          toRealName(of, name);
+        }
+      }
+      if (!copy || !from) return;
+      e.stopImmediatePropagation();
+      const name = t.closest('textarea');
+      const plain = e.button === 0 && !e.metaKey && !e.shiftKey && !e.ctrlKey && name;
+      // (WebKit puts the caret in the copy's name: that place goes to the real one.)
+      if (!(type === 'mousedown' && plain) && !type.startsWith('pointer')) e.preventDefault();
+      if (type === 'contextmenu') {
+        const into = name ? toRealName(copy, name) : null;
+        // (After the scroll that brought the row there: a scroll shuts that menu.)
+        if (into) requestAnimationFrame(() => into.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: e.clientX, clientY: e.clientY })));
+        return;
+      }
+      if (type !== 'click' || e.button !== 0 || plain) return;
+      const real = realHead(copy, t);
+      if (!real) return;
+      if (t.closest('.head-check')) return real.querySelector('[data-check]')?.click();
+      if (e.metaKey || e.shiftKey) {
+        const at = real.querySelector('textarea') || real;
+        at.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0, metaKey: e.metaKey, shiftKey: e.shiftKey, clientX: e.clientX, clientY: e.clientY }));
+        return;
+      }
+      if (t.closest('.th-menu')) real.querySelector('.th-menu')?.click();
+      else toHead(copy);
+    },
+    true,
+  );
+}
 document.addEventListener(
   'keydown',
   (e) => {
@@ -4137,6 +4417,57 @@ window.addEventListener(
   true,
 );
 
+// The words of what is selected: while words of a line are selected, or lines
+// are picked as a whole, a quiet count shows ("12 words"), in the foot of the
+// page's menu when that is open, else at the foot of the pane, at its right.
+// Words as the page's own count counts them: what is between white space
+// (Rust's white space, `Block::words`); the app counts the words of picked
+// lines itself and puts them on the page's lines (`data-picked-words`).
+const WHITE = /[\t\n\v\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+/;
+const wordsIn = (text) => text.replace(/[\u200b\ufeff]/g, '').split(WHITE).filter(Boolean).length;
+const selWords = () => {
+  const lines = [...document.querySelectorAll('.blocks[data-picked-words]')].find((b) => Number(b.dataset.pickedWords) > 0 && b.querySelector(':scope > .block-row.picked'));
+  if (lines) return { n: Number(lines.dataset.pickedWords), pane: lines.closest('.pane') };
+  const sel = getSelection();
+  if (!sel || !sel.rangeCount || sel.isCollapsed) return null;
+  const line = blockOf(sel.anchorNode);
+  if (!line || line !== blockOf(sel.focusNode)) return null;
+  const n = wordsIn(sel.toString());
+  return n ? { n, pane: line.closest('.pane') } : null;
+};
+// (The foot of the page's menu shows the count by its style, whenever the menu
+// is drawn: `--sel-words` on the pane.)
+let selWordsQueued = false;
+const showSelWords = () => {
+  selWordsQueued = false;
+  const got = selWords();
+  for (const pane of document.querySelectorAll('.pane')) {
+    const here = !!got && got.pane === pane;
+    let label = pane.querySelector(':scope > .sel-words');
+    if (here && !label) {
+      label = document.createElement('div');
+      label.className = 'sel-words';
+      label.setAttribute('aria-hidden', 'true');
+      pane.appendChild(label);
+    }
+    if (here) {
+      const words = `${got.n} ${got.n === 1 ? 'word' : 'words'}`;
+      if (label.textContent !== words) label.textContent = words;
+      const foot = JSON.stringify(` · ${got.n} selected`);
+      if (pane.style.getPropertyValue('--sel-words') !== foot) pane.style.setProperty('--sel-words', foot);
+    } else if (pane.style.getPropertyValue('--sel-words')) pane.style.removeProperty('--sel-words');
+    if (label && label.classList.contains('on') !== here) label.classList.toggle('on', here);
+  }
+};
+const queueSelWords = () => {
+  if (selWordsQueued) return;
+  selWordsQueued = true;
+  requestAnimationFrame(showSelWords);
+};
+document.addEventListener('selectionchange', queueSelWords);
+// (Lines picked or let go.)
+new MutationObserver(queueSelWords).observe(document.documentElement, { subtree: true, attributes: true, attributeFilter: ['data-picked-words'] });
+
 // ----- a box drawn over the page picks the blocks it touches ----------------------
 // As in Notion: a press on the empty part of a page (its margins, the space
 // under its last line, the part of a line that is not text or a control) and
@@ -5076,6 +5407,18 @@ window.__rune.placeFresh = (pane, what) => {
       el.scrollTop = 0;
     }
   }
+};
+// A copy of a tab ("Duplicate Tab"): each new pane starts at the places of
+// the pane it is a copy of (and the hours of its calendar, as they are).
+window.__rune.placeCopy = (from, to) => {
+  for (const [key, top] of [...places]) {
+    if (!key.startsWith(from + '|')) continue;
+    const mine = to + key.slice(from.length);
+    places.set(mine, top);
+    if (hoursSet.has(key)) hoursSet.set(mine, hoursSet.get(key));
+  }
+  // (The new pane may be drawn already, at its top.)
+  for (const el of document.querySelectorAll(PLACE_BOXES)) if (el._place && el._place.startsWith(to + '|')) placePut(el);
 };
 window.__rune.placeKept = (el) => {
   const key = placeKeyOf(el);
@@ -6211,6 +6554,228 @@ window.addEventListener(
         const same = list();
         if (same && same.dataset.space === space) settle();
       }, 160);
+    },
+    { passive: true, capture: true },
+  );
+})();
+
+// ----- Back and Forward: the side buttons of a mouse, two fingers sideways ------
+// Both step in the pane under the pointer, and else in the pane in front, as
+// ⌘[ and ⌘] do (over the sidebar or the row of tabs). Only pages go back:
+// under Settings, a sheet or an open menu nothing happens (the step would
+// change the page under it, out of sight). `pane_step` in state.rs.
+const stepTarget = (target) => {
+  if (!(target instanceof Element) || target.closest('.settings-view, .modal-backdrop, .backdrop, .popover')) return false;
+  return !document.querySelector('.settings-view, .modal-backdrop');
+};
+// The side buttons are 3 (Back) and 4 (Forward) in `MouseEvent.button`, as
+// WebKit gives them. Their presses go nowhere else: not to a tab (the
+// middle button's press closes it), not to a page, a menu or a drag.
+(() => {
+  const SIDE = { 3: true, 4: false };
+  for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'auxclick', 'click', 'contextmenu']) {
+    window.addEventListener(
+      type,
+      (e) => {
+        if (!(e.button in SIDE)) return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        // (On the release. The press's own `preventDefault` keeps WebKit
+        // from sending `mousedown` and `mouseup` at all.)
+        if (type !== 'pointerup' || !stepTarget(e.target)) return;
+        const pane = e.target.closest('.pane[data-pane]');
+        send({ t: 'pane_step', pane: pane ? pane.dataset.pane : null, back: SIDE[e.button] });
+      },
+      true,
+    );
+  }
+})();
+// Two fingers moved sideways over a page: right (the page moves right) goes
+// Back, left goes Forward, as in Safari. While the move builds, the page
+// leans with the fingers and a small arrow comes in at the edge; a move that
+// stops short goes back and does nothing. One step for one move: the rest of
+// the move and the glide after it are not a new move (as for the spaces of
+// the sidebar, above). Never over the sidebar (its move changes the space),
+// over something that scrolls sideways itself (a wide table, a code block,
+// a diagram), a drawing, the calendar or the graph; never while a button is
+// held (a selection, a drag); a move mostly up or down is a scroll.
+(() => {
+  const NEED = 90; // how far the fingers go sideways, in all, for the step
+  const LEAN = 36; // how far the page leans, at most
+  let mode = ''; // '' a new move, 'wait' not clear yet, 'side', 'scroll', 'off', 'done'
+  let across = 0;
+  let down = 0;
+  let last = 0;
+  let quiet = 0;
+  let rest = 0;
+  let prevStep = 0; // the last sideways step of this move
+  let falls = 0; // how many steps in a row were smaller than the one before
+  let pane = null;
+  let sign = null;
+  let held = false;
+  window.addEventListener('pointerdown', () => (held = true), true);
+  window.addEventListener('dragstart', () => (held = true), true);
+  for (const type of ['pointerup', 'pointercancel', 'dragend', 'drop', 'blur']) window.addEventListener(type, () => (held = false), true);
+  const still = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // The sidebar: by what is under the pointer, or by where it is (the
+  // sidebar that floats lies over the page while it shows).
+  const overSidebar = (e) => {
+    if (e.target.closest('.sidebar')) return true;
+    const side = document.querySelector('.sidebar');
+    if (!side || getComputedStyle(side).visibility === 'hidden' || (side.classList.contains('floating') && document.body.dataset.peek !== '1')) return false;
+    const r = side.getBoundingClientRect();
+    return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+  };
+  // Something between the pointer and its pane that takes a sideways move.
+  const ownMove = (el, stop) => {
+    for (; el && el !== stop; el = el.parentElement) {
+      if (el.matches('.graph, .calendar, .drawing, iframe, select')) return true;
+      // (The row of names that stays at the top of a long table is the table's: see `placeSticks`.)
+      const of = stuckOf.get(el);
+      if (of && of.scrollWidth > of.clientWidth + 1) return true;
+      if (el.scrollWidth > el.clientWidth + 1 && (el.matches('input, textarea') || /auto|scroll/.test(getComputedStyle(el).overflowX))) return true;
+    }
+    return false;
+  };
+  let leaning = null; // the pane whose page leans (it is cut at its edges meanwhile)
+  const box = (p) => p && p.querySelector(':scope > .scroller');
+  const show = (part, back) => {
+    // (The arrow is at the window's edge of the pane, not in it: the pane is
+    // drawn by the app. It is in `.app` for the colours of the theme.)
+    if (!sign || !sign.isConnected) {
+      sign = document.createElement('div');
+      sign.className = 'swipe-sign';
+      sign.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m14.5 6-6 6 6 6"/></svg>';
+      (document.querySelector('.app') || document.body).appendChild(sign);
+    }
+    const r = pane.getBoundingClientRect();
+    sign.style.top = `${Math.round(r.top + r.height / 2 - 16)}px`;
+    sign.style.left = `${Math.round(back ? r.left + 14 : r.right - 14 - 32)}px`;
+    sign.classList.toggle('forward', !back);
+    sign.classList.toggle('ready', part >= 1);
+    sign.style.transition = 'none';
+    sign.style.opacity = Math.min(1, part * 1.4).toFixed(2);
+    if (still()) return;
+    sign.style.transform = `translateX(${((back ? -1 : 1) * (1 - part) * 12).toFixed(1)}px)`;
+    const el = box(pane);
+    if (el) {
+      leaning = pane;
+      pane.style.clipPath = 'inset(0)';
+      el.style.transition = 'none';
+      el.style.transform = `translateX(${((back ? 1 : -1) * part * LEAN).toFixed(1)}px)`;
+    }
+  };
+  // Back to rest: the page and the arrow (after a step, the new page comes
+  // in from where the old one leaned).
+  const settle = () => {
+    const p = leaning;
+    leaning = null;
+    const el = box(p);
+    if (el && el.style.transform) {
+      el.style.transition = 'transform 180ms cubic-bezier(0.23, 1, 0.32, 1)';
+      el.style.transform = '';
+      setTimeout(() => {
+        if (leaning === p) return;
+        el.style.transition = '';
+        p.style.clipPath = '';
+      }, 200);
+    } else if (p) p.style.clipPath = '';
+    const s = sign;
+    sign = null;
+    if (s) {
+      s.style.transition = 'opacity 150ms ease-out';
+      s.style.opacity = '0';
+      setTimeout(() => s.remove(), 160);
+    }
+  };
+  document.addEventListener(
+    'wheel',
+    (e) => {
+      // (The time the trackpad made the step, not the time the page got to it.)
+      const now = e.timeStamp || performance.now();
+      const gap = now - last;
+      last = now;
+      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? innerWidth : 1;
+      const dx = e.deltaX * unit;
+      const dy = e.deltaY * unit;
+      const step = Math.abs(dx);
+      if (gap > 250) {
+        // A pause: the next move.
+        if (mode === 'side') settle();
+        mode = '';
+      } else if (mode === 'done') {
+        // The rest of the move that stepped, and its glide. A large step
+        // after two or more small ones is the next move (the glide only
+        // gets weaker).
+        const again = step >= 8 && quiet >= 2;
+        quiet = step <= 4 ? quiet + 1 : 0;
+        if (!again) return;
+        mode = '';
+      }
+      if (mode === 'off' || mode === 'scroll') return;
+      if (mode === '') {
+        const t = e.target instanceof Element ? e.target : null;
+        pane = t && t.closest('.pane[data-pane]');
+        const ok = pane && !e.ctrlKey && !e.shiftKey && !e.metaKey && !e.altKey && !held && !e.buttons && stepTarget(t) && !overSidebar(e) && !ownMove(t, pane);
+        mode = ok ? 'wait' : 'off';
+        across = 0;
+        down = 0;
+        prevStep = 0;
+        falls = 0;
+        if (!ok) return;
+      }
+      across += dx;
+      down += dy;
+      falls = step < prevStep ? falls + 1 : 0;
+      prevStep = step;
+      if (mode === 'wait') {
+        if (Math.abs(across) + Math.abs(down) < 6) return;
+        // Mostly up or down: a scroll, to its end.
+        if (Math.abs(across) <= Math.abs(down) * 2) {
+          mode = 'scroll';
+          return;
+        }
+        mode = 'side';
+      }
+      if (!pane.isConnected) {
+        mode = 'off';
+        return;
+      }
+      // The glide after the fingers left goes on with no pause, in steps
+      // that only get smaller, and the page cannot tell it from the fingers
+      // otherwise (WebKit gives a wheel event no phase). So two smaller steps
+      // in a row end the move: what it made by then is all it makes, and a
+      // quick flick that its glide would carry far does not step (a missed
+      // swipe is better than a Back that was not meant). The rest of the
+      // glide is let go as after a step.
+      if (falls >= 2) {
+        clearTimeout(rest);
+        mode = 'done';
+        quiet = 0;
+        settle();
+        return;
+      }
+      const back = across < 0;
+      clearTimeout(rest);
+      // Nothing that way: nothing shows.
+      if (pane.dataset[back ? 'back' : 'forward'] !== 'true') {
+        settle();
+        return;
+      }
+      const part = Math.min(1, Math.abs(across) / NEED);
+      show(part, back);
+      if (part < 1) {
+        // The fingers stopped short: the page goes back.
+        rest = setTimeout(() => {
+          if (mode === 'side') mode = '';
+          settle();
+        }, 170);
+        return;
+      }
+      mode = 'done';
+      quiet = 0;
+      send({ t: 'pane_step', pane: pane.dataset.pane, back });
+      requestAnimationFrame(() => requestAnimationFrame(settle));
     },
     { passive: true, capture: true },
   );
