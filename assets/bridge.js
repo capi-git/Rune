@@ -2443,9 +2443,11 @@ document.addEventListener('dragstart', (e) => {
   }
 });
 
-// At the left or the right edge of a line, the dragged line goes beside
-// it: the two stand in columns (src/columns.rs). (Not over the handles at
-// its left: a line dragged by its handle straight up or down goes there.)
+// At the left edge of a line, or over its right third (or in the room
+// right of it), the dragged line goes beside it: the two stand in columns
+// (src/columns.rs). (Not over the handles at its left: a line dragged by
+// its handle straight up or down goes there. With the last 60 pixels at
+// the right only, a table dragged beside another went under it.)
 // Beside a line of the top level, or beside a line of a set that has room
 // for one more column (three at most). Gives the side, or null.
 const SIDE_EDGE = 60;
@@ -2459,11 +2461,21 @@ const sideOf = (e, row) => {
   const r = row.getBoundingClientRect();
   const edge = Math.min(SIDE_EDGE * zoomOf(row), r.width * 0.15);
   if (e.clientX >= r.left && e.clientX < r.left + edge) return 'left';
-  if (e.clientX > r.right - edge) return 'right';
+  if (e.clientX > r.right - Math.max(edge, r.width / 3)) return 'right';
   return null;
 };
 const dropTarget = (e) => {
-  const row = e.target && e.target.closest && e.target.closest('.block-row');
+  let row = e.target && e.target.closest && e.target.closest('.block-row');
+  // (In the room right of the lines, or between two columns: the line at
+  // that height, the nearest at its left.)
+  if (!row) {
+    const blocks = e.target && e.target.closest && (e.target.closest('.blocks') || e.target.closest('[data-pane], .card-zoom')?.querySelector('.blocks'));
+    const level = blocks ? [...blocks.querySelectorAll('.block-row[data-id]')].filter((r) => {
+      const b = r.getBoundingClientRect();
+      return e.clientY >= b.top && e.clientY < b.bottom && e.clientX >= b.right;
+    }) : [];
+    row = level.sort((a, b) => b.getBoundingClientRect().right - a.getBoundingClientRect().right)[0] || null;
+  }
   if (!row || row.dataset.id === dragId) return null;
   const rect = row.getBoundingClientRect();
   return { row, after: e.clientY >= rect.top + rect.height / 2, side: sideOf(e, row) };

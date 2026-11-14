@@ -24,6 +24,7 @@ use crate::table::{Color, Kind, Table};
 #[serde(rename_all = "lowercase")]
 pub enum Shape {
     #[default]
+    #[serde(alias = "bar")]
     Bars,
     Line,
     Ring,
@@ -187,6 +188,17 @@ impl Chart {
     pub fn from_markdown(text: &str) -> Option<Chart> {
         let value: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
         value.is_object().then(|| serde_json::from_value(value).ok()).flatten()
+    }
+
+    /// Why the text of a chart block is no chart, as one sentence for the
+    /// AI tool that wrote it (see `markdown::notes`).
+    pub fn why_not(text: &str) -> String {
+        let why = match serde_json::from_str::<serde_json::Value>(text.trim()) {
+            Err(e) => format!("it is not JSON ({e})"),
+            Ok(v) if !v.is_object() => "it is not one JSON object".to_string(),
+            Ok(v) => serde_json::from_value::<Chart>(v).err().map_or_else(|| "it says nothing a chart knows".to_string(), |e| e.to_string()),
+        };
+        format!("A chart block could not be read, so it shows as code: {why}. A chart is one JSON object, as {{\"shape\": \"bars\", \"x\": \"Date\", \"by\": \"week\", \"y\": \"km\", \"add\": \"sum\"}}; shape is bars, line, pie, ring or days, by is row, day, week or month, add is sum, average, highest, lowest or count.")
     }
 
     pub fn to_data(&self) -> String {

@@ -236,7 +236,12 @@ pub fn replace_selection(page: &mut Vec<Block>, block_id: &str, start: usize, en
         out.push(Block { text: before.trim_end().to_string(), ..block.clone() });
     } else {
         // Nothing before it: the first new block takes the old one's place.
-        new[0].id = block.id.clone();
+        // In the line's kind, or as plain words, it is that line with new
+        // words (its day, reminder and colour stay: the AI heard words
+        // only); in another kind, that kind with the line's colour.
+        let first = new.remove(0);
+        let first = if first.kind == BlockKind::Text || first.kind == block.kind { Block { text: first.text, ..block.clone() } } else { crate::model::carry(&block, first) };
+        new.insert(0, first);
     }
     let last = new.last().map(|b| b.id.clone());
     out.extend(new);
@@ -480,6 +485,16 @@ mod tests {
         replace_selection(&mut page, &id, 0, 7, markdown::to_blocks("- one\n- two"));
         assert_eq!(kinds(&page), vec![(BlockKind::Bulleted, "one".to_string()), (BlockKind::Bulleted, "two".to_string())]);
         assert_eq!(page[0].id, id);
+        // A to-do with a day, in a colour, spoken into two: the first is
+        // that to-do still, with its day, reminder and colour.
+        let mut todo = Block::new(BlockKind::Todo, "Call Sam and Kim");
+        todo.due = chrono::NaiveDate::from_ymd_opt(2026, 11, 20);
+        todo.remind = chrono::NaiveTime::from_hms_opt(9, 0, 0);
+        todo.tint = "red".into();
+        let mut two = vec![todo.clone()];
+        replace_selection(&mut two, &todo.id, 0, 16, markdown::to_blocks("- [ ] Call Sam\n- [ ] Call Kim"));
+        assert_eq!(two[0], Block { text: "Call Sam".into(), ..todo.clone() });
+        assert_eq!((two[1].kind, two[1].text.as_str(), two[1].due), (BlockKind::Todo, "Call Kim", None));
         // An empty reply changes nothing.
         assert_eq!(replace_selection(&mut page, &id, 0, 3, Vec::new()), None);
         assert_eq!(page.len(), 2);

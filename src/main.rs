@@ -11,6 +11,8 @@
 //! notes folder leaves a link "Notion 2.0" where it was (store.rs).)
 
 mod ai;
+#[cfg(test)]
+mod ai_keep_tests;
 mod attach;
 mod aven;
 mod backup;

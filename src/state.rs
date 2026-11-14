@@ -869,6 +869,10 @@ pub struct AiSession {
     /// The page as it was given to the AI: a reply that is the whole page
     /// again is put in its place only while the page is still that.
     pub sent: String,
+    /// The lines of the page as they were when it was sent (the whole page
+    /// only): what the person changed on it while the AI wrote is kept
+    /// when its reply takes the page's place (see `merged_page`).
+    pub sent_blocks: Vec<Block>,
     /// What the person gave with the request besides pictures: files, pages
     /// of the notes, the words of a web page (see attach.rs).
     pub given: Vec<crate::attach::Attached>,
@@ -899,14 +903,14 @@ fn page_as_given(pages: &HashMap<Id, Page>, page_id: &str, blocks: &[Block]) -> 
 
 /// The same, with what the tables of the page take from the pages of their
 /// rows, and what those pages start with (see `tables::roll_up`).
-fn page_as_given_with(pages: &HashMap<Id, Page>, all: &HashMap<Id, Vec<Block>>, page_id: &str, blocks: &[Block]) -> String {
+pub(crate) fn page_as_given_with(pages: &HashMap<Id, Page>, all: &HashMap<Id, Vec<Block>>, page_id: &str, blocks: &[Block]) -> String {
     let title = pages.get(page_id).map(|p| p.title.trim().to_string()).unwrap_or_default();
     let body = crate::mcp::render_body_with(pages, Some(all), blocks);
     if title.is_empty() { body } else { format!("# {title}\n\n{body}") }
 }
 
 /// The picked part of a page as the AI is given it (see `part_for_ai`).
-fn part_as_given(pages: &HashMap<Id, Page>, blocks: &[Block], part: &[Id]) -> String {
+pub(crate) fn part_as_given(pages: &HashMap<Id, Page>, blocks: &[Block], part: &[Id]) -> String {
     let mut blocks: Vec<Block> = blocks.iter().filter(|b| part.contains(&b.id)).cloned().collect();
     // (From the edge: the step in that the whole part has is put back
     // when a reply takes its place, see `ai_revise`.)
@@ -915,6 +919,141 @@ fn part_as_given(pages: &HashMap<Id, Page>, blocks: &[Block], part: &[Id]) -> St
         b.indent -= least;
     }
     crate::mcp::render_body(pages, &blocks)
+}
+
+/// The AI's page (`new`, read from its Markdown) put in place of the page
+/// `old` (see `ai_revise`): the lines that did not change stay the blocks
+/// they were, and pictures and drawings are never lost.
+/// The AI's page (`new`) put in place of the page as it was sent with the
+/// request (`sent`), with what the person changed on it since (`now`, the
+/// page as it is) kept: a line they changed, took away or added while the
+/// AI wrote stays so, where the AI left that line as it was. `None` when
+/// the person and the AI both changed one line (or one took away a line
+/// the other changed): the reply is then refused, as before. (Any change
+/// at all made Rune refuse the reply, a click in a table's cell too, and
+/// the person had to ask again and wait again.)
+pub(crate) fn merged_page(sent: &[Block], now: &[Block], new: Vec<Block>) -> Option<Vec<Block>> {
+    // (The same line: the same block, or one that reads the same as Markdown.)
+    let reads_same = |a: &Block, b: &Block| a == b || (a.kind == b.kind && markdown::render("", std::slice::from_ref(a), |_| None) == markdown::render("", std::slice::from_ref(b), |_| None));
+    let mut out = revised_page(sent, new);
+    for was in sent {
+        let in_ai = out.iter().position(|o| o.id == was.id);
+        match now.iter().find(|n| n.id == was.id) {
+            Some(n) if n == was => {}
+            // Changed by the person.
+            Some(n) => match in_ai {
+                Some(i) if reads_same(&out[i], was) || reads_same(&out[i], n) => out[i] = n.clone(),
+                _ => return None,
+            },
+            // Taken away by the person.
+            None => match in_ai {
+                Some(i) if reads_same(&out[i], was) => {
+                    out.remove(i);
+                }
+                Some(_) => return None,
+                None => {}
+            },
+        }
+    }
+    // Added by the person: after the line before it that is still there.
+    for (k, added) in now.iter().enumerate().filter(|(_, b)| !sent.iter().any(|s| s.id == b.id)) {
+        let at = now[..k].iter().rev().find_map(|p| out.iter().position(|o| o.id == p.id)).map_or(0, |i| i + 1);
+        out.insert(at, added.clone());
+    }
+    crate::columns::tidy(&mut out);
+    Some(out)
+}
+
+pub(crate) fn revised_page(old: &[Block], new: Vec<Block>) -> Vec<Block> {
+    let mut merged = keep_unchanged(old, crate::mcp::keep_media(old, new.clone()));
+    // (What the Markdown says that a kept line takes all the same: a
+    // chart's JSON, the columns lines stand in.)
+    crate::mcp::as_said(old, &new, &mut merged);
+    merged
+}
+
+/// The AI's part (`new`) put in place of the picked part of a page: from
+/// its first block to its last; the rest of the page is not touched. None
+/// when the part is no longer one run of blocks; else where the caret goes.
+pub(crate) fn revise_part(bs: &mut Vec<Block>, part: &[Id], new: Vec<Block>) -> Option<Caret> {
+    let at: Vec<usize> = bs.iter().enumerate().filter(|(_, b)| part.contains(&b.id)).map(|(i, _)| i).collect();
+    let (first, last) = (*at.first()?, *at.last()?);
+    if last - first + 1 != at.len() {
+        return None;
+    }
+    let mut old: Vec<Block> = bs[first..=last].to_vec();
+    let least = old.iter().map(|b| b.indent).min().unwrap_or(0);
+    // The part went to the AI from the edge (see `part_for_ai`): the
+    // blocks are matched from the edge too, and then all get the
+    // step of the part again. (Added only to list items, a toggle
+    // inside a toggle came back at the edge and left its parent.)
+    for b in old.iter_mut() {
+        b.indent -= least;
+    }
+    let mut merged = keep_unchanged(&old, crate::mcp::keep_media(&old, new.clone()));
+    crate::mcp::as_said(&old, &new, &mut merged);
+    for b in merged.iter_mut() {
+        b.indent = b.indent.saturating_add(least).min(MAX_INDENT);
+    }
+    let caret = merged.iter().rev().find(|b| b.kind.is_editable()).map(|b| Caret::end(&b.id));
+    bs.splice(first..=last, merged);
+    caret
+}
+
+/// The AI's reply (`reply`, Markdown) put in the page: in place of the line
+/// `anchor` (`replace`: a rewrite of its words, see `AiAction::rewrites_block`),
+/// or under it and what is nested in it. Returns the id of its last line.
+pub(crate) fn accept_reply(bs: &mut Vec<Block>, anchor: &str, replace: bool, reply: &str) -> Option<Id> {
+    // (A code line rewritten comes back in its own fence, see below.)
+    let code = replace && index_of(bs, anchor).is_some_and(|i| bs[i].kind == BlockKind::Code);
+    let new_blocks = markdown::to_blocks(if code { reply } else { markdown::unfenced(reply) });
+    new_blocks.last()?;
+    let (insert_at, items) = match index_of(bs, anchor) {
+        Some(i) => {
+            let (base_indent, col) = (bs[i].indent, bs[i].place.col);
+            let replace_anchor = replace || (bs[i].kind == BlockKind::Text && bs[i].text.trim().is_empty());
+            let insert_at = if replace_anchor { i } else { subtree_end(bs, i) };
+            let was = replace_anchor.then(|| bs.remove(i));
+            let mut shifted: Vec<Block> = new_blocks
+                .into_iter()
+                .map(|b| {
+                    let ind = b.indent;
+                    let mut b = b.with_indent(base_indent + ind);
+                    // (In a column, all of it goes in that column; else
+                    // what the reply puts side by side stands so.)
+                    if col > 0 {
+                        b.place.col = col;
+                    }
+                    b
+                })
+                .collect();
+            // The AI was given the words of the line, and no more: its reply
+            // is those words written again, and the line stays the line it
+            // was with them (its kind, colour, tick, day and reminder, a
+            // toggle's lines under it, a callout's icon, a code's language).
+            // (Put in as new lines, a to-do lost its day, a toggle its
+            // lines, a callout became words.) A reply in another kind of
+            // line (a list, a heading) is that kind, with the line's colour.
+            if let Some(was) = was.filter(|_| replace) {
+                if was.kind == BlockKind::Code {
+                    let fenced = shifted.iter().find(|b| b.kind == BlockKind::Code).map(|b| b.text.clone());
+                    shifted = vec![Block { text: fenced.unwrap_or_else(|| reply.trim_matches('\n').to_string()), ..was }];
+                } else if shifted[0].kind == BlockKind::Text || shifted[0].kind == was.kind {
+                    shifted[0] = Block { text: shifted[0].text.clone(), ..was };
+                } else {
+                    let first = shifted.remove(0);
+                    shifted.insert(0, carry(&was, first));
+                }
+            }
+            (insert_at, shifted)
+        }
+        None => (bs.len(), new_blocks),
+    };
+    let last = items.last().map(|b| b.id.clone());
+    for (offset, b) in items.into_iter().enumerate() {
+        bs.insert(insert_at + offset, b);
+    }
+    last
 }
 
 // ---------------------------------------------------------------------------
@@ -1166,7 +1305,9 @@ pub const SIDEBAR_MAX: f64 = 320.0;
 
 // Typed tables and charts (state/tables.rs).
 mod tables;
-pub use tables::{roll_up, rolled, rollup_sources, row_template, said_for_blocks, stale_row_titles, template_page_id, written_row_pages, ChartSource, Open};
+pub use tables::{new_row_lines, roll_up, rolled, rollup_sources, row_page_id, row_template, said_for_blocks, stale_row_titles, template_page_id, written_row_pages, ChartSource, Open};
+#[cfg(test)]
+pub(crate) use tables::lost_rows;
 
 mod erased {
     pub trait Json {
@@ -10251,6 +10392,7 @@ impl AppState {
             heard: 0,
             pictures: Vec::new(),
             sent: String::new(),
+            sent_blocks: Vec::new(),
             given: Vec::new(),
             part: Vec::new(),
             offer: None,
@@ -10613,8 +10755,10 @@ impl AppState {
             _ => self.page_markdown(&session.page_id),
         };
         let sent = if whole { self.page_for_ai(&session.page_id) } else { page_text.clone() };
+        let sent_blocks = if whole { self.blocks.peek().get(&session.page_id).cloned().unwrap_or_default() } else { Vec::new() };
         if let Some(s) = self.ai.write().as_mut() {
             s.sent = sent;
+            s.sent_blocks = sent_blocks;
             s.offer = None;
             s.cut = !session.action.rewrites_block() && ai::is_cut(&page_text);
             s.line_sent = block_text.clone();
@@ -10923,7 +11067,7 @@ impl AppState {
         let Some(session) = self.ai.peek().clone() else { return };
         let Some(body) = ai::split_revision(&ai::clean_reply(&session.output).0) else { return };
         // The page itself, and the sub-pages the reply asks for.
-        let (body, wanted) = ai::split_pages(&body);
+        let (body, wanted) = ai::split_pages(markdown::unfenced(&body));
         let title = self.pages.peek().get(&session.page_id).map(|p| p.title.clone()).unwrap_or_default();
         let empty = |blocks: &[Block]| blocks.iter().all(|b| b.text.trim().is_empty() && b.kind.is_editable());
         // (A part has no line with the page's name before it: a heading of
@@ -10970,8 +11114,25 @@ impl AppState {
             crate::mcp::before_run(did, &session.page_id, &mut pages, now)
                 .map(|was| if whole { page_as_given_with(&pages, &all, &session.page_id, &was) } else { part_as_given(&pages, &was, &session.part) })
         };
-        if apart || (!session.sent.is_empty() && given_less_tools.as_deref() != Some(session.sent.as_str())) {
-            return self.toast("The page was changed after you asked, so the AI's page was not put in its place. Ask again to get it with your changes.");
+        // (Another program wrote the page in the last moments, before this
+        // window took that in: the page on disk is the page now. Compared
+        // with this window's older copy only, its change went when the
+        // reply took the page's place.)
+        let written_meanwhile = sync::outside_change_pending()
+            && store::with(|s| s.load_page_blocks(&session.page_id)).is_some_and(|disk| !disk.is_empty() && self.blocks.peek().get(&session.page_id) != Some(&disk));
+        let changed = !session.sent.is_empty() && given_less_tools.as_deref() != Some(session.sent.as_str());
+        // (Changed by the person only, on the whole page: their change is
+        // kept with the AI's, see `merged_page`. With a change of the AI's
+        // own tools in it, or a part, it is refused as before.)
+        let merge = changed && whole && did.is_empty() && !written_meanwhile && !session.sent_blocks.is_empty();
+        const CHANGED: &str = "The page was changed after you asked, so the AI's page was not put in its place. Ask again to get it with your changes.";
+        if apart || written_meanwhile || (changed && !merge) {
+            return self.toast(CHANGED);
+        }
+        const BOTH: &str = "You changed a line that the AI changed too while it wrote, so the AI's page was not put in its place. Ask again to get it with your change.";
+        let now_blocks = self.blocks.peek().get(&session.page_id).cloned().unwrap_or_default();
+        if merge && merged_page(&session.sent_blocks, &now_blocks, crate::mcp::parse_body(&self.pages.peek(), &crate::mcp::strip_title_heading(&body, &title))).is_none() {
+            return self.toast(BOTH);
         }
         // The sub-pages first, so that the page can link to them.
         let mut made: Vec<(String, Id)> = Vec::new();
@@ -10982,7 +11143,9 @@ impl AppState {
                 p.title = name.clone();
             }
             self.save_page(&id);
-            let blocks = crate::mcp::parse_body(&self.pages.peek(), &crate::mcp::strip_title_heading(&text, &name));
+            let mut blocks = crate::mcp::parse_body(&self.pages.peek(), &crate::mcp::strip_title_heading(&text, &name));
+            // (A relation column names its table by its name.)
+            crate::mcp::link_relations(&self.pages.peek(), &self.blocks.peek(), &id, &mut blocks);
             self.blocks.write().insert(id.clone(), if empty(&blocks) { vec![Block::text("")] } else { blocks });
             self.save_blocks(&id);
             written.push((id.clone(), text));
@@ -10998,34 +11161,36 @@ impl AppState {
         }
         let new = crate::mcp::parse_body(&self.pages.peek(), &crate::mcp::strip_title_heading(&body, &title));
         let part = session.part.clone();
+        // (A relation column names its table by its name: the tables there
+        // are, for `link_relations` in the step below.)
+        let known = body.contains("relation").then(|| (self.pages.peek().clone(), self.blocks.peek().clone()));
+        let page_id = session.page_id.clone();
+        let link = move |bs: &mut Vec<Block>| {
+            if let Some((pages, all)) = &known {
+                crate::mcp::link_relations(pages, all, &page_id, bs);
+            }
+        };
+        // (With what the person changed meanwhile: see above. The links
+        // to the sub-pages are lines of the AI's, and change nothing there.)
+        let merged = if merge { merged_page(&session.sent_blocks, &now_blocks, new.clone()) } else { None };
+        if merge && merged.is_none() {
+            for (_, id) in &made {
+                self.set_trashed(id, true);
+            }
+            return self.toast(BOTH);
+        }
         let caret = self.edit_blocks(&session.page_id, |bs| {
             if part.is_empty() {
-                let merged = keep_unchanged(bs, crate::mcp::keep_media(bs, new));
-                *bs = merged;
+                *bs = match merged {
+                    Some(merged) => merged,
+                    None => revised_page(bs, new),
+                };
+                link(bs);
                 return bs.iter().rev().find(|b| b.kind.is_editable()).map(|b| Caret::end(&b.id));
             }
-            // The picked part only: from its first block to its last, the
-            // reply takes its place. The rest of the page is not touched.
-            let at: Vec<usize> = bs.iter().enumerate().filter(|(_, b)| part.contains(&b.id)).map(|(i, _)| i).collect();
-            let (first, last) = (*at.first()?, *at.last()?);
-            if last - first + 1 != at.len() {
-                return None;
-            }
-            let mut old: Vec<Block> = bs[first..=last].to_vec();
-            let least = old.iter().map(|b| b.indent).min().unwrap_or(0);
-            // The part went to the AI from the edge (see `part_for_ai`): the
-            // blocks are matched from the edge too, and then all get the
-            // step of the part again. (Added only to list items, a toggle
-            // inside a toggle came back at the edge and left its parent.)
-            for b in old.iter_mut() {
-                b.indent -= least;
-            }
-            let mut merged = keep_unchanged(&old, crate::mcp::keep_media(&old, new));
-            for b in merged.iter_mut() {
-                b.indent = b.indent.saturating_add(least).min(MAX_INDENT);
-            }
-            let caret = merged.iter().rev().find(|b| b.kind.is_editable()).map(|b| Caret::end(&b.id));
-            bs.splice(first..=last, merged);
+            // The picked part only: the rest of the page is not touched.
+            let caret = revise_part(bs, &part, new);
+            link(bs);
             caret
         });
         if !part.is_empty() {
@@ -11043,7 +11208,7 @@ impl AppState {
         // One step: Undo takes back the change and the sub-pages together.
         self.history.write().attach(&session.page_id, &[], &made);
         if made.is_empty() {
-            self.toast("The page was changed. Undo brings it back.");
+            self.toast(if merge { "The page was changed, and what you wrote meanwhile is kept. Undo brings it back." } else { "The page was changed. Undo brings it back." });
             self.ai_note_done(&session);
         } else {
             // Its sub-pages show under it in the sidebar; the foot of the
@@ -11104,29 +11269,14 @@ impl AppState {
         if typed_since {
             self.toast("The line was changed after you asked, so the AI's text was put under it.");
         }
-        let last_id = new_blocks.last().map(|b| b.id.clone());
-        self.edit_blocks(&session.page_id, |bs| {
-            let at = match index_of(bs, &session.anchor) {
-                Some(i) => {
-                    let (base_indent, col) = (bs[i].indent, bs[i].place.col);
-                    let replace_anchor = replace
-                        || (bs[i].kind == BlockKind::Text && bs[i].text.trim().is_empty());
-                    let insert_at = if replace_anchor {
-                        bs.remove(i);
-                        i
-                    } else {
-                        subtree_end(bs, i)
-                    };
-                    let shifted: Vec<Block> =
-                        new_blocks.into_iter().map(|b| { let ind = b.indent; let mut b = b.with_indent(base_indent + ind); b.place.col = col; b }).collect();
-                    (insert_at, shifted)
-                }
-                None => (bs.len(), new_blocks),
-            };
-            let (insert_at, items) = at;
-            for (offset, b) in items.into_iter().enumerate() {
-                bs.insert(insert_at + offset, b);
+        // (A relation column names its table by its name.)
+        let known = text.contains("relation").then(|| (self.pages.peek().clone(), self.blocks.peek().clone()));
+        let last_id = self.edit_blocks(&session.page_id, |bs| {
+            let last = accept_reply(bs, &session.anchor, replace, &text);
+            if let Some((pages, all)) = &known {
+                crate::mcp::link_relations(pages, all, &session.page_id, bs);
             }
+            last
         });
         // (A new table whose Markdown said what each row's page starts with.)
         self.make_row_templates(&session.page_id, &text);

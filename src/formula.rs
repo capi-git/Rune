@@ -115,6 +115,17 @@ const FUNCTIONS: [(&str, Func, usize, usize); 12] = [
 ];
 const MANY: usize = usize::MAX;
 
+/// The names of the functions, for words that say what a formula can use.
+pub const FUNCTION_NAMES: [&str; FUNCTIONS.len()] = {
+    let mut names = [""; FUNCTIONS.len()];
+    let mut i = 0;
+    while i < FUNCTIONS.len() {
+        names[i] = FUNCTIONS[i].0;
+        i += 1;
+    }
+    names
+};
+
 impl Formula {
     /// Read a formula. `Err` holds one short sentence in plain words for the
     /// person, for example "A ) is missing.".

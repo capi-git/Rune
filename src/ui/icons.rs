@@ -451,6 +451,12 @@ fn is_color(color: &str) -> bool {
 /// Split a stored icon into (name, colour). Accepts `"name"`, `"name:color"`
 /// and legacy emoji; anything unrecognised becomes the plain page icon.
 pub fn parse_icon(stored: &str) -> (String, String) {
+    known_icon(stored).unwrap_or_else(|| ("file".to_string(), DEFAULT_COLOR.to_string()))
+}
+
+/// The icon and colour a stored icon names, as `parse_icon` reads it;
+/// `None` when it is no icon the app has (it then shows as the plain page).
+pub fn known_icon(stored: &str) -> Option<(String, String)> {
     let cleaned: String = stored
         .trim()
         .chars()
@@ -466,12 +472,9 @@ pub fn parse_icon(stored: &str) -> (String, String) {
         } else {
             DEFAULT_COLOR
         };
-        return (name.to_string(), color.to_string());
+        return Some((name.to_string(), color.to_string()));
     }
-    if let Some((_, n, c)) = LEGACY_EMOJI.iter().find(|(e, _, _)| *e == cleaned) {
-        return (n.to_string(), c.to_string());
-    }
-    ("file".to_string(), DEFAULT_COLOR.to_string())
+    LEGACY_EMOJI.iter().find(|(e, _, _)| *e == cleaned).map(|(_, n, c)| (n.to_string(), c.to_string()))
 }
 
 /// Store an icon choice as `"name:color"`.

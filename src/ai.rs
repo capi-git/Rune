@@ -282,6 +282,10 @@ pub fn start_with(prefs: Prefs, messages: Vec<ChatMessage>, tools: Option<Tools>
         // A test can say what the stand-in AI answers: "[[reply: text]]" in
         // what it sends (with \n for a new line) is answered with that text.
         let asked = messages.iter().rev().find(|m| m.role == "user").map(|m| m.content.as_str()).unwrap_or("");
+        // (In the words of a line, as a rewrite of one line sends them, its
+        // brackets are written with a \ before them.)
+        let unescaped = asked.replace("\\[", "[").replace("\\]", "]");
+        let asked = if asked.contains("[[reply:") { asked } else { unescaped.as_str() };
         let asked = asked.split("\n\nHow to reply.").next().unwrap_or(asked);
         // The request itself, where it has such a mark: not a page given
         // with it that holds a mark from an earlier test.
@@ -788,7 +792,9 @@ pub const REVISE_MARK: &str = "@replace";
 /// If a reply is the page as it must be after a change: the page (the text
 /// after the mark). `None` for an answer or new content.
 pub fn split_revision(reply: &str) -> Option<String> {
-    let rest = reply.trim_start();
+    // (A mark of the order of bytes that some programs put first is no word.)
+    // (Nor a fence of Markdown around all of it: see `markdown::unfenced`.)
+    let rest = crate::markdown::unfenced(reply.trim_start_matches('\u{FEFF}')).trim_start();
     let (first, body) = rest.split_once('\n').unwrap_or((rest, ""));
     (first.trim().trim_matches('`') == REVISE_MARK).then(|| body.trim_start_matches(['\r', '\n']).to_string())
 }

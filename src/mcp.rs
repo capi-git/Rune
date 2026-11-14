@@ -25,7 +25,9 @@ Pages nest inside other pages and each has an id. Find ids with search_pages or 
 The workspace has spaces (as Work, Personal): each top-level page is in one space, and a sub-page is in the space of its parent. list_pages names the spaces and says which one is open in Rune. \
 When the person names a space for a new page (\"in my Personal space\"), pass that name as `space` to create_page; without `space`, a new top-level page goes to the space that is open in Rune, which may not be the one they mean. To put a page in another space, use update_page with `space`. You cannot make a space: if the one they name does not exist, ask them. \
 Page content is Markdown: # / ## / ### headings, paragraphs, - bullets, 1. numbered items, - [ ] / - [x] to-dos, > quotes, \
+> [!lightbulb:yellow] callouts (a box with an icon, NAME:COLOUR as for a page's icon), - ▸ toggles (the lines indented under one fold away), \
 ``` code fences and --- dividers; indent list items by two spaces to nest them. \
+Lines can stand side by side in two or three columns (a week planner, two lists): a line <!-- column --> before each column and <!-- end columns --> after the last, each on its own line; more than three columns go in a next set. \
 A line that is exactly [Title](rune://page/<id>) is a link to another page; sub-pages appear in their parent this way. \
 A to-do can end with the day it is due, as 📅 2026-11-12 (the sign, then the date): it then shows in that day of the calendar. Keep that ending when you rewrite a to-do; leave it out to take the day away. \
 After the day it can have a reminder, as 📅 2026-11-12 ⏰ 09:00 (a time of that day, 24 hours): Rune sends a notification then. \
@@ -33,13 +35,14 @@ When the person asks to be reminded of something, make it a to-do with its day a
 A picture or a drawing shows in read_page as a line [Image](rune://block/<id>) or [Drawing](rune://block/<id>): keep that line as it is to keep the picture or drawing in its place when you replace a page (one that you leave out is kept at the end of the page, never lost). \
 Tables are Markdown pipe tables. A table's columns can have kinds, given on a comment line right under it, one part for each column: \
 <!-- columns: text count | date | choice | number km sum | number USD sum | time sum | pace average | checkbox checked | formula USD sum = Price * Qty --> \
-(kinds: text, number, date, time, pace, checkbox, choice (one tag from a list), multi (several tags, with commas between them), status (one of Not started, In progress, Done, or its own list; a choice, multi or status column can list its options and their colours in braces, as choice {Long:green; Short:red}, colours: gray, brown, orange, yellow, green, blue, purple, pink, red), link, email, phone, file (pictures), formula, relation (rows of another table, by their names), \
+(kinds: text, number, date, time, pace, checkbox, choice (one tag from a list), multi (several tags, with commas between them), status (one of Not started, In progress, Done, or its own list; a choice, multi or status column can list its options and their colours in braces, as choice {Long:green; Short:red}, colours: gray, brown, orange, yellow, green, blue, purple, pink, red), link, email, phone, file (pictures), formula, relation and the name of a table (rows of that table, by their names, as relation Companies; make that table first), \
 rollup (worked out from the page of each row: the sum, count, average, highest or lowest of a column of the first table on that page, by its heading, as rollup Amount sum; a heading of more than one word in square brackets, as rollup [Amount paid] sum); \
 then for a number, a formula or a rollup an optional format (a kind of money by its code, as USD or EUR, or percent, or grouped), an optional unit, \
 and an optional total shown at the foot: count, sum, average, median, highest, lowest, range, unique, empty, checked; \
 a number column can also show a bar or a ring that is full at a goal: number percent ring goal 100, number km bar goal 20; \
 a number or formula column marked signed shows amounts above zero green and below it red (a gain and a loss): number USD sum signed; \
-a formula column ends with = and what it works out from the other columns of its row, by their headings). \
+a formula column ends with = and what it works out from the other columns of its row, by their headings, with + - * / %, = != < > <= >=, and, or, not, \
+if, round, floor, ceil, abs, empty, length, min, max, sum, average and concat, as = if(Status = \"Done\", 1, 0); it knows no dates). \
 A cell of a money column is written with its sign ($2,000.00); a plain number there is fine too. \
 A pace column is worked out from the first number and the first time column of its row, a formula column from its formula, and a rollup from the pages of the rows: what is in their cells is not kept. \
 A table can have a name, on a second comment line under it, and after the name, each between bars, what else it has: \
@@ -51,10 +54,10 @@ filter COLUMN TEST: only rows that pass show; color COLUMN TEST COLOUR: rows tha
 and last on the line, page: and the columns of the table that the page of each row starts with, each its heading and then its kind in the words of the columns line, between bars: page: Item | Amount number USD sum | Category choice {Food; Fun}. \
 page: makes that table the template of a table that has none (a new table); it never changes a template that is there. \
 To change what the pages of new rows start with, change the template's page itself: read_page names it (row_page_template:), and you read and change it as any page. \
-A TEST is is, is not, has, has not, above, below, at least or at most, then words or a number, or is empty, is filled, is ticked, is not ticked. Columns go by their headings.) \
-Keep both comment lines when you rewrite a table. What Markdown cannot say of a table (the pages of its rows, their nesting, the template of a new row) stays when you rewrite it, \
-and so does the view when the table line says nothing of it: \
-it is found again by the headings of the columns and by the names of the rows (the first cell of each row), so keep those the same where you can. \
+A TEST is is, is not, has, has not, above, below, at least or at most, then words or a number, or is empty, is filled, is ticked, is not ticked; \
+for a date, above and below are after and before, and today is a day: color Due below today red. Columns go by their headings.) \
+Keep both comment lines when you rewrite a table. What Markdown cannot say of a table (the pages of its rows, their nesting, its template), and its view when the table line says none, \
+stay when you rewrite it: they are found again by its headings and the names of its rows (their first cells), so keep those the same where you can. \
 When the person asks for a tracker, a log, a journal, a list of things to keep or any table of their own, make a real database: \
 a name for the table and an icon; the right kind for each column (date for days, number with the money code for amounts, so that totals add up, \
 choice or multi for words from a short list, checkbox for yes or no, link for web addresses); the options of each choice column with colours that mean something \
@@ -70,15 +73,16 @@ in a code block or out of one: it breaks on a narrow page and looks broken. Leve
 A table holds at most 12 columns and 199 rows under its header. A tool refuses Markdown with a larger table and writes nothing: \
 write a long log as more than one table (one for each month or year, say), each with its header and its comment lines. \
 When each row of a table needs a list of its own (what was spent each day, the costs of each trip), make one table with a rollup column and a page: part, \
-and Rune does the rest: the person opens a row (its Open button), writes in the table its page starts with, and the row and the total at the foot follow by themselves. \
+and Rune does the rest: the person opens a row and writes in the table its page starts with, and the row and the total at the foot follow. \
 For example a budget for a month, a row for each day of the month: \
 | Date | Budget | Spent | Left | \
 | --- | --- | --- | --- | \
 | 2026-11-01 | $60.00 |  |  | \
 <!-- columns: date | number USD sum | rollup Amount sum USD sum | formula USD sum = Budget - Spent --> \
 <!-- table: November | icon calendar:green | color Left below 0 red | page: Item | Amount number USD sum | Category choice {Food:orange; Fun:purple; Bills:gray} --> \
-(each line on its own line). Rune makes the page of a row when it is opened: do not make those pages, and do not ask the person how to do it. \
-To add a row to a table (a log), use add_table_row; to change one, update_table_row; to tick a to-do or set its day, set_todo: none of them write the page again. \
+(each line on its own line). Rune makes the page of a row when it is opened: do not make those pages with create_page, and do not ask the person how to do it. \
+To add a row to a table (a log), use add_table_row; to change one, update_table_row; give either of them page (Markdown) to write the row's own page (a recipe's steps, a day's notes; the answer gives its row_page_id); \
+to tick a to-do or set its day, set_todo: none of them write the page again. \
 A chart is a code block of the language chart holding JSON, for example \
 ```chart {\"shape\": \"bars\", \"from\": \"Run log\", \"x\": \"Date\", \"by\": \"week\", \"y\": \"km\", \"add\": \"sum\", \"goal\": 20, \"title\": \"Distance per week\"} ``` \
 (each on its own line). shape: bars, line, pie, ring or days; from: the title or id of the page whose first table it draws, or left out for the table above it on the same page; \
@@ -89,9 +93,11 @@ A pie draws how much of each word of a choice, multi or status column, in the co
 for example {\"shape\": \"pie\", \"x\": \"Status\", \"add\": \"count\"}. \
 A ring draws one amount (add over all rows) against the goal; days draws which days of the last four weeks have a row. The chart follows its table by itself. \
 Build what the person asks for (a table, its views and colours, the pages it needs, a chart) in one go with the tools; do not stop to ask about details you can choose well. \
+Then read each page you made or changed (read_page) and put right, in the same run, what is not as the person asked; a tool's answer with check names what Rune could not take as written. \
 When the person says that what you made in this conversation is wrong, read the page again (read_page), fix what most likely does not match what they asked for, \
 and say in one sentence what you changed. When you did not make it in this conversation and they do not say what they want instead, ask one short question \
 and change nothing. Never reply with a list of guesses. \
+You cannot lock a page with a password (the person does it in the ··· menu at the top of the page: Lock with password…) or add a picture (they paste or drop one): say so in one sentence. \
 Changes are saved immediately. trash_page is reversible with restore_page; no page is ever deleted permanently (delete_event does remove an event for good).";
 
 /// What a change gets as its answer when this connector is older than the
@@ -129,6 +135,12 @@ pub struct Server {
     /// Where each change is written down (see `Change`), when the app's own
     /// AI uses the tools.
     journal: Option<PathBuf>,
+    /// The lines of each page as `read_page` gave them, and as the tools
+    /// left them since: a page whose lines are not these any more was
+    /// changed by someone else (a person typing in Rune, a meeting's
+    /// transcript), and `replace_page_content` refuses to write it again
+    /// from what was read before (see `changed_since_read`).
+    seen: std::cell::RefCell<HashMap<Id, Vec<Block>>>,
 }
 
 type ToolResult = Result<String, String>;
@@ -414,13 +426,19 @@ pub fn count_line(changes: &[Change]) -> String {
 
 impl Server {
     pub fn new(store: Store) -> Server {
-        Server { store, journal: None }
+        Server { store, journal: None, seen: Default::default() }
     }
 
     /// Write every change down in this file (see `Change`).
     pub fn with_journal(mut self, path: PathBuf) -> Server {
         self.journal = Some(path);
         self
+    }
+
+    /// The notes it keeps (for the round trips of `ai_keep_tests`).
+    #[cfg(test)]
+    pub(crate) fn store(&self) -> &Store {
+        &self.store
     }
 
     fn snap(&self) -> Option<Snap> {
@@ -509,7 +527,15 @@ impl Server {
         }
         // For the app's own AI: what is there before a change, to write down what the change was.
         let before = if reads || self.journal.is_none() { None } else { self.snap() };
+        // (The pages read whose lines no one else changed since: what this
+        // call writes in them is the AI's own, and no change of another.)
+        let in_step: Vec<Id> = if reads { Vec::new() } else { self.seen.borrow().iter().filter(|(id, lines)| self.store.load_page_blocks(id).is_ok_and(|now| now == **lines)).map(|(id, _)| id.clone()).collect() };
         let outcome = self.run_tool(name, args)?;
+        for id in in_step {
+            if let Ok(now) = self.store.load_page_blocks(&id) {
+                self.seen.borrow_mut().insert(id, now);
+            }
+        }
         if let (Some(before), Some(path)) = (before, self.journal.as_ref()) {
             if let Some(after) = self.snap() {
                 let lines: String = changes_between(&before, &after).iter().filter_map(|c| serde_json::to_string(c).ok()).map(|l| l + "\n").collect();
@@ -723,6 +749,7 @@ impl Server {
         let id = required_page_id(args, "page_id")?;
         let (pages, blocks) = self.load()?;
         let page = live_page(&pages, &id)?;
+        self.seen.borrow_mut().insert(id.clone(), blocks.get(&id).cloned().unwrap_or_default());
         let body = render_body_with(&pages, Some(&blocks), blocks.get(&id).map(Vec::as_slice).unwrap_or(&[]));
         let (spaces, _) = self.spaces()?;
         // The page each row's page of a table starts with (its template), to
@@ -740,8 +767,11 @@ impl Server {
                 Some(format!("row_page_template: {of} (what each row's page of the {name} starts with)\n"))
             })
             .collect();
+        // (The look of the page, when it has one.)
+        let look = page.cover.as_deref().map(|c| format!("cover: {}\n", c.strip_prefix("preset:").unwrap_or("a picture"))).unwrap_or_default()
+            + &(!page.font.is_empty()).then(|| format!("font: {}\n", page.font)).unwrap_or_default();
         let header = format!(
-            "---\nid: {}\ntitle: {}\nicon: {}\nparent_id: {}\npath: {}\nspace: {}\nfavorite: {}\nupdated: {}\nlink: {LINK_PREFIX}{}\n{templates}---\n\n",
+            "---\nid: {}\ntitle: {}\nicon: {}\n{look}parent_id: {}\npath: {}\nspace: {}\nfavorite: {}\nupdated: {}\nlink: {LINK_PREFIX}{}\n{templates}---\n\n",
             page.id,
             quoted(page.display_title()),
             page.icon.as_deref().unwrap_or("none"),
@@ -758,7 +788,12 @@ impl Server {
     fn create_page(&self, args: &Value) -> ToolResult {
         let title = required_str(args, "title")?.trim().to_string();
         let parent = optional_page_id(args, "parent_id")?;
-        let icon = arg_str(args, "icon").map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+        // (An icon Rune does not have does not stop the page: it is made
+        // with none, and the answer says so.)
+        let (icon, icon_note) = match page_icon(arg_str(args, "icon").unwrap_or("")) {
+            Ok(icon) => (icon, None),
+            Err(why) => (None, Some(format!("{why} The page was made with no icon: set one with update_page."))),
+        };
         let (pages, blocks) = self.load()?;
         if let Some(pid) = &parent {
             live_page(&pages, pid)?;
@@ -792,7 +827,13 @@ impl Server {
         };
         page.title = title;
         page.icon = icon;
-        let body = non_empty(parse_body(&pages, &markdown));
+        page_look(args, &mut page)?;
+        let mut body = non_empty(parse_body(&pages, &markdown));
+        // (The new page among the pages, for the tables a relation can name.)
+        let relation_notes = match markdown.contains("relation") {
+            true => link_relations(&HashMap::from_iter(pages.clone().into_iter().chain([(page.id.clone(), page.clone())])), &blocks, &page.id, &mut body),
+            false => Vec::new(),
+        };
         self.save_page(&page)?;
         self.save_blocks(&page.id, &body)?;
 
@@ -806,14 +847,41 @@ impl Server {
             self.save_blocks(pid, &parent_blocks)?;
         }
         self.keep_row_templates(&page.id, &markdown)?;
-        Ok(pretty(&json!({
+        let mut answer = json!({
             "id": page.id,
             "title": page.display_title(),
             "parent_id": parent,
             "space": Self::space_name(&spaces, &page.space_id),
             "blocks": body.len(),
             "link": format!("{LINK_PREFIX}{}", page.id),
-        })))
+        });
+        Self::with_check(&mut answer, icon_note.into_iter().chain(relation_notes).chain(self.check(&page.id, &markdown, 0)).collect());
+        Ok(pretty(&answer))
+    }
+
+    /// What an AI tool should put right in what it just wrote on the page
+    /// `id` (`markdown`): what the Markdown could not say (see
+    /// `markdown::notes`), and charts of the page that draw no table or
+    /// name columns their table does not have. (Each was left out or drawn
+    /// another way in silence, and the tool said that all was made.)
+    /// Only the charts from line `first` on are this call's (an append
+    /// adds after the lines there: a chart the person made is not its to
+    /// put right).
+    fn check(&self, id: &str, markdown: &str, first: usize) -> Vec<String> {
+        let mut notes = markdown::notes(markdown);
+        if let Ok((pages, blocks)) = self.load() {
+            notes.extend(chart_notes(&pages, &blocks, id, first));
+        }
+        notes
+    }
+
+    /// An answer with the notes of `check`, when there are any, and what
+    /// to do with them.
+    fn with_check(answer: &mut Value, notes: Vec<String>) {
+        if !notes.is_empty() {
+            answer["check"] = json!(notes);
+            answer["to_do"] = json!("Put each point of check right now: read_page, then replace_page_content (or update_page for an icon).");
+        }
     }
 
     fn append_to_page(&self, args: &Value) -> ToolResult {
@@ -826,14 +894,21 @@ impl Server {
         if added.is_empty() {
             return Err("Nothing to append: the markdown is empty.".into());
         }
+        // (The tables of the page as it will be are those a relation can name.)
+        let mut whole = blocks.get(&id).cloned().unwrap_or_default();
+        let there = whole.len();
+        whole.extend(added);
+        let relation_notes = link_relations_from(&pages, &blocks, &id, &mut whole, there);
         // Only the new blocks are written, after the ones there: the page
         // is not written again as a whole, so nothing typed into it in the
         // app at the same moment is lost.
-        let _ = blocks;
+        let added = whole.split_off(there);
         let count = added.len();
         let total = self.store.append_blocks(&id, &added, now_ms()).map_err(db_error)?;
         self.keep_row_templates(&id, markdown)?;
-        Ok(pretty(&json!({ "page_id": id, "appended_blocks": count, "total_blocks": total })))
+        let mut answer = json!({ "page_id": id, "appended_blocks": count, "total_blocks": total });
+        Self::with_check(&mut answer, relation_notes.into_iter().chain(self.check(&id, markdown, there)).collect());
+        Ok(pretty(&answer))
     }
 
     /// A row at the end of a table of a page, its cells given by the names
@@ -853,19 +928,102 @@ impl Server {
         if !unknown.is_empty() && unknown.len() == values.len() {
             return Err(format!("The table has no column {}. Its columns: {}.", quoted_names(&unknown), headings(&table)));
         }
+        let own_page = Self::own_page_arg(args)?;
+        // (A row with a page goes by a name of its own: see `Table::name_rows`.)
+        if own_page.is_some() {
+            table.name_rows();
+        }
         let cells = row_text(&table, row);
         page_blocks[at].data = table.to_data();
         page_blocks[at].text = table.plain_text();
         self.save_blocks(&id, &page_blocks)?;
         self.name_row_pages(&pages, &page_blocks[at].id, &table)?;
-        Ok(pretty(&json!({ "page_id": id, "row": row, "cells": cells, "columns_not_found": unknown })))
+        let mut answer = json!({ "page_id": id, "row": row, "cells": cells, "columns_not_found": unknown });
+        self.row_page_answer(&mut answer, &id, &page_blocks[at].id, &table, row, own_page)?;
+        Ok(pretty(&answer))
+    }
+
+    /// The `page` of add_table_row and update_table_row: the Markdown of
+    /// the row's own page ("" for the page as Rune makes it).
+    fn own_page_arg(args: &Value) -> Result<Option<String>, String> {
+        let Some(markdown) = arg_str(args, "page") else { return Ok(None) };
+        refuse_big_tables(markdown, "Nothing was changed.")?;
+        Ok(Some(markdown.to_string()))
+    }
+
+    /// The row's page in the answer of a tool that changed a row: written
+    /// first when the tool was given `page` (see `write_row_page`); its id
+    /// when the row has one, to read or change it as any page.
+    fn row_page_answer(&self, answer: &mut Value, on: &str, block: &str, table: &crate::table::Table, r: usize, own_page: Option<String>) -> Result<(), String> {
+        let notes = match &own_page {
+            Some(markdown) => self.write_row_page(on, block, table, r, markdown)?,
+            None => Vec::new(),
+        };
+        let (pages, _) = self.load()?;
+        if let Some((page, false)) = table.row_id(r).and_then(|row| crate::state::row_page_id(&pages, block, row)) {
+            answer["row_page_id"] = json!(page);
+        }
+        Self::with_check(answer, notes);
+        Ok(())
+    }
+
+    /// Write the page of row `r` of the table `block` on the page `on` (the
+    /// table as it is kept, its rows with names to go by): made now with
+    /// `markdown` when the row has none (with "", as Rune makes it when the
+    /// row is opened: from its template), or written again with it. Returns
+    /// the notes of `check`. (The page of a row was made only when the
+    /// person opened it: the AI could not write a recipe's steps or a
+    /// day's notes into the page of its row.)
+    fn write_row_page(&self, on: &str, block: &str, table: &crate::table::Table, r: usize, markdown: &str) -> Result<Vec<String>, String> {
+        let (pages, blocks) = self.load()?;
+        let row = table.row_id(r).ok_or("The row has no name to go by.")?;
+        if let Some((page, trashed)) = crate::state::row_page_id(&pages, block, row) {
+            if trashed {
+                let mut back = pages[&page].clone();
+                back.trashed = false;
+                back.updated_at = now_ms();
+                self.save_page(&back)?;
+            }
+            if markdown.trim().is_empty() {
+                return Ok(Vec::new());
+            }
+            let written = self.replace_page_content(&json!({ "page_id": page, "markdown": markdown }))?;
+            let notes = serde_json::from_str::<Value>(&written).ok().and_then(|v| v.get("check").cloned()).and_then(|c| serde_json::from_value(c).ok()).unwrap_or_default();
+            return Ok(notes);
+        }
+        let mut page = Page::new(Some(on.to_string()), 0.0);
+        page.space_id = pages.get(on).map(|p| p.space_id.clone()).unwrap_or_default();
+        page.row_of = Some(format!("{block}/{row}"));
+        page.title = table.title(r).to_string();
+        let mut lines = if markdown.trim().is_empty() {
+            crate::state::new_row_lines(&pages, &blocks, block, table)
+        } else {
+            non_empty(lines_of(&pages, &strip_title_heading(markdown, &page.title)))
+        };
+        let mut notes = match markdown.contains("relation") {
+            true => link_relations(&HashMap::from_iter(pages.clone().into_iter().chain([(page.id.clone(), page.clone())])), &blocks, &page.id, &mut lines),
+            false => Vec::new(),
+        };
+        self.save_page(&page)?;
+        self.save_blocks(&page.id, &lines)?;
+        self.keep_row_templates(&page.id, markdown)?;
+        // (The AI made it: it may write it again until someone changes it, see `row_page_free`.)
+        if let Ok(now) = self.store.load_page_blocks(&page.id) {
+            self.seen.borrow_mut().insert(page.id.clone(), now);
+        }
+        notes.extend(self.check(&page.id, markdown, 0));
+        Ok(notes)
     }
 
     /// Change cells of one row of a table, found by its number under the
     /// header or by the text of one of its cells.
     fn update_table_row(&self, args: &Value) -> ToolResult {
         let id = required_page_id(args, "page_id")?;
-        let values = named_cells(args, "values")?;
+        // (With only the row's page to write, no cell need change.)
+        let values = match (args.get("values"), args.get("page")) {
+            (None, Some(_)) => Vec::new(),
+            _ => named_cells(args, "values")?,
+        };
         let (pages, blocks) = self.load()?;
         live_page(&pages, &id)?;
         let mut page_blocks = blocks.get(&id).cloned().unwrap_or_default();
@@ -879,20 +1037,53 @@ impl Server {
                 let (name, text) = m.iter().next().ok_or("match is empty: give one column and the text of its cell.")?;
                 let text = text.as_str().map(str::to_string).unwrap_or_else(|| text.to_string());
                 let c = table.find_column(name).ok_or_else(|| format!("The table has no column “{name}”. Its columns: {}.", headings(&table)))?;
-                table.find_row(c, &text, today).ok_or_else(|| format!("No row has “{text}” in the column “{name}”."))?
+                table.find_row(c, &text, today).ok_or_else(|| {
+                    let cells: Vec<String> = table.body().map(|r| format!("“{}”", table.shown(r, c))).take(12).collect();
+                    format!("No row has “{text}” in the column “{name}”. Its rows have there: {}.", if cells.is_empty() { "nothing (the table has no rows)".to_string() } else { cells.join(", ") })
+                })?
             }
             (None, None) => return Err("Say which row: row (its number under the header, from 1) or match ({\"Column\": \"text\"}).".into()),
         };
-        let unknown = table.put_named(row, &values, today);
+        let own_page = Self::own_page_arg(args)?;
+        let unknown = if values.is_empty() { Vec::new() } else { table.put_named(row, &values, today) };
         if !unknown.is_empty() && unknown.len() == values.len() {
             return Err(format!("The table has no column {}. Its columns: {}.", quoted_names(&unknown), headings(&table)));
         }
+        if own_page.is_some() {
+            table.name_rows();
+        }
+        // (Before a cell is saved: a refusal changes nothing.)
+        self.row_page_free(&pages, &blocks, &page_blocks[at].id, table.row_id(row), own_page.as_deref())?;
         let cells = row_text(&table, row);
         page_blocks[at].data = table.to_data();
         page_blocks[at].text = table.plain_text();
         self.save_blocks(&id, &page_blocks)?;
         self.name_row_pages(&pages, &page_blocks[at].id, &table)?;
-        Ok(pretty(&json!({ "page_id": id, "row": row, "cells": cells, "columns_not_found": unknown })))
+        let mut answer = json!({ "page_id": id, "row": row, "cells": cells, "columns_not_found": unknown });
+        self.row_page_answer(&mut answer, &id, &page_blocks[at].id, &table, row, own_page)?;
+        Ok(pretty(&answer))
+    }
+
+    /// `page` (`markdown`) for the row `row` of the table `block`, whose
+    /// page has lines: refused unless the AI read that page and no one
+    /// changed it since (or made it in this run). The page of a row is
+    /// where the person writes (a day's spending, a trade's notes), and the
+    /// AI was given its id only after the write: it wrote over lines it
+    /// had never seen.
+    fn row_page_free(&self, pages: &HashMap<Id, Page>, blocks: &HashMap<Id, Vec<Block>>, block: &str, row: Option<&str>, markdown: Option<&str>) -> Result<(), String> {
+        let (Some(row), Some(markdown)) = (row, markdown) else { return Ok(()) };
+        if markdown.trim().is_empty() {
+            return Ok(());
+        }
+        let Some((page, _)) = crate::state::row_page_id(pages, block, row) else { return Ok(()) };
+        let now = blocks.get(&page).map(Vec::as_slice).unwrap_or_default();
+        if is_blank(now) || self.seen.borrow().get(&page).is_some_and(|read| read.as_slice() == now) {
+            return Ok(());
+        }
+        Err(format!(
+            "The row already has its own page ({page}) with lines in it, which may be the person's, so it was not written over. Nothing was changed. \
+             Read it with read_page (page_id {page}), then change it with replace_page_content, or add to it with append_to_page."
+        ))
     }
 
     /// Tick or clear a to-do, or set or take away its day, found by words of
@@ -923,7 +1114,10 @@ impl Server {
             .copied()
             .find(|&i| page_blocks[i].plain_text().trim().to_lowercase() == words)
             .or_else(|| todos.iter().copied().find(|&i| page_blocks[i].plain_text().to_lowercase().contains(&words)))
-            .ok_or_else(|| format!("No to-do of this page has the words “{words}”."))?;
+            .ok_or_else(|| match todos.len() {
+                0 => "This page has no to-dos (lines - [ ] …). Add one with append_to_page.".to_string(),
+                _ => format!("No to-do of this page has the words “{words}”. Its to-dos: {}.", todos.iter().take(12).map(|&i| format!("“{}”", page_blocks[i].plain_text())).collect::<Vec<_>>().join(", ")),
+            })?;
         if let Some(done) = done {
             page_blocks[i].checked = done;
         }
@@ -963,6 +1157,7 @@ impl Server {
         refuse_big_tables(markdown, "The page was not changed.")?;
         // Keep the page as it was, so the change can be undone in Page history.
         let old = blocks.get(&id).map(|b| b.as_slice()).unwrap_or_default();
+        self.changed_since_read(&id, old)?;
         self.store.save_version(&id, now_ms(), &page.title, old).map_err(db_error)?;
         if let Some(title) = arg_str(args, "title") {
             page.title = title.trim().to_string();
@@ -973,9 +1168,13 @@ impl Server {
         // stays a toggle, a callout keeps its icon, and a line of text under
         // one keeps its step in. Markdown cannot say those, and each such
         // block became a plain bullet, a quote or a line at the edge.)
-        let mut body = non_empty(crate::model::keep_unchanged(old, keep_media(old, parse_body(&pages, &strip_title_heading(markdown, &page.title)))));
+        let said = page_said(&pages, markdown, &page.title, old);
+        let mut body = crate::model::keep_unchanged(old, keep_media(old, said.clone()));
+        as_said(old, &said, &mut body);
+        let mut body = non_empty(body);
         // A table of the page is the same table still (its view, the pages of its rows).
         keep_tables(old, &mut body);
+        let relation_notes = link_relations(&pages, &blocks, &id, &mut body);
         self.save_blocks(&id, &body)?;
         for b in body.iter().filter(|b| b.kind == BlockKind::Table) {
             self.name_row_pages(&pages, &b.id, &crate::table::Table::parse(&b.data))?;
@@ -984,7 +1183,26 @@ impl Server {
             self.name_row_cell(&page, &blocks)?;
         }
         self.keep_row_templates(&id, markdown)?;
-        Ok(pretty(&json!({ "page_id": id, "title": page.display_title(), "blocks": body.len() })))
+        let mut answer = json!({ "page_id": id, "title": page.display_title(), "blocks": body.len() });
+        Self::with_check(&mut answer, relation_notes.into_iter().chain(self.check(&id, markdown, 0)).collect());
+        Ok(pretty(&answer))
+    }
+
+    /// The page was read with `read_page`, and its lines are not what was
+    /// read any more (nor what the tools wrote since): someone changed it in
+    /// Rune meanwhile. The page written from what was read would take that
+    /// change away (a line typed while the AI worked, the end of a meeting's
+    /// transcript), so it is refused, with what to do.
+    fn changed_since_read(&self, id: &str, now: &[Block]) -> Result<(), String> {
+        match self.seen.borrow().get(id) {
+            Some(read) if read.as_slice() != now => Err(
+                "The page was changed in Rune after you read it (someone typed in it, or a meeting is being written into it), so it was not replaced: \
+                 your Markdown does not have that change and would take it away. Nothing was changed. Read the page again with read_page and make your change on what it gives. \
+                 To only add to a page that keeps changing, use append_to_page."
+                    .into(),
+            ),
+            _ => Ok(()),
+        }
     }
 
     /// The tables of a page whose Markdown said what the page of each row
@@ -1060,9 +1278,8 @@ impl Server {
         if let Some(icon) = args.get("icon") {
             page.icon = match icon {
                 Value::Null => None,
-                Value::String(s) if s.trim().is_empty() => None,
-                Value::String(s) => Some(s.trim().to_string()),
-                _ => return Err("`icon` must be an emoji string, or empty to remove it.".into()),
+                Value::String(s) => page_icon(s).map_err(|why| format!("{why} Nothing was changed."))?,
+                _ => return Err("`icon` must be NAME:COLOUR, as book:blue, or empty to remove it.".into()),
             };
             changed.push("icon");
         }
@@ -1070,6 +1287,7 @@ impl Server {
             page.favorite = fav.as_bool().ok_or("`favorite` must be true or false.")?;
             changed.push("favorite");
         }
+        changed.extend(page_look(args, &mut page)?);
         if let Some(parent) = args.get("parent_id") {
             let new_parent = match parent {
                 Value::Null => None,
@@ -1125,7 +1343,7 @@ impl Server {
             }
         }
         if changed.is_empty() {
-            return Err("Nothing to update: pass title, icon, favorite, parent_id or space.".into());
+            return Err("Nothing to update: pass title, icon, cover, font, favorite, parent_id or space.".into());
         }
         page.updated_at = now_ms();
         self.save_page(&page)?;
@@ -1149,6 +1367,8 @@ impl Server {
             "updated": changed,
             "title": page.display_title(),
             "icon": page.icon,
+            "cover": page.cover,
+            "font": page.font,
             "favorite": page.favorite,
             "parent_id": page.parent_id,
             "space": Self::space_name(&spaces, &page.space_id),
@@ -1306,8 +1526,15 @@ impl Server {
             None => start + crate::when::HOUR,
         };
         let start = if all_day { crate::when::midnight(crate::when::date_of(start)) } else { start };
-        let space = self.store.get_setting("space").unwrap_or_default();
+        // The space it is named for, or the page's that holds its notes, or the one open in Rune.
+        let notes_page = self.event_page(args)?;
+        let space = match (self.space_arg(args)?, &notes_page) {
+            (Some(space), _) => space.id,
+            (None, Some(Some(page))) => self.load()?.0.get(page).map(|p| p.space_id.clone()).unwrap_or_default(),
+            (None, _) => self.store.get_setting("space").unwrap_or_default(),
+        };
         let mut e = crate::model::Event::new(space, title, start, end, all_day);
+        e.page_id = notes_page.flatten();
         if let Some(n) = arg_str(args, "notes") {
             e.notes = n.to_string();
         }
@@ -1327,9 +1554,27 @@ impl Server {
         Ok(pretty(&json!({ "created": self.event_json(&e, crate::when::date_of(e.start)) })))
     }
 
+    /// The page that holds an event's notes (`page_id`: a page, or "" for
+    /// none), when the call gives one: it shows under the event in the
+    /// calendar. (The tools could not link an event to a page, so the flight
+    /// of a trip plan was not with its page.)
+    fn event_page(&self, args: &Value) -> Result<Option<Option<Id>>, String> {
+        match args.get("page_id") {
+            None => Ok(None),
+            Some(_) => match optional_page_id(args, "page_id")? {
+                None => Ok(Some(None)),
+                Some(id) => {
+                    live_page(&self.load()?.0, &id)?;
+                    Ok(Some(Some(id)))
+                }
+            },
+        }
+    }
+
     fn update_event(&self, args: &Value) -> ToolResult {
         let id = required_str(args, "event_id")?;
         let mut series = self.find_event(id)?;
+        let notes_page = self.event_page(args)?;
         // A change to one repeat goes to them all (moved by the same days and
         // time), as in the app.
         let day = crate::repeat::split_id(id.trim()).1.filter(|_| series.repeat.is_some());
@@ -1377,6 +1622,9 @@ impl Server {
             None => e,
         };
         let mut e = e;
+        if let Some(page) = notes_page {
+            e.page_id = page;
+        }
         e.updated_at = now_ms();
         self.store.save_event(&e).map_err(db_error)?;
         Ok(pretty(&json!({ "updated": self.event_json(&e, crate::when::date_of(e.start)) })))
@@ -1522,7 +1770,9 @@ fn tool_definitions() -> Value {
                     "markdown": { "type": "string", "description": "Page content as Markdown (don't repeat the title as a heading)." },
                     "parent_id": { "type": "string", "description": "Optional parent page id; omit for a top-level page." },
                     "space": { "type": "string", "description": "For a top-level page: the name of the space it goes in (see list_pages). Omit to use the space that is open in Rune." },
-                    "icon": { "type": "string", "description": "Optional emoji icon, e.g. 📝." }
+                    "cover": { "type": "string", "description": "Optional band across the top: sand, clay, ember, moss, sea, slate, dawn, night, meadow, shore, stone, rust, honey, fern, lake or plum." },
+                    "font": { "type": "string", "enum": ["sans", "serif", "mono"], "description": "Optional face of the title and headings (default sans)." },
+                    "icon": { "type": "string", "description": "Optional icon, NAME:COLOUR, as book:blue (Rune draws its own icons, not emoji). NAME: file, note, book, bookmark, folder, calendar, check-circle, lightbulb, rocket, target, star, flame, leaf, briefcase, home, plane, palette, music, flask, wrench, chart, chat, coffee, globe, lock, heart, smile, bot, code, warning, info, pin, bell, inbox, map-pin, camera, gift, trophy or sparkles; COLOUR: gray, brown, orange, yellow, green, blue, purple, pink or red." }
                 },
                 "required": ["title"]
             },
@@ -1551,7 +1801,8 @@ fn tool_definitions() -> Value {
                 "properties": {
                     "page_id": page_id,
                     "values": { "type": "object", "description": "The cells: column name → text.", "additionalProperties": { "type": ["string", "number", "boolean"] } },
-                    "table": { "type": ["integer", "string"], "description": "Which table of the page (default the first): its number from 1, or a word of its header." }
+                    "table": { "type": ["integer", "string"], "description": "Which table of the page (default the first): its number from 1, or a word of its header." },
+                    "page": { "type": "string", "description": "Optional: the row's own page as Markdown (a recipe's steps, a day's notes), made with it; \"\" makes it as Rune does when the row is opened (from the template). The answer gives its row_page_id." }
                 },
                 "required": ["page_id", "values"]
             },
@@ -1560,7 +1811,7 @@ fn tool_definitions() -> Value {
         {
             "name": "update_table_row",
             "title": "Change a row of a table",
-            "description": "Change cells of one row of a table in a page, without writing the page again. Find the row by row (its number under the header, from 1) or by match (one cell, as {\"Date\": \"2026-12-01\"}), and give the new cells in values by the names of their columns.",
+            "description": "Change cells of one row of a table in a page, without writing the page again, or write the row's own page (page). Find the row by row (its number under the header, from 1) or by match (one cell, as {\"Date\": \"2026-12-01\"}), and give the new cells in values by the names of their columns.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1568,9 +1819,10 @@ fn tool_definitions() -> Value {
                     "values": { "type": "object", "description": "The new cells: column name → text.", "additionalProperties": { "type": ["string", "number", "boolean"] } },
                     "row": { "type": "integer", "minimum": 1, "description": "The row's number under the header, from 1." },
                     "match": { "type": "object", "description": "One column and the text of its cell in the row, as {\"Date\": \"2026-12-01\"}." },
-                    "table": { "type": ["integer", "string"], "description": "Which table of the page (default the first): its number from 1, or a word of its header." }
+                    "table": { "type": ["integer", "string"], "description": "Which table of the page (default the first): its number from 1, or a word of its header." },
+                    "page": { "type": "string", "description": "Optional: the row's own page as Markdown, made with it; \"\" makes it as Rune does when the row is opened. A row page that has lines is written again only after you read it (read_page); else nothing is changed. The answer gives its row_page_id." }
                 },
-                "required": ["page_id", "values"]
+                "required": ["page_id"]
             },
             "annotations": write(true)
         },
@@ -1609,16 +1861,18 @@ fn tool_definitions() -> Value {
         {
             "name": "update_page",
             "title": "Update page details",
-            "description": "Change a page's title, icon or favorite flag, move it under another page (parent_id; empty string moves it to the top level), or move it to the top level of another space (space). Its sub-pages go with it. Content is unchanged.",
+            "description": "Change a page's title, icon, cover, face or favorite flag, move it under another page (parent_id; empty string moves it to the top level), or move it to the top level of another space (space). Its sub-pages go with it. Content is unchanged.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "page_id": page_id,
                     "title": { "type": "string" },
-                    "icon": { "type": "string", "description": "Emoji, or empty to remove the icon." },
+                    "icon": { "type": "string", "description": "NAME:COLOUR as for create_page, or empty to remove the icon." },
                     "favorite": { "type": "boolean" },
                     "parent_id": { "type": "string", "description": "New parent page id, or empty for top level." },
-                    "space": { "type": "string", "description": "The name of the space to move the page to (to its top level)." }
+                    "space": { "type": "string", "description": "The name of the space to move the page to (to its top level)." },
+                    "cover": { "type": "string", "description": "A cover as for create_page, or empty to take it away." },
+                    "font": { "type": "string", "enum": ["sans", "serif", "mono"] }
                 },
                 "required": ["page_id"]
             },
@@ -1663,7 +1917,7 @@ fn tool_definitions() -> Value {
         {
             "name": "create_event",
             "title": "Add a calendar event",
-            "description": "Add an event to the calendar, in the space that is open in Rune. Give start as 2026-11-10T14:00 for a timed event (an hour long unless end is given) or 2026-11-10 for an all-day event.",
+            "description": "Add an event to the calendar: in the space named by space, else the space of its page_id, else the one open in Rune. Give start as 2026-11-10T14:00 for a timed event (an hour long unless end is given) or 2026-11-10 for an all-day event.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1675,7 +1929,9 @@ fn tool_definitions() -> Value {
                     "color": { "type": "string", "enum": ["gray", "brown", "orange", "yellow", "green", "blue", "purple", "pink", "red"] },
                     "reminder_minutes": { "type": ["integer", "null"], "minimum": 0, "description": "Minutes before the start for a Mac notification (0 = at the start; null = none). Default: the app's setting, normally 10." },
                     "repeat": { "type": "string", "enum": ["none", "daily", "weekdays", "weekly", "biweekly", "monthly", "yearly"], "description": "How the event repeats, counted from its start. Default: none." },
-                    "repeat_until": { "type": ["string", "null"], "description": "The last day it may repeat on, like 2026-12-20. Default: no end." }
+                    "repeat_until": { "type": ["string", "null"], "description": "The last day it may repeat on, like 2026-12-20. Default: no end." },
+                    "space": { "type": "string", "description": "The name of the space it goes in (see list_pages)." },
+                    "page_id": { "type": "string", "description": "A page that holds its notes (a trip plan for its flight, the agenda of a meeting): it shows under the event in the calendar." }
                 },
                 "required": ["title", "start"]
             },
@@ -1697,7 +1953,8 @@ fn tool_definitions() -> Value {
                     "color": { "type": "string", "enum": ["gray", "brown", "orange", "yellow", "green", "blue", "purple", "pink", "red"] },
                     "reminder_minutes": { "type": ["integer", "null"], "minimum": 0 },
                     "repeat": { "type": "string", "enum": ["none", "daily", "weekdays", "weekly", "biweekly", "monthly", "yearly"] },
-                    "repeat_until": { "type": ["string", "null"], "description": "The last day it may repeat on (null: no end)." }
+                    "repeat_until": { "type": ["string", "null"], "description": "The last day it may repeat on (null: no end)." },
+                    "page_id": { "type": "string", "description": "A page that holds its notes, or empty for none." }
                 },
                 "required": ["event_id"]
             },
@@ -1744,6 +2001,90 @@ fn not_found(id: &str) -> String {
     format!("No page with id {id}. Use search_pages or list_pages to find page ids.")
 }
 
+/// A page's icon as a tool gives it: NAME:COLOUR, a NAME alone (in gray),
+/// or an emoji that Rune has an icon for; `None` for empty (no icon).
+/// Rune draws only its own icons: any other emoji showed as a gray page,
+/// and the tool was told it was fine. An icon Rune does not have is an
+/// error that names those it has.
+fn page_icon(given: &str) -> Result<Option<String>, String> {
+    let given = given.trim();
+    if given.is_empty() {
+        return Ok(None);
+    }
+    match crate::ui::icons::known_icon(&given.to_lowercase()) {
+        Some((name, color)) => Ok(Some(crate::ui::icons::format_icon(&name, &color))),
+        None => Err(format!(
+            "Rune has no icon “{given}”: it draws its own icons, not emoji. Give NAME:COLOUR, as book:blue; NAME one of {}; COLOUR one of {}.",
+            crate::ui::icons::PAGE_ICONS.join(", "),
+            crate::ui::icons::ICON_COLORS.iter().map(|(id, _)| *id).collect::<Vec<_>>().join(", ")
+        )),
+    }
+}
+
+/// The look a tool gives a page: `cover` (one of the app's own covers, by
+/// name; "" for none) and `font` (sans, serif or mono), set on `page`.
+/// Which were given, for the answer. (The tools could set neither, so a
+/// page asked for "with a cover" or "in a serif face" was made without.)
+fn page_look(args: &Value, page: &mut Page) -> Result<Vec<&'static str>, String> {
+    let mut set = Vec::new();
+    if let Some(cover) = arg_str(args, "cover").map(|c| c.trim().to_lowercase()) {
+        let name = cover.strip_prefix("preset:").unwrap_or(&cover);
+        page.cover = match name {
+            "" | "none" => None,
+            _ if crate::model::covers::css(name).is_some() => Some(format!("preset:{name}")),
+            _ => return Err(format!("Rune has no cover “{cover}”. The covers: {}; or empty for none. Nothing was changed.", crate::model::covers::PRESETS.iter().map(|(id, ..)| *id).collect::<Vec<_>>().join(", "))),
+        };
+        page.cover_y = 50;
+        set.push("cover");
+    }
+    if let Some(font) = arg_str(args, "font").map(|f| f.trim().to_lowercase()) {
+        page.font = match font.as_str() {
+            "" | "sans" | "default" => String::new(),
+            "serif" | "mono" => font,
+            _ => return Err(format!("A page's face is sans, serif or mono, not “{font}”. Nothing was changed.")),
+        };
+        set.push("font");
+    }
+    Ok(set)
+}
+
+/// The charts of a page that draw no table, or name a column their table
+/// does not have (else they drew the first date and number columns, which
+/// may be others), each as a note for the AI tool (see `Server::check`).
+/// The table is found as the app finds it (`AppState::chart_source`).
+fn chart_notes(pages: &HashMap<Id, Page>, blocks: &HashMap<Id, Vec<Block>>, page_id: &str, first: usize) -> Vec<String> {
+    let lines = blocks.get(page_id).map(Vec::as_slice).unwrap_or_default();
+    let space = pages.get(page_id).map(|p| p.space_id.clone());
+    let mut notes = Vec::new();
+    for (at, b) in lines.iter().enumerate().skip(first).filter(|(_, b)| b.kind == BlockKind::Chart) {
+        let chart = crate::chart::Chart::parse(&b.data);
+        let from = chart.from.trim();
+        let name = if chart.title.trim().is_empty() { "A chart".to_string() } else { format!("The chart “{}”", chart.title.trim()) };
+        let table = if from.is_empty() || from == page_id {
+            lines[..at].iter().rev().find(|b| b.kind == BlockKind::Table).or_else(|| lines.iter().find(|b| b.kind == BlockKind::Table))
+        } else {
+            let want = from.to_lowercase();
+            let mut found: Vec<&Page> = pages.values().filter(|p| !p.trashed && (p.id == from || p.title.trim().to_lowercase() == want)).collect();
+            found.sort_by_key(|p| (p.id != from, Some(&p.space_id) != space.as_ref(), std::cmp::Reverse(p.updated_at)));
+            found.first().and_then(|p| blocks.get(&p.id)).and_then(|bs| bs.iter().find(|b| b.kind == BlockKind::Table))
+        };
+        let Some(table) = table.map(|b| crate::table::Table::parse(&b.data)) else {
+            notes.push(if from.is_empty() {
+                format!("{name} draws no table: this page has none. Put the chart under its table, or give \"from\": the title of the page whose first table it draws.")
+            } else {
+                format!("{name} draws no table: no page called “{from}” has one. \"from\" is the title or id of a page whose first table it draws.")
+            });
+            continue;
+        };
+        for (key, column) in [("x", &chart.x), ("y", &chart.y)] {
+            if !column.trim().is_empty() && table.find_column(column).is_none() {
+                notes.push(format!("{name} has \"{key}\": “{column}”, but its table has no such column. Its columns: {}.", headings(&table)));
+            }
+        }
+    }
+    notes
+}
+
 /// The cells a tool was given, as (column, text) pairs.
 fn named_cells(args: &Value, key: &str) -> Result<Vec<(String, String)>, String> {
     let values = args.get(key).and_then(Value::as_object).ok_or_else(|| format!("{key} must be an object of column name → text."))?;
@@ -1784,7 +2125,10 @@ fn table_in(blocks: &[Block], which: Option<&Value>) -> Result<usize, String> {
                 .iter()
                 .copied()
                 .find(|&i| crate::table::Table::parse(&blocks[i].data).find_column(word).is_some())
-                .ok_or_else(|| format!("No table of this page has a column “{word}”."))
+                .ok_or_else(|| {
+                    let each: Vec<String> = tables.iter().map(|&i| format!("({})", headings(&crate::table::Table::parse(&blocks[i].data)))).collect();
+                    format!("No table of this page has a column “{word}”. Its tables have the columns {}; or give the table's number, from 1.", each.join(" and "))
+                })
         }
         _ => Ok(tables[0]),
     }
@@ -1898,9 +2242,33 @@ fn non_empty(blocks: Vec<Block>) -> Vec<Block> {
     }
 }
 
+/// The Markdown given for the page `old` (titled `title`) as its lines,
+/// with a fence around all of it taken away once. Not when the page is one
+/// code block of Markdown (a README draft): Rune gave it as that one fence,
+/// and unwrapped as a reply in a fence is, it became lines of the page.
+fn page_said(pages: &HashMap<Id, Page>, markdown: &str, title: &str, old: &[Block]) -> Vec<Block> {
+    let mut real = old.iter().filter(|b| !(b.kind == BlockKind::Text && b.text.trim().is_empty()));
+    let one_md_code = matches!((real.next(), real.next()), (Some(b), None) if b.kind == BlockKind::Code
+        && b.language.as_deref().is_some_and(|l| l.eq_ignore_ascii_case("markdown") || l.eq_ignore_ascii_case("md")));
+    if one_md_code {
+        lines_of(pages, &strip_title_only(markdown, title))
+    } else {
+        lines_of(pages, &strip_title_heading(markdown, title))
+    }
+}
+
 /// Agents often start content with the page title as a heading; the title is
 /// already shown above the page, so drop that one heading.
+/// (A fence of Markdown around all of it is taken away first: see
+/// `markdown::unfenced`.)
 pub(crate) fn strip_title_heading(markdown: &str, title: &str) -> String {
+    let markdown = markdown.strip_prefix('\u{FEFF}').unwrap_or(markdown);
+    strip_title_only(markdown::unfenced(markdown), title)
+}
+
+/// The same, with a fence around all of it kept.
+fn strip_title_only(markdown: &str, title: &str) -> String {
+    let markdown = markdown.strip_prefix('\u{FEFF}').unwrap_or(markdown);
     let trimmed = markdown.trim_start();
     if let Some(first) = trimmed.lines().next() {
         let heading = first.trim_start_matches('#');
@@ -1951,6 +2319,153 @@ pub(crate) fn keep_media(old: &[Block], new: Vec<Block>) -> Vec<Block> {
     out
 }
 
+/// The name a relation column writes for the table `block` (see
+/// `Table::from_names`): its name, else the title of its page when it is
+/// the first table there; `None` when neither names it well, and the
+/// column is then written as `relation` alone (a rewrite keeps its table).
+fn table_name(pages: &HashMap<Id, Page>, all: &HashMap<Id, Vec<Block>>, block: &str) -> Option<String> {
+    let (page, lines) = all.iter().find(|(_, lines)| lines.iter().any(|b| b.id == block && b.kind == BlockKind::Table))?;
+    let table = lines.iter().find(|b| b.id == block).map(|b| crate::table::Table::parse(&b.data))?;
+    if !table.name.trim().is_empty() {
+        return Some(table.name.trim().to_string());
+    }
+    let first = lines.iter().find(|b| b.kind == BlockKind::Table).is_some_and(|b| b.id == block);
+    pages.get(page).filter(|p| first && !p.trashed && !p.title.trim().is_empty()).map(|p| p.title.trim().to_string())
+}
+
+/// The relation columns of the tables in `lines` (the page `page_id` as
+/// it is about to be kept; `all`, the lines of every page) that hold the
+/// name of a table, as Markdown says it (`relation Companies`): each gets
+/// that table's block, found by its name, else by the title of its page
+/// (its first table), this space first. One that names no table that is
+/// there is left with none (the column then asks the person to choose),
+/// and a note says so. (Markdown could not say which table a relation
+/// names: a contact list linked to companies needed the person to choose
+/// the table in the column's menu.)
+pub(crate) fn link_relations(pages: &HashMap<Id, Page>, all: &HashMap<Id, Vec<Block>>, page_id: &str, lines: &mut [Block]) -> Vec<String> {
+    link_relations_from(pages, all, page_id, lines, 0)
+}
+
+/// The same for the tables from line `first` on (those an append adds:
+/// the tables there before are only what a relation can name, and a note
+/// about one of them asked the AI to put right what it did not write).
+///
+/// A column that named a table (`all` holds the page as it was) keeps it
+/// while the name written is still that table's name: a rewrite of the
+/// page wrote it by its name (see `table_name`), and found by the name
+/// again it could become another table of the same name, or none when the
+/// table is on a page in the trash or the page of a row.
+pub(crate) fn link_relations_from(pages: &HashMap<Id, Page>, all: &HashMap<Id, Vec<Block>>, page_id: &str, lines: &mut [Block], first: usize) -> Vec<String> {
+    use crate::table::{Kind, Table};
+    let mut notes = Vec::new();
+    let here: Vec<(Id, Table)> = lines.iter().filter(|b| b.kind == BlockKind::Table).map(|b| (b.id.clone(), Table::parse(&b.data))).collect();
+    if !here.iter().any(|(_, t)| (0..t.columns()).any(|c| t.kind(c) == Kind::Relation)) {
+        return notes;
+    }
+    let was = |block: &str, heading: &str| -> Option<String> {
+        let old = all.get(page_id)?.iter().find(|b| b.id == block && b.kind == BlockKind::Table).map(|b| Table::parse(&b.data))?;
+        let c = old.find_heading(heading).filter(|&c| old.kind(c) == Kind::Relation)?;
+        Some(old.column(c).from.trim().to_string()).filter(|f| !f.is_empty())
+    };
+    let is_table = |id: &str| here.iter().any(|(h, _)| h == id) || all.values().flatten().any(|b| b.id == id && b.kind == BlockKind::Table);
+    let space = pages.get(page_id).map(|p| p.space_id.clone());
+    // Every table there is: those of this page as it is about to be, then
+    // those of the other pages, this space first and the newest first.
+    let mut others: Vec<&Page> = pages.values().filter(|p| !p.trashed && p.id != page_id && p.row_of.is_none()).collect();
+    others.sort_by_key(|p| (Some(&p.space_id) != space.as_ref(), std::cmp::Reverse(p.updated_at)));
+    // (Each: its block, its name, the title of its page, whether it is the first table there.)
+    let mut tables: Vec<(Id, String, String, bool)> = here.iter().enumerate().map(|(n, (id, t))| (id.clone(), t.name.trim().to_string(), pages.get(page_id).map(|p| p.title.trim().to_string()).unwrap_or_default(), n == 0)).collect();
+    for p in others {
+        for (n, b) in all.get(&p.id).into_iter().flatten().filter(|b| b.kind == BlockKind::Table).enumerate() {
+            tables.push((b.id.clone(), Table::parse(&b.data).name.trim().to_string(), p.title.trim().to_string(), n == 0));
+        }
+    }
+    for b in lines.iter_mut().skip(first).filter(|b| b.kind == BlockKind::Table) {
+        let mut table = Table::parse(&b.data);
+        let mut changed = false;
+        let relations: Vec<usize> = (0..table.columns()).filter(|&c| table.kind(c) == Kind::Relation).collect();
+        for c in relations {
+            let from = table.column(c).from.trim().to_string();
+            if from.is_empty() {
+                notes.push(format!("The relation column “{}” of {} names no table, so the person must choose one. Write the name of the table whose rows it names after relation, as relation Companies.", table.heading(c), table.called()));
+                continue;
+            }
+            if is_table(&from) {
+                continue;
+            }
+            let kept = was(&b.id, &table.heading(c)).filter(|old| is_table(old) && table_name(pages, all, old).is_some_and(|n| n.to_lowercase() == from.to_lowercase()));
+            if let Some(old) = kept {
+                table.set_from(c, &old);
+                changed = true;
+                continue;
+            }
+            let same = |a: &str| a.to_lowercase() == from.to_lowercase();
+            let found = tables.iter().find(|(id, name, ..)| same(name) && *id != b.id).or_else(|| tables.iter().find(|(id, _, title, first)| *first && same(title) && *id != b.id));
+            match found {
+                Some((id, ..)) => table.set_from(c, id),
+                None => {
+                    let named: Vec<String> = tables.iter().filter(|(id, name, ..)| !name.is_empty() && *id != b.id).take(12).map(|(_, name, ..)| format!("“{name}”")).collect();
+                    notes.push(format!(
+                        "No table is named “{from}”, so the relation column “{}” of {} names none. Make that table first (a table line <!-- table: {from} --> names it), then write this table again.{}",
+                        table.heading(c),
+                        table.called(),
+                        if named.is_empty() { String::new() } else { format!(" The tables with names: {}.", named.join(", ")) }
+                    ));
+                    table.set_from(c, "");
+                }
+            }
+            changed = true;
+        }
+        if changed {
+            b.data = table.to_data();
+        }
+    }
+    notes
+}
+
+/// After `keep_unchanged`, which keeps the old block for each line that
+/// reads the same (`merged[i]` is from `said[i]`, the blocks the Markdown
+/// was read as): what the Markdown says that such a block must take all
+/// the same. A chart is only what its Markdown says, its JSON, and it reads
+/// as its title: a chart put right (another column, another shape) with
+/// the same title stayed the old chart, and the tool said that it was done.
+///
+/// Lines side by side: the Markdown says them (`markdown::COLUMN`), and
+/// what it says is taken when it says any or the lines it was written
+/// from (`old`) had any; keep_unchanged kept the columns of the old lines,
+/// so lines could not be put side by side or under each other again.
+pub(crate) fn as_said(old: &[Block], said: &[Block], merged: &mut [Block]) {
+    for (now, said) in merged.iter_mut().zip(said) {
+        if now.kind == BlockKind::Chart && said.kind == BlockKind::Chart {
+            now.data = said.data.clone();
+            now.text = said.text.clone();
+        }
+        // The table a relation column names, by its name (a table that
+        // reads the same is kept as it was, with the table it named).
+        // `link_relations` then finds the table of that name.
+        if now.kind == BlockKind::Table && said.kind == BlockKind::Table {
+            use crate::table::{Kind, Table};
+            let told = Table::parse(&said.data);
+            let named: Vec<(String, String)> = (0..told.columns()).filter(|&c| told.kind(c) == Kind::Relation && !told.column(c).from.trim().is_empty()).map(|c| (told.heading(c), told.column(c).from)).collect();
+            if !named.is_empty() {
+                let mut table = Table::parse(&now.data);
+                for (heading, from) in named {
+                    if let Some(c) = table.find_heading(&heading).filter(|&c| table.kind(c) == Kind::Relation) {
+                        table.set_from(c, &from);
+                    }
+                }
+                now.data = table.to_data();
+            }
+        }
+    }
+    if said.iter().any(|b| b.place.col > 0) || !crate::columns::sets(old).is_empty() {
+        for (now, said) in merged.iter_mut().zip(said) {
+            now.place.col = said.place.col;
+        }
+        crate::columns::tidy(merged);
+    }
+}
+
 /// Markdown with a table that is more than a table holds is refused, with
 /// the most a table holds and what to do. (Read all the same, the columns
 /// over the most were cut and their cells lost, and the tool said that it
@@ -1972,6 +2487,11 @@ fn refuse_big_tables(markdown: &str, nothing: &str) -> Result<(), String> {
 }
 
 pub(crate) fn parse_body(pages: &HashMap<Id, Page>, markdown: &str) -> Vec<Block> {
+    lines_of(pages, markdown::unfenced(markdown))
+}
+
+/// The same, with a fence around all of it read as a code block.
+fn lines_of(pages: &HashMap<Id, Page>, markdown: &str) -> Vec<Block> {
     markdown::to_blocks(markdown)
         .into_iter()
         .map(|b| match page_link_target(&b.text) {
@@ -1984,7 +2504,7 @@ pub(crate) fn parse_body(pages: &HashMap<Id, Page>, markdown: &str) -> Vec<Block
 }
 
 /// `[Title](rune://page/<id>)` → `<id>`.
-fn page_link_target(text: &str) -> Option<Id> {
+pub(crate) fn page_link_target(text: &str) -> Option<Id> {
     let t = text.trim();
     if !t.starts_with('[') || !t.ends_with(')') {
         return None;
@@ -2007,14 +2527,18 @@ pub(crate) fn render_body_with(pages: &HashMap<Id, Page>, all: Option<&HashMap<I
     let as_text = |b: &Block, text: String| {
         let mut t = Block::text(text);
         t.indent = b.indent;
+        t.place.col = b.place.col;
         t
     };
     let converted: Vec<Block> = blocks
         .iter()
         .map(|b| match b.kind {
-            BlockKind::Heading1 => as_text(b, format!("# {}", b.text)),
-            BlockKind::Heading2 => as_text(b, format!("## {}", b.text)),
-            BlockKind::Heading3 => as_text(b, format!("### {}", b.text)),
+            // (A line break in a heading: the lines after it with room
+            // before them, read back as more of the heading, see `markdown::read`.)
+            BlockKind::Heading1 | BlockKind::Heading2 | BlockKind::Heading3 => {
+                let marks = "#".repeat(crate::model::heading_level(b.kind).unwrap_or(1) as usize);
+                as_text(b, format!("{marks} {}", b.text.replace('\n', &format!("\n{}  ", "  ".repeat(b.indent as usize)))))
+            }
             BlockKind::PageLink => {
                 let target = b.target.clone().unwrap_or_default();
                 let title = match pages.get(&target) {
@@ -2034,6 +2558,13 @@ pub(crate) fn render_body_with(pages: &HashMap<Id, Page>, all: Option<&HashMap<I
                     let mut table = crate::table::Table::parse(&b.data);
                     table.beside = b.place.beside;
                     crate::state::roll_up(pages, all, &b.id, &mut table);
+                    let relations: Vec<usize> = (0..table.columns()).filter(|&c| table.kind(c) == crate::table::Kind::Relation).collect();
+                    for c in relations {
+                        let from = table.column(c).from;
+                        if let Some(name) = table_name(pages, all, &from) {
+                            table.from_names.insert(from, name);
+                        }
+                    }
                     as_text(b, table.to_markdown(""))
                 }
                 None => as_text(b, crate::markdown::table_markdown(b, "")),
@@ -2847,7 +3378,8 @@ mod tests {
 
         let (page, err) = call(&mut s, "read_page", json!({ "page_id": parent }));
         assert!(!err);
-        assert!(page.contains("title: \"Trip plan\"") && page.contains("icon: ✈️"), "{page}");
+        // (Kept as the icon Rune draws for it.)
+        assert!(page.contains("title: \"Trip plan\"") && page.contains("icon: plane:blue"), "{page}");
         assert!(!page.contains("# Trip plan\n"), "title heading should be stripped: {page}");
         assert!(page.contains("## Checklist") && page.contains("- [ ] Passport") && page.contains("- [x] Tickets"), "{page}");
         assert!(page.contains("```rust\nfn main() {}\n```"), "{page}");
@@ -2927,5 +3459,434 @@ mod tests {
         let text = "Some text with Needle inside";
         let lower = text.to_lowercase();
         assert!(snippet_around(text, &lower, lower.find("needle").unwrap()).contains("Needle"));
+    }
+
+    #[test]
+    fn what_the_markdown_could_not_say_comes_back_in_the_answer_to_put_right() {
+        let mut s = server();
+        // As a capable AI writes it, with the slips seen most: an empty line
+        // before the comment lines, the two in the other order, a kind of
+        // Notion's, a colour rule with "=", a formula with a column that is
+        // not there, a chart of the wrong shape word and a chart of a column
+        // its table does not have.
+        let md = [
+            "| Item | Price | Qty | Total | Paid |",
+            "| --- | --- | --- | --- | --- |",
+            "| Tea | 4 | 2 |  |  |",
+            "",
+            "<!-- table: Invoice | icon gift:green | colour Paid = yes green | sort Price down -->",
+            "<!-- columns: text | currency | number sum | formula USD sum = Price * Qty * Tax | checkbox -->",
+            "",
+            "```chart",
+            "{\"shape\": \"donut\", \"x\": \"Item\"}",
+            "```",
+            "",
+            "```chart",
+            "{\"shape\": \"bars\", \"x\": \"Item\", \"y\": \"Amount\"}",
+            "```",
+            "",
+            "<!-- a note to myself -->",
+        ]
+        .join("\n");
+        let (made, err) = call(&mut s, "create_page", json!({ "title": "Invoice", "markdown": md }));
+        assert!(!err, "{made}");
+        let answer = json_of(&made);
+        let check: Vec<String> = answer["check"].as_array().expect("a check").iter().map(|n| n.as_str().unwrap().to_string()).collect();
+        let has = |words: &[&str]| check.iter().any(|n| words.iter().all(|w| n.contains(w)));
+        assert!(has(&["“Price”", "“currency”", "which Rune does not know", "number USD"]), "{check:?}");
+        assert!(has(&["“colour Paid = yes green”", "was not understood", "Item, Price, Qty, Total, Paid"]), "{check:?}");
+        assert!(has(&["formula of the column “Total”", "no column \"Tax\"", "round"]), "{check:?}");
+        assert!(has(&["chart block could not be read", "donut", "bars, line, pie, ring or days"]), "{check:?}");
+        assert!(has(&["\"y\": “Amount”", "no such column", "Item, Price"]), "{check:?}");
+        assert!(has(&["<!-- a note to myself -->", "under no table"]), "{check:?}");
+        assert!(answer["to_do"].as_str().unwrap().contains("read_page"), "{made}");
+        // The comment lines were read all the same, after the empty line and in that order.
+        let id = answer["id"].as_str().unwrap().to_string();
+        let (page, _) = call(&mut s, "read_page", json!({ "page_id": id }));
+        assert!(page.contains("<!-- columns: text | text currency | number sum | formula USD sum = Price * Qty * Tax | checkbox -->"), "{page}");
+        assert!(page.contains("<!-- table: Invoice | icon gift:green | sort Price down -->"), "{page}");
+        // Put right, the same tool says nothing more; and what read_page
+        // gives is taken back with no note.
+        let fixed = md
+            .replace("colour Paid = yes green", "color Paid is ticked green")
+            .replace("| currency |", "| number USD |")
+            .replace(" * Tax", "")
+            .replace("donut", "pie")
+            .replace("\"y\": \"Amount\"", "\"y\": \"Total\"")
+            .replace("<!-- a note to myself -->", "");
+        let (done, err) = call(&mut s, "replace_page_content", json!({ "page_id": id, "markdown": fixed }));
+        assert!(!err && json_of(&done).get("check").is_none(), "{done}");
+        let (page, _) = call(&mut s, "read_page", json!({ "page_id": id }));
+        let body = page.split("---\n\n").nth(1).unwrap().to_string();
+        let (again, _) = call(&mut s, "replace_page_content", json!({ "page_id": id, "markdown": body }));
+        assert!(json_of(&again).get("check").is_none(), "{again}");
+        let (after, _) = call(&mut s, "read_page", json!({ "page_id": id }));
+        assert_eq!(after.split("---\n\n").nth(1), page.split("---\n\n").nth(1));
+        // A chart of another page that has no table, by its title.
+        let (more, _) = call(&mut s, "append_to_page", json!({ "page_id": id, "markdown": "```chart\n{\"shape\": \"line\", \"from\": \"Run log\"}\n```" }));
+        assert!(json_of(&more)["check"][0].as_str().unwrap().contains("no page called “Run log” has one"), "{more}");
+    }
+
+    #[test]
+    fn a_page_icon_is_one_that_rune_draws() {
+        let mut s = server();
+        let icon_of = |s: &mut Server, id: &str| {
+            let (page, _) = call(s, "read_page", json!({ "page_id": id }));
+            page.lines().find_map(|l| l.strip_prefix("icon: ")).unwrap().to_string()
+        };
+        // By its name and colour, by its name alone, and an emoji that Rune has.
+        for (given, kept) in [("book:blue", "book:blue"), ("Plane", "plane:gray"), ("💡", "lightbulb:yellow")] {
+            let (made, err) = call(&mut s, "create_page", json!({ "title": given, "icon": given }));
+            assert!(!err && json_of(&made).get("check").is_none(), "{made}");
+            let id = json_of(&made)["id"].as_str().unwrap().to_string();
+            assert_eq!(icon_of(&mut s, &id), kept);
+        }
+        // An emoji Rune has no icon for showed as a gray page: the page is
+        // made with none, and the answer says what Rune has.
+        let (made, err) = call(&mut s, "create_page", json!({ "title": "Workouts", "icon": "🏋️" }));
+        assert!(!err, "{made}");
+        let note = json_of(&made)["check"][0].as_str().unwrap().to_string();
+        assert!(note.contains("no icon “🏋️”") && note.contains("flame") && note.contains("update_page"), "{note}");
+        let id = json_of(&made)["id"].as_str().unwrap().to_string();
+        assert_eq!(icon_of(&mut s, &id), "none");
+        // update_page refuses it, and changes nothing.
+        let (said, err) = call(&mut s, "update_page", json!({ "page_id": id, "title": "Gym", "icon": "🏋️" }));
+        assert!(err && said.contains("Nothing was changed"), "{said}");
+        let (page, _) = call(&mut s, "read_page", json!({ "page_id": id }));
+        assert!(page.contains("title: \"Workouts\""), "{page}");
+        let (_, err) = call(&mut s, "update_page", json!({ "page_id": id, "icon": "flame:orange" }));
+        assert!(!err);
+        assert_eq!(icon_of(&mut s, &id), "flame:orange");
+        // The names the tool's words list are the icons a page can have.
+        let tools = tool_definitions();
+        let words = tools.as_array().unwrap().iter().find(|t| t["name"] == "create_page").unwrap()["inputSchema"]["properties"]["icon"]["description"].as_str().unwrap().to_string();
+        let listed = words.split("NAME: ").nth(1).unwrap().split(';').next().unwrap().replace(" or ", ", ");
+        assert_eq!(listed.split(", ").collect::<Vec<_>>(), crate::ui::icons::PAGE_ICONS.to_vec());
+    }
+
+    #[test]
+    fn lines_side_by_side_are_made_kept_and_put_under_each_other_again() {
+        let mut s = server();
+        // A week planner as an AI writes it: two sets of columns.
+        let md = "Plan the week.\n\n<!-- column -->\n## Monday\n- [ ] Gym\n<!-- column -->\n## Tuesday\n- [ ] Read\n  - Chapter 3\n<!-- column -->\n## Wednesday\n- [ ] Call Sam\n<!-- end columns -->\n\n<!-- column 1 -->\n## Thursday\n<!-- column 2 -->\n## Friday\n- [ ] Ship\n<!-- /columns -->\n\nNotes under it.";
+        let (made, err) = call(&mut s, "create_page", json!({ "title": "Week", "markdown": md }));
+        assert!(!err && json_of(&made).get("check").is_none(), "{made}");
+        let id = json_of(&made)["id"].as_str().unwrap().to_string();
+        let cols = |s: &Server| -> Vec<(String, u8)> {
+            let (_, blocks) = s.load().unwrap();
+            blocks[&id].iter().map(|b| (b.plain_text(), b.place.col)).collect()
+        };
+        let want = |pairs: &[(&str, u8)]| pairs.iter().map(|(t, c)| (t.to_string(), *c)).collect::<Vec<_>>();
+        let planner = want(&[("Plan the week.", 0), ("Monday", 1), ("Gym", 1), ("Tuesday", 2), ("Read", 2), ("Chapter 3", 2), ("Wednesday", 3), ("Call Sam", 3), ("Thursday", 1), ("Friday", 2), ("Ship", 2), ("Notes under it.", 0)]);
+        assert_eq!(cols(&s), planner);
+        let (_, blocks) = s.load().unwrap();
+        assert_eq!(crate::columns::sets(&blocks[&id]).len(), 2);
+        // read_page says them as they were written, and gives back changes nothing.
+        let (page, _) = call(&mut s, "read_page", json!({ "page_id": id }));
+        let body = page.split("---\n\n").nth(1).unwrap().to_string();
+        assert!(body.contains("Plan the week.\n\n<!-- column -->\n\n## Monday\n\n- [ ] Gym\n\n<!-- column -->\n\n## Tuesday"), "{body}");
+        assert!(body.contains("- [ ] Call Sam\n\n<!-- end columns -->\n\n<!-- column -->\n\n## Thursday\n\n<!-- column -->\n\n## Friday\n\n- [ ] Ship\n\n<!-- end columns -->\n\nNotes under it."), "{body}");
+        let (_, err) = call(&mut s, "replace_page_content", json!({ "page_id": id, "markdown": body }));
+        assert!(!err);
+        assert_eq!(cols(&s), planner);
+        // A to-do changed in a column stays in its column.
+        let (_, err) = call(&mut s, "replace_page_content", json!({ "page_id": id, "markdown": body.replace("- [ ] Read", "- [x] Read a book") }));
+        assert!(!err);
+        assert_eq!(cols(&s)[4], ("Read a book".to_string(), 2));
+        assert_eq!(cols(&s)[7], ("Call Sam".to_string(), 3));
+        // Written with no marks, the lines are under each other again.
+        let (page, _) = call(&mut s, "read_page", json!({ "page_id": id }));
+        let plain = page.split("---\n\n").nth(1).unwrap().lines().filter(|l| !l.starts_with("<!-- column") && !l.starts_with("<!-- end")).collect::<Vec<_>>().join("\n");
+        let (_, err) = call(&mut s, "replace_page_content", json!({ "page_id": id, "markdown": plain }));
+        assert!(!err);
+        assert!(cols(&s).iter().all(|(_, c)| *c == 0), "{:?}", cols(&s));
+        // A page with no columns, rewritten with no marks, keeps none (and gains none).
+        let (_, err) = call(&mut s, "append_to_page", json!({ "page_id": id, "markdown": "<!-- column -->\nLeft\n<!-- column -->\nRight\n<!-- end columns -->" }));
+        assert!(!err);
+        let last: Vec<(String, u8)> = cols(&s).into_iter().rev().take(2).collect();
+        assert_eq!(last, want(&[("Right", 2), ("Left", 1)]));
+    }
+
+    #[test]
+    fn a_relation_names_its_table_by_its_name() {
+        let mut s = server();
+        let block_of = |s: &Server, page: &str, n: usize| {
+            let (_, blocks) = s.load().unwrap();
+            blocks[page].iter().filter(|b| b.kind == BlockKind::Table).nth(n).unwrap().clone()
+        };
+        let (made, _) = call(&mut s, "create_page", json!({ "title": "Companies", "markdown": "| Company | Town |\n| --- | --- |\n| Acme | Leeds |\n| Globex | York |\n<!-- columns: text | text -->\n<!-- table: Companies | icon briefcase:blue -->" }));
+        let companies = json_of(&made)["id"].as_str().unwrap().to_string();
+        let firms = block_of(&s, &companies, 0).id;
+        // A contact list linked to its companies, in one call, as an AI writes it.
+        let contacts_md = "| Name | Email | Company |\n| --- | --- | --- |\n| Ann | ann@acme.com | Acme |\n| Bo | bo@globex.com | Globex |\n<!-- columns: text | email | relation Companies -->\n<!-- table: Contacts | icon smile:green -->";
+        let (made, err) = call(&mut s, "create_page", json!({ "title": "Contacts", "markdown": contacts_md }));
+        assert!(!err && json_of(&made).get("check").is_none(), "{made}");
+        let contacts = json_of(&made)["id"].as_str().unwrap().to_string();
+        let table = crate::table::Table::parse(&block_of(&s, &contacts, 0).data);
+        assert_eq!(table.column(2).from, firms, "the column names the table Companies");
+        // read_page says it by the table's name, and given back it changes nothing.
+        let (page, _) = call(&mut s, "read_page", json!({ "page_id": contacts }));
+        assert!(page.contains("<!-- columns: text | email | relation Companies -->"), "{page}");
+        let body = page.split("---\n\n").nth(1).unwrap().to_string();
+        let before = s.load().unwrap();
+        let (again, _) = call(&mut s, "replace_page_content", json!({ "page_id": contacts, "markdown": body }));
+        assert!(json_of(&again).get("check").is_none(), "{again}");
+        assert!(s.load().unwrap().1[&contacts] == before.1[&contacts]);
+        // A name no table has: the column names none, and the answer says what to do.
+        let (made, _) = call(&mut s, "create_page", json!({ "title": "Deals", "markdown": "| Deal | Client |\n| --- | --- |\n| Big one | Initech |\n<!-- columns: text | relation Clients -->" }));
+        let note = json_of(&made)["check"][0].as_str().unwrap().to_string();
+        assert!(note.contains("No table is named “Clients”") && note.contains("“Companies”") && note.contains("“Contacts”"), "{note}");
+        let deals = json_of(&made)["id"].as_str().unwrap().to_string();
+        assert_eq!(crate::table::Table::parse(&block_of(&s, &deals, 0).data).column(1).from, "");
+        let (page, _) = call(&mut s, "read_page", json!({ "page_id": deals }));
+        assert!(page.contains("<!-- columns: text | relation -->"), "{page}");
+        // Put right, with the same rows (the table reads the same but for its relation): it names Companies.
+        let (fixed, _) = call(&mut s, "replace_page_content", json!({ "page_id": deals, "markdown": "| Deal | Client |\n| --- | --- |\n| Big one | Initech |\n<!-- columns: text | relation Companies -->" }));
+        assert!(json_of(&fixed).get("check").is_none(), "{fixed}");
+        assert_eq!(crate::table::Table::parse(&block_of(&s, &deals, 0).data).column(1).from, firms);
+        // A table of the same page, and one with no name by the title of its page.
+        let (made, _) = call(&mut s, "create_page", json!({ "title": "Books", "markdown": "| Title | Author |\n| --- | --- |\n| Emma | Austen |\n<!-- columns: text | relation Authors -->\n<!-- table: Books -->\n\n| Author | Born |\n| --- | --- |\n| Austen | 1775 |\n<!-- table: Authors -->\n\n| Shelf | Firm |\n| --- | --- |\n| Top | Acme |\n<!-- columns: text | relation Companies -->" }));
+        assert!(json_of(&made).get("check").is_none(), "{made}");
+        let books = json_of(&made)["id"].as_str().unwrap().to_string();
+        assert_eq!(crate::table::Table::parse(&block_of(&s, &books, 0).data).column(1).from, block_of(&s, &books, 1).id);
+        let (made, _) = call(&mut s, "create_page", json!({ "title": "Towns", "markdown": "| Town |\n| --- |\n| Leeds |" }));
+        let towns = json_of(&made)["id"].as_str().unwrap().to_string();
+        let (_, err) = call(&mut s, "append_to_page", json!({ "page_id": books, "markdown": "| Trip | Where |\n| --- | --- |\n| Spring | Leeds |\n<!-- columns: text | relation Towns -->" }));
+        assert!(!err);
+        assert_eq!(crate::table::Table::parse(&block_of(&s, &books, 3).data).column(1).from, block_of(&s, &towns, 0).id);
+        let (page, _) = call(&mut s, "read_page", json!({ "page_id": books }));
+        assert!(page.contains("relation Towns -->") && page.contains("relation Authors -->"), "{page}");
+    }
+
+    #[test]
+    fn the_ai_writes_the_page_of_a_row() {
+        let mut s = server();
+        // A recipe book: a table of recipes, each with its own page.
+        let (made, _) = call(&mut s, "create_page", json!({ "title": "Recipes", "markdown": "| Recipe | Minutes |\n| --- | --- |\n| Pancakes | 20 |\n| Soup | 40 |\n<!-- columns: text | number min average -->\n<!-- table: Recipes | gallery -->" }));
+        let book = json_of(&made)["id"].as_str().unwrap().to_string();
+        let steps = "## Ingredients\n- Flour\n- Milk\n\n## Steps\n1. Mix\n2. Fry";
+        let (said, err) = call(&mut s, "update_table_row", json!({ "page_id": book, "match": { "Recipe": "Pancakes" }, "page": steps }));
+        assert!(!err && json_of(&said).get("check").is_none(), "{said}");
+        let pancakes = json_of(&said)["row_page_id"].as_str().expect("the id of the row's page").to_string();
+        let (page, _) = call(&mut s, "read_page", json!({ "page_id": pancakes }));
+        assert!(page.contains("title: \"Pancakes\"") && page.contains(&format!("parent_id: {book}")) && page.contains("## Ingredients\n\n- Flour") && page.contains("2. Fry"), "{page}");
+        // It is the page of that row (the one the row opens), not a sub-page in the list.
+        let (pages, blocks) = s.load().unwrap();
+        let block = blocks[&book].iter().find(|b| b.kind == BlockKind::Table).unwrap();
+        let table = crate::table::Table::parse(&block.data);
+        assert_eq!(pages[&pancakes].row_of, Some(format!("{}/{}", block.id, table.row_id(1).unwrap())));
+        assert!(table.row_id(2).is_some(), "every row goes by a name of its own now");
+        let (list, _) = call(&mut s, "list_pages", json!({ "parent_id": book }));
+        assert!(!list.contains("Pancakes"), "{list}");
+        // Written again, it is the same page with the new words.
+        let (said, _) = call(&mut s, "update_table_row", json!({ "page_id": book, "row": 1, "values": { "Minutes": "25" }, "page": format!("{steps}\n3. Serve") }));
+        assert_eq!(json_of(&said)["row_page_id"].as_str(), Some(pancakes.as_str()));
+        let (page, _) = call(&mut s, "read_page", json!({ "page_id": pancakes }));
+        assert!(page.contains("3. Serve"), "{page}");
+        assert_eq!(s.load().unwrap().0.values().filter(|p| p.row_of.is_some()).count(), 1);
+        // A new row with its page in one call; and a row with no page says none.
+        let (said, err) = call(&mut s, "add_table_row", json!({ "page_id": book, "values": { "Recipe": "Salad", "Minutes": "10" }, "page": "## Steps\n1. Chop" }));
+        assert!(!err && json_of(&said)["row_page_id"].is_string(), "{said}");
+        let (said, _) = call(&mut s, "update_table_row", json!({ "page_id": book, "match": { "Recipe": "Soup" }, "values": { "Minutes": "45" } }));
+        assert!(json_of(&said).get("row_page_id").is_none(), "{said}");
+
+        // A budget: the page of a day made from the template, then with its
+        // spending, which the month adds up.
+        let md = "| Date | Budget | Spent |\n| --- | --- | --- |\n| 2026-11-01 | $60.00 |  |\n<!-- columns: date | number USD sum | rollup Amount sum USD sum -->\n<!-- table: November | page: Item | Amount number USD sum -->";
+        let (made, _) = call(&mut s, "create_page", json!({ "title": "November", "markdown": md }));
+        let month = json_of(&made)["id"].as_str().unwrap().to_string();
+        let (said, _) = call(&mut s, "update_table_row", json!({ "page_id": month, "row": 1, "page": "" }));
+        let day = json_of(&said)["row_page_id"].as_str().unwrap().to_string();
+        let (page, _) = call(&mut s, "read_page", json!({ "page_id": day }));
+        assert!(page.contains("| Item | Amount |") && page.contains("number USD sum"), "made from the template: {page}");
+        let (_, err) = call(&mut s, "update_table_row", json!({ "page_id": month, "row": 1, "page": "| Item | Amount |\n| --- | --- |\n| Lunch | $12.50 |\n| Cinema | $8.00 |\n<!-- columns: text | number USD sum -->" }));
+        assert!(!err);
+        let (page, _) = call(&mut s, "read_page", json!({ "page_id": month }));
+        assert!(page.contains("| $60.00 | $20.50 |"), "the month adds up the day: {page}");
+    }
+
+    #[test]
+    fn a_callout_made_and_changed_by_the_ai_stays_a_callout() {
+        let mut s = server();
+        let (made, _) = call(&mut s, "create_page", json!({ "title": "Trip", "markdown": "> 💡 Book early.\n\n> [!warning:red] Passport!" }));
+        let id = json_of(&made)["id"].as_str().unwrap().to_string();
+        let kinds = |s: &Server| -> Vec<(BlockKind, Option<String>, String)> { s.load().unwrap().1[&id].iter().map(|b| (b.kind, b.icon.clone(), b.text.clone())).collect() };
+        assert_eq!(kinds(&s), vec![(BlockKind::Callout, Some("lightbulb:yellow".into()), "Book early.".into()), (BlockKind::Callout, Some("warning:red".into()), "Passport!".into())]);
+        let (page, _) = call(&mut s, "read_page", json!({ "page_id": id }));
+        assert!(page.contains("> [!lightbulb:yellow] Book early.\n\n> [!warning:red] Passport!"), "{page}");
+        // Its words changed (else it was kept as it was): a callout still, with its icon.
+        let (_, err) = call(&mut s, "replace_page_content", json!({ "page_id": id, "markdown": "> [!lightbulb:yellow] Book in May.\n\n> [!warning:red] Passport!" }));
+        assert!(!err);
+        assert_eq!(kinds(&s)[0], (BlockKind::Callout, Some("lightbulb:yellow".into()), "Book in May.".into()));
+    }
+
+    #[test]
+    fn a_page_gets_its_cover_and_face_and_an_event_its_space_and_page() {
+        let mut s = server();
+        let (made, err) = call(&mut s, "create_page", json!({ "title": "Lisbon trip", "cover": "sea", "font": "serif", "icon": "plane:blue" }));
+        assert!(!err, "{made}");
+        let trip = json_of(&made)["id"].as_str().unwrap().to_string();
+        let (page, _) = call(&mut s, "read_page", json!({ "page_id": trip }));
+        assert!(page.contains("icon: plane:blue\ncover: sea\nfont: serif\n"), "{page}");
+        let (said, err) = call(&mut s, "update_page", json!({ "page_id": trip, "cover": "pink" }));
+        assert!(err && said.contains("no cover “pink”") && said.contains("meadow"), "{said}");
+        let (_, err) = call(&mut s, "update_page", json!({ "page_id": trip, "cover": "", "font": "sans" }));
+        assert!(!err);
+        let (pages, _) = s.load().unwrap();
+        assert_eq!((pages[&trip].cover.clone(), pages[&trip].font.clone()), (None, String::new()));
+        // The covers the tool's words list are the app's.
+        let tools = tool_definitions();
+        let words = tools.as_array().unwrap().iter().find(|t| t["name"] == "create_page").unwrap()["inputSchema"]["properties"]["cover"]["description"].as_str().unwrap().to_string();
+        let listed = words.split(": ").nth(1).unwrap().trim_end_matches('.').replace(" or ", ", ");
+        assert_eq!(listed.split(", ").collect::<Vec<_>>(), crate::model::covers::PRESETS.iter().map(|(id, ..)| *id).collect::<Vec<_>>());
+
+        // A flight with the trip's page, in the trip's space though another is open.
+        let work = Space::new("Work", "blue", 0.0);
+        let own = Space::new("Personal", "green", 1.0);
+        s.store.save_space(&work).unwrap();
+        s.store.save_space(&own).unwrap();
+        let (_, err) = call(&mut s, "update_page", json!({ "page_id": trip, "space": "Personal" }));
+        assert!(!err);
+        s.store.set_setting("space", &work.id).unwrap();
+        let (made, err) = call(&mut s, "create_event", json!({ "title": "Flight to Lisbon", "start": "2031-05-02T09:40", "page_id": trip }));
+        assert!(!err, "{made}");
+        let event = &json_of(&made)["created"];
+        assert_eq!((event["space"].as_str(), event["notes_page"].as_str()), (Some("Personal"), Some(format!("{LINK_PREFIX}{trip}").as_str())));
+        // Named for a space; and the page taken away again.
+        let (made, _) = call(&mut s, "create_event", json!({ "title": "Stand-up", "start": "2031-05-03T09:00", "space": "work" }));
+        let standup = json_of(&made)["created"]["id"].as_str().unwrap().to_string();
+        assert_eq!(json_of(&made)["created"]["space"], "Work");
+        let (_, err) = call(&mut s, "update_event", json!({ "event_id": standup, "page_id": trip }));
+        assert!(!err);
+        let (said, _) = call(&mut s, "update_event", json!({ "event_id": standup, "page_id": "" }));
+        assert!(json_of(&said)["updated"]["notes_page"].is_null(), "{said}");
+        let (said, err) = call(&mut s, "create_event", json!({ "title": "Lost", "start": "2031-05-03T09:00", "page_id": "nope" }));
+        assert!(err && said.contains("No page with id nope"), "{said}");
+    }
+
+    #[test]
+    fn the_examples_the_instructions_give_are_taken_with_no_note() {
+        let mut s = server();
+        // A win rate and overdue rows red, as the instructions say them.
+        let md = "| Task | Due | Status | Done |\n| --- | --- | --- | --- |\n| Old | 2020-01-01 | Done |  |\n| New | 2099-01-01 | Waiting |  |\n<!-- columns: text | date | choice {Done:green; Waiting:yellow} | formula percent average = if(Status = \"Done\", 100, 0) -->\n<!-- table: Tasks | color Due below today red -->";
+        let (made, err) = call(&mut s, "create_page", json!({ "title": "Tasks", "markdown": md }));
+        assert!(!err && json_of(&made).get("check").is_none(), "{made}");
+        let id = json_of(&made)["id"].as_str().unwrap().to_string();
+        let (_, blocks) = s.load().unwrap();
+        let table = crate::table::Table::parse(&blocks[&id].iter().find(|b| b.kind == BlockKind::Table).unwrap().data);
+        assert_eq!((table.shown(1, 3), table.shown(2, 3)), ("100%".to_string(), "0%".to_string()));
+        assert_eq!((table.color(1), table.color(2)), (Some("red"), None), "the day that has passed is red");
+        // The budget the instructions give, each line on its own line, reads with no note.
+        let budget = INSTRUCTIONS.split("For example a budget for a month, a row for each day of the month: ").nth(1).unwrap().split(" (each line on its own line)").next().unwrap().replace("| | ", "|\n| ").replace(" <!--", "\n<!--");
+        assert!(markdown::notes(&budget).is_empty(), "{budget}: {:?}", markdown::notes(&budget));
+    }
+
+    #[test]
+    fn the_icons_the_instructions_name_are_icons_rune_draws() {
+        let list = INSTRUCTIONS.split("(icon NAME:COLOUR, NAME one of ").nth(1).unwrap().split(';').next().unwrap();
+        for name in list.split(", ") {
+            assert!(crate::ui::icons::paths(name.trim()).is_some(), "“{name}” is no icon of Rune's");
+        }
+        assert!(crate::ui::icons::known_icon(crate::model::CALLOUT_ICON).is_some());
+        assert!(crate::ui::icons::known_icon("lightbulb:yellow").is_some());
+    }
+
+    #[test]
+    fn the_page_of_a_row_with_the_persons_lines_is_not_written_over() {
+        let mut s = server();
+        let md = "| Date | Budget | Spent |\n| --- | --- | --- |\n| 2026-11-01 | $60.00 |  |\n<!-- columns: date | number USD sum | rollup Amount sum USD sum -->\n<!-- table: November | page: Item | Amount number USD sum -->";
+        let (made, _) = call(&mut s, "create_page", json!({ "title": "November", "markdown": md }));
+        let month = json_of(&made)["id"].as_str().unwrap().to_string();
+        let (said, _) = call(&mut s, "update_table_row", json!({ "page_id": month, "row": 1, "page": "" }));
+        let day = json_of(&said)["row_page_id"].as_str().unwrap().to_string();
+        // The person writes a line of their own in the day's page, in Rune.
+        let mut lines = s.load().unwrap().1[&day].clone();
+        lines.push(Block::text("Coffee and the bus"));
+        s.save_blocks(&day, &lines).unwrap();
+        let spending = "| Item | Amount |\n| --- | --- |\n| Lunch | $12.50 |\n<!-- columns: text | number USD sum -->";
+        let (said, err) = call(&mut s, "update_table_row", json!({ "page_id": month, "row": 1, "values": { "Budget": "$70.00" }, "page": spending }));
+        assert!(err && said.contains("not written over") && said.contains(&day), "{said}");
+        assert!(s.load().unwrap().1[&day].iter().any(|b| b.text == "Coffee and the bus"), "the person's line is there");
+        let (page, _) = call(&mut s, "read_page", json!({ "page_id": month }));
+        assert!(page.contains("$60.00") && !page.contains("$70.00"), "nothing was changed: {page}");
+        // Read first, the AI may write it: it has seen what is there.
+        call(&mut s, "read_page", json!({ "page_id": day }));
+        let (said, err) = call(&mut s, "update_table_row", json!({ "page_id": month, "row": 1, "page": spending }));
+        assert!(!err, "{said}");
+        let (page, _) = call(&mut s, "read_page", json!({ "page_id": day }));
+        assert!(page.contains("Lunch"), "{page}");
+    }
+
+    #[test]
+    fn a_rewrite_keeps_the_table_a_relation_names() {
+        let mut s = server();
+        let table_of = |s: &Server, page: &str| crate::table::Table::parse(&s.load().unwrap().1[page].iter().find(|b| b.kind == BlockKind::Table).unwrap().data);
+        let firms_md = "| Company |\n| --- |\n| Acme |\n<!-- table: Companies -->";
+        let (made, _) = call(&mut s, "create_page", json!({ "title": "Firms", "markdown": firms_md }));
+        let firms = json_of(&made)["id"].as_str().unwrap().to_string();
+        let firms_table = s.load().unwrap().1[&firms].iter().find(|b| b.kind == BlockKind::Table).unwrap().id.clone();
+        let (made, _) = call(&mut s, "create_page", json!({ "title": "Contacts", "markdown": "| Name | Company |\n| --- | --- |\n| Ann | Acme |\n<!-- columns: text | relation Companies -->" }));
+        let contacts = json_of(&made)["id"].as_str().unwrap().to_string();
+        assert_eq!(table_of(&s, &contacts).column(1).from, firms_table);
+        // A newer table of the same name (a copy of the page), then a rewrite of the contacts.
+        call(&mut s, "create_page", json!({ "title": "Firms copy", "markdown": firms_md }));
+        let (page, _) = call(&mut s, "read_page", json!({ "page_id": contacts }));
+        let body = page.split("---\n\n").nth(1).unwrap().replace("| Ann |", "| Anna |");
+        let (_, err) = call(&mut s, "replace_page_content", json!({ "page_id": contacts, "markdown": body }));
+        assert!(!err);
+        assert_eq!(table_of(&s, &contacts).column(1).from, firms_table, "it names the table it named");
+        // Its table in the trash: still that table.
+        call(&mut s, "trash_page", json!({ "page_id": firms }));
+        let (page, _) = call(&mut s, "read_page", json!({ "page_id": contacts }));
+        let body = page.split("---\n\n").nth(1).unwrap().replace("| Anna |", "| Ann |");
+        let (_, err) = call(&mut s, "replace_page_content", json!({ "page_id": contacts, "markdown": body }));
+        assert!(!err);
+        assert_eq!(table_of(&s, &contacts).column(1).from, firms_table);
+    }
+
+    #[test]
+    fn a_rewrite_keeps_what_the_person_wrote_as_it_is() {
+        let mut s = server();
+        let (made, _) = call(&mut s, "create_page", json!({ "title": "Ideas", "markdown": "x" }));
+        let id = json_of(&made)["id"].as_str().unwrap().to_string();
+        // A quote that starts with an emoji and an item that starts with a triangle.
+        let mut code = Block::new(BlockKind::Code, "# Draft\n\nHello");
+        code.language = Some("markdown".into());
+        s.save_blocks(&id, &[Block::new(BlockKind::Quote, "💡 idea"), Block::new(BlockKind::Bulleted, "▸ Next"), Block::text("End")]).unwrap();
+        let kinds = |s: &Server, id: &str| -> Vec<(BlockKind, String)> { s.load().unwrap().1[id].iter().map(|b| (b.kind, b.text.clone())).collect() };
+        let before = kinds(&s, &id);
+        let (page, _) = call(&mut s, "read_page", json!({ "page_id": id }));
+        let body = page.split("---\n\n").nth(1).unwrap().replace("End", "The end");
+        let (_, err) = call(&mut s, "replace_page_content", json!({ "page_id": id, "markdown": body }));
+        assert!(!err);
+        assert_eq!(kinds(&s, &id)[..2], before[..2], "still a quote and a bullet");
+        // A page that is one code block of Markdown stays that code block.
+        s.save_blocks(&id, &[code.clone()]).unwrap();
+        let (page, _) = call(&mut s, "read_page", json!({ "page_id": id }));
+        let body = page.split("---\n\n").nth(1).unwrap().replace("Hello", "Hello again");
+        let (_, err) = call(&mut s, "replace_page_content", json!({ "page_id": id, "markdown": body }));
+        assert!(!err);
+        assert_eq!(kinds(&s, &id), vec![(BlockKind::Code, "# Draft\n\nHello again".to_string())]);
+        // A line written in the place of a closed toggle is not that toggle.
+        let mut toggle = Block::new(BlockKind::Toggle, "Plans");
+        toggle.collapsed = true;
+        toggle.tint = "red".into();
+        s.save_blocks(&id, &[Block::text("Intro"), toggle.clone(), Block::text("End")]).unwrap();
+        call(&mut s, "read_page", json!({ "page_id": id }));
+        let (_, err) = call(&mut s, "replace_page_content", json!({ "page_id": id, "markdown": "Intro\n\nA new thought\n\nEnd" }));
+        assert!(!err);
+        let (_, blocks) = s.load().unwrap();
+        let line = blocks[&id].iter().find(|b| b.text == "A new thought").unwrap();
+        assert!(line.id != toggle.id && line.tint.is_empty() && !line.collapsed, "{line:?}");
+    }
+
+    #[test]
+    fn an_append_asks_nothing_about_what_was_there() {
+        let mut s = server();
+        let (made, _) = call(&mut s, "create_page", json!({ "title": "Deals", "markdown": "| Deal | Client |\n| --- | --- |\n| Big one | Initech |\n<!-- columns: text | relation Clients -->" }));
+        assert!(json_of(&made).get("check").is_some(), "{made}");
+        let deals = json_of(&made)["id"].as_str().unwrap().to_string();
+        let (said, err) = call(&mut s, "append_to_page", json!({ "page_id": deals, "markdown": "One more line." }));
+        assert!(!err && json_of(&said).get("check").is_none(), "{said}");
     }
 }

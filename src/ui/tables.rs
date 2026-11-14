@@ -804,6 +804,11 @@ pub fn group_label(kind: Kind, heading: &str, value: &str) -> String {
     match (kind, value.is_empty()) {
         (Kind::Checkbox, _) => if checked(value) { "Ticked" } else { "Not ticked" }.to_string(),
         (_, true) => format!("No {heading}"),
+        // (A day as its cells show it: "Sun 15 Nov", the year only when it is another.)
+        (Kind::Date, false) => {
+            let today = crate::when::today();
+            crate::table::date::When::read(value, today, true).map_or_else(|| value.to_string(), |w| w.shown(today))
+        }
         (_, false) => value.to_string(),
     }
 }

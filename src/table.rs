@@ -503,6 +503,13 @@ pub struct Table {
     /// writes the table as Markdown. Never kept in the table's data.
     #[serde(skip)]
     pub page: Option<Box<Table>>,
+    /// The names of the tables that its relation columns name, by their
+    /// blocks (`Column::from`): the connector gives them when it writes the
+    /// table as Markdown, as `relation Companies`. Read back, `from` holds
+    /// that name until the connector finds its table (see
+    /// `mcp::link_relations`). Never kept in the table's data.
+    #[serde(skip)]
+    pub from_names: std::collections::HashMap<String, String>,
     #[serde(skip)]
     parsed: Parsed,
 }
@@ -517,7 +524,7 @@ impl Default for Table {
 impl Table {
     /// A plain table of these rows.
     pub fn of(rows: Vec<Vec<String>>) -> Table {
-        let mut table = Table { rows, columns: Vec::new(), name: String::new(), icon: String::new(), info: Vec::new(), view: View::default(), template: None, beside: false, names: Default::default(), rolled: Default::default(), page: None, parsed: Parsed::default() };
+        let mut table = Table { rows, columns: Vec::new(), name: String::new(), icon: String::new(), info: Vec::new(), view: View::default(), template: None, beside: false, names: Default::default(), rolled: Default::default(), page: None, from_names: Default::default(), parsed: Parsed::default() };
         table.square();
         table
     }
@@ -1519,8 +1526,10 @@ impl Table {
         let mut values: Vec<f64> = rows.iter().filter_map(|&r| self.value(r, c)).collect();
         let (low, high) = (values.iter().copied().reduce(f64::min), values.iter().copied().reduce(f64::max));
         let text = match total {
+            // (The rows with anything in them: by the cells of its column,
+            // a day with only its date said "0 rows" under one row.)
             Total::Count => {
-                let n = rows.iter().filter(|&&r| filled(r)).count();
+                let n = rows.iter().filter(|&&r| !self.is_blank(r)).count();
                 if self.view.filter.is_empty() {
                     format!("{n} {}", if n == 1 { "row" } else { "rows" })
                 } else {
@@ -1740,6 +1749,39 @@ impl Table {
         out.join("\n")
     }
 
+    /// The table as a note names it: by its name, else by its headings.
+    pub fn called(&self) -> String {
+        match self.name.trim() {
+            "" => format!("the table of {}", (0..self.columns().min(3)).map(|c| format!("“{}”", self.heading(c))).collect::<Vec<_>>().join(", ")),
+            name => format!("the table “{name}”"),
+        }
+    }
+
+    /// Notes on the columns line of this table, just read (`said`: its
+    /// parts): a kind Rune does not know, parts that are not one for each
+    /// column, a formula that does not work. (See `from_markdown_noting`.)
+    fn note_columns(&self, said: &[String], notes: &mut Vec<String>) {
+        if !said.is_empty() && said.len() != self.columns() {
+            notes.push(format!("The columns line of {} has {} parts for {} columns: write one part for each column, in their order.", self.called(), said.len(), self.columns()));
+        }
+        let kinds = Kind::ALL.iter().map(|k| k.name()).collect::<Vec<_>>().join(", ");
+        for (c, part) in said.iter().enumerate().take(self.columns()) {
+            if let Some(word) = part.split_whitespace().next().filter(|w| Kind::parse(w).is_none()) {
+                notes.push(format!("The column “{}” of {} has the kind “{word}”, which Rune does not know, so it is a text column. The kinds: {kinds} (money is number USD, a web address is link).", self.heading(c), self.called()));
+            }
+        }
+        for c in 0..self.columns() {
+            if let Some(why) = self.formula_error(c) {
+                notes.push(format!(
+                    "The formula of the column “{}” of {} does not work: {why} A formula names the other columns of its row by their headings ([Unit price] for a heading of more words) and can use + - * / %, comparisons, and, or, not, and the functions {}.",
+                    self.heading(c),
+                    self.called(),
+                    crate::formula::FUNCTION_NAMES.join(", ")
+                ));
+            }
+        }
+    }
+
     /// What the `page:` part of a table line says of this table, the one the
     /// page of each row starts with: each column's heading and then its kind,
     /// between bars ("Item text | Amount number USD sum").
@@ -1758,6 +1800,10 @@ impl Table {
         if col.kind == Kind::Rollup {
             words.push(bars(&name_in_line(&col.of, false)).replace("-->", "- ->"));
             words.push(col.way.name().to_string());
+        }
+        // (The name of the table it names, when the writer was given it.)
+        if let Some(name) = self.from_names.get(&col.from).filter(|_| col.kind == Kind::Relation) {
+            words.push(bars(&name_in_line(name, false)).replace("-->", "- ->"));
         }
         words.extend((!col.format.is_empty()).then(|| col.format.clone()));
         // (A unit that the line would read as something else, "min"
@@ -1799,6 +1845,15 @@ impl Table {
     /// read for this table all the same: left where they are, this table had
     /// no kinds, no name and no view, and the lines showed as words.
     pub fn from_markdown(lines: &[&str]) -> Option<(Table, usize)> {
+        Table::from_markdown_noting(lines, &mut Vec::new())
+    }
+
+    /// The same, and in `notes` a plain sentence for each thing its comment
+    /// lines say that could not be read (a kind Rune does not know, a part
+    /// of the table line, a formula), for an AI tool to put right. (Read in
+    /// silence, a column became text, a colour rule was left out, and the
+    /// tool said that it worked.)
+    pub fn from_markdown_noting(lines: &[&str], notes: &mut Vec<String>) -> Option<(Table, usize)> {
         let cells = pipe_cells;
         let header = cells(lines.first()?)?;
         let rule = cells(lines.get(1)?)?;
@@ -1819,13 +1874,26 @@ impl Table {
         let over = lines[taken..].iter().take_while(|line| cells(line).is_some()).count();
         let rows_end = taken;
         taken += over;
-        let comment = |at: usize, word: &str| -> Option<String> { Some(lines.get(at)?.trim().strip_prefix("<!--")?.strip_suffix("-->")?.trim().strip_prefix(word)?.to_string()) };
-        if let Some(described) = comment(taken, "columns:") {
-            table.columns = split_bars(&described).iter().map(|part| read_column(part)).collect();
-            taken += 1;
+        // The two comment lines under it, in either order, and after an
+        // empty line too. (An AI tool often writes one between: the line
+        // then showed as words on the page, and the table had no kinds.)
+        let (mut described, mut said_line) = (None, None);
+        loop {
+            let next = (taken..lines.len()).find(|&at| !lines[at].trim().is_empty()).unwrap_or(lines.len());
+            let Some(text) = lines.get(next).and_then(|l| l.trim().strip_prefix("<!--")?.strip_suffix("-->")).map(str::trim) else { break };
+            match (text.strip_prefix("columns:"), text.strip_prefix("table:")) {
+                (Some(words), _) if described.is_none() => described = Some(words.trim().to_string()),
+                (_, Some(words)) if said_line.is_none() => said_line = Some(words.trim().to_string()),
+                _ => break,
+            }
+            taken = next + 1;
+        }
+        let kinds_said: Vec<String> = described.as_deref().map(split_bars).unwrap_or_default();
+        if !kinds_said.is_empty() {
+            table.columns = kinds_said.iter().map(|part| read_column(part)).collect();
         }
         let mut view_parts = Vec::new();
-        if let Some(said) = comment(taken, "table:") {
+        if let Some(said) = said_line {
             // (The `page:` part is last: the parts after it are its columns.)
             let mut page: Option<Vec<String>> = None;
             for (i, part) in split_bars(&said).into_iter().enumerate() {
@@ -1844,17 +1912,26 @@ impl Table {
                     None => view_parts.push(part),
                 }
             }
+            if page.as_ref().is_some_and(|columns| page_table(columns).is_none()) {
+                notes.push("The page: part of a table line names no columns, so the pages of its rows start empty. Write each column of their table after it, between bars: page: Item | Amount number USD sum.".to_string());
+            }
             table.page = page.and_then(|columns| page_table(&columns)).map(Box::new);
-            taken += 1;
         }
         table.square();
         // What the line says of the view, once the columns are known.
         if !view_parts.is_empty() {
             for part in &view_parts {
-                table.read_view_part(part);
+                if !table.read_view_part(part) {
+                    notes.push(format!(
+                        "The part “{part}” of the table line of {} was not understood, so it was left out. Columns go by their headings ({}); a test is is, is not, has, has not, above, below, at least, at most, is empty, is filled, is ticked or is not ticked.",
+                        table.called(),
+                        (0..table.columns()).map(|c| table.heading(c)).collect::<Vec<_>>().join(", ")
+                    ));
+                }
             }
             table.change_view(|_| {});
         }
+        table.note_columns(&kinds_said, notes);
         // What is worked out is not kept in cells.
         let worked_out: Vec<usize> = (0..table.columns()).filter(|&c| table.kind(c).is_worked_out()).collect();
         for row in table.rows.iter_mut().skip(1) {
@@ -1891,7 +1968,18 @@ impl Table {
     /// the rows, the template, how numbers show), by the headings of the
     /// columns and the names of the rows.
     pub fn adopt(&mut self, old: &Table) {
-        let to: Vec<Option<usize>> = (0..old.columns()).map(|c| self.find_heading(&old.heading(c))).collect();
+        let mut to: Vec<Option<usize>> = (0..old.columns()).map(|c| self.find_heading(&old.heading(c))).collect();
+        // With as many columns as before, a column with another heading is
+        // the column that was at its place, renamed. (Else what Markdown
+        // cannot say of it, its places, the table of a relation, its cell
+        // of the template, went with the old name.)
+        if self.columns() == old.columns() {
+            for c in 0..to.len() {
+                if to[c].is_none() && !to.contains(&Some(c)) {
+                    to[c] = Some(c);
+                }
+            }
+        }
         let new_place = |c: usize| to.get(c).copied().flatten();
         if self.name.is_empty() {
             self.name = old.name.clone();
@@ -1916,6 +2004,17 @@ impl Table {
                     if col.from.is_empty() {
                         col.from = was.from;
                     }
+                }
+            }
+        }
+        // (What is worked out is not kept in cells. A table read with no
+        // line of kinds took the numbers shown there as typed: with the
+        // kinds it had, they go, as they go from a table read with them.)
+        if bare {
+            let worked: Vec<usize> = (0..self.columns()).filter(|&c| self.kind(c).is_worked_out()).collect();
+            for c in worked {
+                for row in self.rows.iter_mut().skip(1) {
+                    row[c].clear();
                 }
             }
         }
@@ -2035,6 +2134,13 @@ fn read_column(words: &str) -> Column {
     if words.first().is_some_and(|w| Kind::parse(w) == Some(Kind::Rollup)) {
         let (of, way, used) = read_rollup(&words[1..]);
         (col.of, col.way) = (of, way);
+        words.drain(1..1 + used);
+    }
+    // A relation says the name of the table whose rows it names: "relation
+    // Companies". (Its block is found by the connector: `mcp::link_relations`.)
+    if words.first().is_some_and(|w| Kind::parse(w) == Some(Kind::Relation)) {
+        let (from, used) = read_name(&words[1..], false);
+        col.from = from;
         words.drain(1..1 + used);
     }
     for (i, word) in words.iter().map(String::as_str).enumerate() {

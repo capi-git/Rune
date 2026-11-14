@@ -1,7 +1,7 @@
 //! Markdown in and out: typing shortcuts at the start of a block, turning AI
 //! replies into blocks, and turning a page into text for AI context.
 
-use crate::model::{Block, BlockKind};
+use crate::model::{heading_level, Block, BlockKind};
 
 /// A Markdown-style shortcut typed at the start of a text block.
 #[derive(Debug, PartialEq)]
@@ -95,36 +95,77 @@ pub fn mention_query(text: &str) -> Option<(usize, bool, String)> {
     }
 }
 
+/// What an AI sent as one code block of Markdown (some wrap all that they
+/// write so): the Markdown inside it. Anything else, as it is. (Read as it
+/// came, a page written again was one code block: every line, table and
+/// picture's place went, and with the tables the pages of their rows.)
+pub fn unfenced(md: &str) -> &str {
+    let t = md.trim();
+    let Some((first, rest)) = t.split_once('\n') else { return md };
+    let fence = first.bytes().take_while(|b| *b == b'`').count();
+    let lang = first[fence..].trim();
+    if fence < 3 || !(lang.eq_ignore_ascii_case("markdown") || lang.eq_ignore_ascii_case("md")) {
+        return md;
+    }
+    match rest.trim_end().rsplit_once('\n') {
+        Some((inner, last)) if last.trim().len() == fence && last.trim().bytes().all(|b| b == b'`') => inner,
+        _ => md,
+    }
+}
+
 /// Convert Markdown (for example an AI reply) into blocks.
 pub fn to_blocks(md: &str) -> Vec<Block> {
-    read(md, false, &mut Vec::new(), &mut Vec::new())
+    read(md, false, &mut Found::default())
 }
 
 /// The tables of this Markdown whose table line says what the page of each
 /// row starts with (`page:`), in their order, each with that table in
 /// `Table::page`. (It is not kept in the blocks: see `state::row_template`.)
 pub fn said_pages(md: &str) -> Vec<crate::table::Table> {
-    let mut said = Vec::new();
-    read(md, false, &mut Vec::new(), &mut said);
-    said
+    let mut found = Found::default();
+    read(md, false, &mut found);
+    found.said
 }
 
 /// The tables of this Markdown that are more than a table holds: for each,
 /// its columns and its rows under the header (see `Table::over_most`).
 pub fn tables_over_most(md: &str) -> Vec<(usize, usize)> {
-    let mut over = Vec::new();
-    read(md, false, &mut over, &mut Vec::new());
-    over
+    let mut found = Found::default();
+    read(md, false, &mut found);
+    found.over
+}
+
+/// What in this Markdown could not be read as it was meant, one plain
+/// sentence each: a part of a table's comment lines, a chart, a comment
+/// line under no table. (Read in silence, it became words on the page, a
+/// text column or nothing, and the AI tool that wrote it never knew.)
+pub fn notes(md: &str) -> Vec<String> {
+    let mut found = Found::default();
+    read(md, false, &mut found);
+    found.notes
 }
 
 /// As `to_blocks`, for words that are pasted: each line is a line of the
 /// page. (In a Markdown file, lines one under the other are one paragraph;
 /// a list of names copied from another program is not.)
 pub fn to_blocks_by_line(md: &str) -> Vec<Block> {
-    read(md, true, &mut Vec::new(), &mut Vec::new())
+    read(md, true, &mut Found::default())
 }
 
-fn read<'a>(md: &'a str, each_line: bool, over: &mut Vec<(usize, usize)>, said: &mut Vec<crate::table::Table>) -> Vec<Block> {
+/// What reading Markdown finds besides the blocks.
+#[derive(Default)]
+struct Found {
+    /// Tables over what a table holds (see `tables_over_most`).
+    over: Vec<(usize, usize)>,
+    /// Tables that say what the page of each row starts with (see `said_pages`).
+    said: Vec<crate::table::Table>,
+    /// What could not be read (see `notes`).
+    notes: Vec<String>,
+}
+
+fn read<'a>(md: &'a str, each_line: bool, found: &mut Found) -> Vec<Block> {
+    // (A mark of the order of bytes that some programs put first is no word.)
+    let md = md.strip_prefix('\u{FEFF}').unwrap_or(md);
     let mut out: Vec<Block> = Vec::new();
     let mut paragraph: Vec<String> = Vec::new();
     let mut quote: Vec<String> = Vec::new();
@@ -132,14 +173,31 @@ fn read<'a>(md: &'a str, each_line: bool, over: &mut Vec<(usize, usize)>, said: 
     // How many backticks opened the code block: a longer fence holds lines
     // that begin with three (see the writer), and ends only at its like.
     let mut fence = 3;
+    // Where a column of lines side by side starts (true) or the set of
+    // columns ends (false): before the block at that number.
+    let mut marks: Vec<(usize, bool)> = Vec::new();
 
-    fn flush(out: &mut Vec<Block>, paragraph: &mut Vec<String>, quote: &mut Vec<String>) {
+    // How deep the paragraph being read stands (see where it starts).
+    let mut para_indent = 0u8;
+    // The list item or heading read last, while the lines under it with
+    // more room before them are more of its words (see the writer): its
+    // place in `out`, its room, and its words as written.
+    let mut item: Option<(usize, usize, String)> = None;
+
+    fn flush(out: &mut Vec<Block>, paragraph: &mut Vec<String>, quote: &mut Vec<String>, indent: u8) {
         if !paragraph.is_empty() {
-            out.push(Block::text(clean_inline(&paragraph.join("\n"))));
+            out.push(Block::text(clean_inline(&paragraph.join("\n"))).with_indent(indent));
             paragraph.clear();
         }
         if !quote.is_empty() {
-            out.push(Block::new(BlockKind::Quote, clean_inline(&quote.join("\n"))));
+            match callout_of(quote) {
+                Some((icon, text)) => {
+                    let mut b = Block::new(BlockKind::Callout, clean_inline(&text));
+                    b.icon = Some(icon);
+                    out.push(b);
+                }
+                None => out.push(Block::new(BlockKind::Quote, clean_inline(unguarded(&quote.join("\n"))))),
+            }
             quote.clear();
         }
     }
@@ -165,16 +223,23 @@ fn read<'a>(md: &'a str, each_line: bool, over: &mut Vec<(usize, usize)>, said: 
                 None => (&all[at..], 0),
             };
             if lead == 0 {
-                over.extend(crate::table::Table::over_most(lines));
+                found.over.extend(crate::table::Table::over_most(lines));
             }
-            if let Some((table, taken)) = crate::table::Table::from_markdown(lines) {
-                flush(&mut out, &mut paragraph, &mut quote);
+            // (The rows over the most come again under the same comment
+            // lines: what those say is noted once.)
+            let mut notes = Vec::new();
+            if let Some((table, taken)) = crate::table::Table::from_markdown_noting(lines, &mut notes) {
+                if lead == 0 {
+                    found.notes.extend(notes);
+                }
+                flush(&mut out, &mut paragraph, &mut quote, para_indent);
+                item = None;
                 let mut block = Block::new(BlockKind::Table, table.plain_text());
                 block.data = table.to_data();
                 block.place.beside = table.beside;
                 out.push(block);
                 if table.page.is_some() {
-                    said.push(table);
+                    found.said.push(table);
                 }
                 skip = taken - lead - 1;
                 let cut = taken == crate::table::MOST_ROWS + 1 && lines.get(taken).is_some_and(|l| l.trim_start().starts_with('|'));
@@ -186,7 +251,11 @@ fn read<'a>(md: &'a str, each_line: bool, over: &mut Vec<(usize, usize)>, said: 
             let ends = if fence > 3 { raw.trim().len() >= fence && raw.trim().bytes().all(|b| b == b'`') } else { raw.trim_start().starts_with("```") };
             if ends {
                 let text = lines.join("\n");
-                let chart = lang.as_deref().filter(|l| l.eq_ignore_ascii_case("chart")).and_then(|_| crate::chart::Chart::from_markdown(&text));
+                let is_chart = lang.as_deref().is_some_and(|l| l.eq_ignore_ascii_case("chart"));
+                let chart = is_chart.then(|| crate::chart::Chart::from_markdown(&text)).flatten();
+                if is_chart && chart.is_none() {
+                    found.notes.push(crate::chart::Chart::why_not(&text));
+                }
                 match chart {
                     Some(chart) => {
                         let mut b = Block::new(BlockKind::Chart, chart.title.trim());
@@ -211,59 +280,100 @@ fn read<'a>(md: &'a str, each_line: bool, over: &mut Vec<(usize, usize)>, said: 
         let indent = (leading / 2).min(4) as u8;
         let line = raw.trim();
 
+        if let Some(starts) = column_mark(line) {
+            flush(&mut out, &mut paragraph, &mut quote, para_indent);
+            item = None;
+            marks.push((out.len(), starts));
+            continue;
+        }
         if line.starts_with("```") {
-            flush(&mut out, &mut paragraph, &mut quote);
+            flush(&mut out, &mut paragraph, &mut quote, para_indent);
+            item = None;
             fence = line.bytes().take_while(|b| *b == b'`').count();
             let lang = line[fence..].trim();
             code = Some(((!lang.is_empty()).then(|| lang.to_string()), Vec::new()));
             continue;
         }
         if line.is_empty() {
-            flush(&mut out, &mut paragraph, &mut quote);
+            flush(&mut out, &mut paragraph, &mut quote, para_indent);
+            item = None;
             continue;
         }
         if let Some(rest) = line.strip_prefix('>') {
+            item = None;
             if !paragraph.is_empty() {
-                flush(&mut out, &mut paragraph, &mut quote);
+                flush(&mut out, &mut paragraph, &mut quote, para_indent);
             }
             quote.push(rest.trim_start().to_string());
             continue;
         }
 
         let block = if line == "---" || line == "***" || line == "___" {
-            Some(Block::new(BlockKind::Divider, ""))
+            Some((Block::new(BlockKind::Divider, ""), ""))
         } else if let Some(rest) = line.strip_prefix("#### ").or_else(|| line.strip_prefix("### ")) {
-            Some(Block::new(BlockKind::Heading3, clean_inline(rest)))
+            Some((Block::new(BlockKind::Heading3, clean_inline(rest)), rest))
         } else if let Some(rest) = line.strip_prefix("## ") {
-            Some(Block::new(BlockKind::Heading2, clean_inline(rest)))
+            Some((Block::new(BlockKind::Heading2, clean_inline(rest)), rest))
         } else if let Some(rest) = line.strip_prefix("# ") {
-            Some(Block::new(BlockKind::Heading1, clean_inline(rest)))
+            Some((Block::new(BlockKind::Heading1, clean_inline(rest)), rest))
         } else if let Some((checked, rest)) = todo_item(line) {
-            let (words, remind) = split_remind(rest);
-            let (words, due) = split_due(words);
-            // (A time with no day before it is no reminder: the words stay as written.)
-            let (rest, due) = if remind.is_some() && due.is_none() { split_due(rest) } else { (words, due) };
-            let mut b = Block::new(BlockKind::Todo, clean_inline(rest)).with_indent(indent);
+            let (text, due, remind) = todo_parts(rest);
+            let mut b = Block::new(BlockKind::Todo, text).with_indent(indent);
             b.checked = checked;
             b.due = due;
-            // (A time with no day is no reminder: it needs a day.)
-            b.remind = remind.filter(|_| due.is_some());
-            Some(b)
+            b.remind = remind;
+            Some((b, rest))
         } else if let Some(rest) = ["- ", "* ", "+ ", "• "].iter().find_map(|p| line.strip_prefix(p)) {
-            Some(Block::new(BlockKind::Bulleted, clean_inline(rest)).with_indent(indent))
+            // A toggle: an item that starts with its triangle (see `TOGGLE_MARK`).
+            match TOGGLE_MARKS.iter().find_map(|m| rest.strip_prefix(m)) {
+                Some(words) => Some((Block::new(BlockKind::Toggle, clean_inline(words.trim_start())).with_indent(indent), words.trim_start())),
+                None => Some((Block::new(BlockKind::Bulleted, clean_inline(unguarded(rest))).with_indent(indent), unguarded(rest))),
+            }
         } else {
             numbered_prefix(line)
-                .map(|len| Block::new(BlockKind::Numbered, clean_inline(&line[len..])).with_indent(indent))
+                .map(|len| (Block::new(BlockKind::Numbered, clean_inline(&line[len..])).with_indent(indent), &line[len..]))
         };
 
         match block {
-            Some(b) => {
-                flush(&mut out, &mut paragraph, &mut quote);
+            Some((mut b, rest)) => {
+                flush(&mut out, &mut paragraph, &mut quote, para_indent);
+                // (A heading stands as deep as the line it is written under
+                // allows, as a paragraph does: see below.)
+                if !each_line && heading_level(b.kind).is_some() {
+                    b.indent = indent.min(out.last().map_or(0, |l| l.indent.saturating_add(1)));
+                }
+                if b.kind != BlockKind::Divider {
+                    item = Some((out.len(), leading, rest.to_string()));
+                }
                 out.push(b);
             }
             None => {
+                // More words of the list item or heading above, on a line
+                // of their own with more room before it (a line break in it,
+                // typed with Shift-Return; see the writer).
+                if let Some((at, _, words)) = item.as_mut().filter(|(_, room, _)| leading > *room && !each_line && paragraph.is_empty() && quote.is_empty()) {
+                    words.push('\n');
+                    words.push_str(line);
+                    let b = &mut out[*at];
+                    match b.kind {
+                        BlockKind::Todo => (b.text, b.due, b.remind) = todo_parts(words),
+                        _ => b.text = clean_inline(words),
+                    }
+                    continue;
+                }
+                item = None;
                 if !quote.is_empty() || (each_line && !paragraph.is_empty()) {
-                    flush(&mut out, &mut paragraph, &mut quote);
+                    flush(&mut out, &mut paragraph, &mut quote, para_indent);
+                }
+                // A paragraph with room before it stands under the line
+                // above it, as deep as that allows (the writer puts the room
+                // of its depth before it, as before a list item). (In pasted
+                // words each line is a line of the page, at the edge.)
+                if paragraph.is_empty() {
+                    para_indent = if each_line { 0 } else { indent.min(out.last().map_or(0, |l| l.indent.saturating_add(1))) };
+                }
+                if line.starts_with("<!--") && line.ends_with("-->") {
+                    found.notes.push(format!("The line “{line}” is under no table, so it shows as words on the page. A table's comment lines go right under its last row."));
                 }
                 paragraph.push(line.to_string());
             }
@@ -274,8 +384,118 @@ fn read<'a>(md: &'a str, each_line: bool, over: &mut Vec<(usize, usize)>, said: 
         b.language = lang;
         out.push(b);
     }
-    flush(&mut out, &mut paragraph, &mut quote);
+    flush(&mut out, &mut paragraph, &mut quote, para_indent);
+    if !marks.is_empty() {
+        put_in_columns(&mut out, &marks);
+    }
     out
+}
+
+/// A quote that is a callout (a box with an icon): its first line starts
+/// with the icon in `[!…]` (as the writer writes it: `> [!lightbulb:yellow]
+/// Book early`; GitHub's and Obsidian's `[!TIP]`, `[!WARNING]` too) or with
+/// an emoji Rune has an icon for (`> 💡 Book early`). The icon, as a page
+/// keeps it, and the words. (A callout came back as a quote, and the AI
+/// could make none.)
+fn callout_of(lines: &[String]) -> Option<(String, String)> {
+    let first = lines.first()?.trim_start();
+    let (icon, rest) = match first.strip_prefix("[!").and_then(|r| r.split_once(']')) {
+        Some((said, rest)) => (callout_icon(said.trim()), rest),
+        None => {
+            let (word, rest) = first.split_once(char::is_whitespace).unwrap_or((first, ""));
+            let emoji = !word.is_empty() && word.chars().all(|c| !c.is_alphanumeric() && !c.is_ascii());
+            (emoji.then(|| crate::ui::icons::known_icon(word)).flatten().map(|(n, c)| crate::ui::icons::format_icon(&n, &c))?, rest)
+        }
+    };
+    let text: Vec<&str> = std::iter::once(rest.trim()).filter(|t| !t.is_empty()).chain(lines[1..].iter().map(String::as_str)).collect();
+    Some((icon, text.join("\n")))
+}
+
+/// The icon a callout's `[!…]` says: an icon of Rune's (`lightbulb:yellow`,
+/// or an emoji it has), or a kind of GitHub's and Obsidian's; else Rune's
+/// first icon for a callout.
+fn callout_icon(said: &str) -> String {
+    let low = said.to_lowercase();
+    let kind = match low.as_str() {
+        "note" | "info" => Some("info:blue"),
+        "tip" | "hint" => Some("lightbulb:yellow"),
+        "important" => Some("star:purple"),
+        "warning" | "attention" => Some("warning:orange"),
+        "caution" | "danger" | "error" => Some("warning:red"),
+        "success" | "check" | "done" => Some("check-circle:green"),
+        "question" | "faq" => Some("chat:blue"),
+        _ => None,
+    };
+    kind.map(str::to_string)
+        .or_else(|| crate::ui::icons::known_icon(&low).map(|(n, c)| crate::ui::icons::format_icon(&n, &c)))
+        .unwrap_or_else(|| crate::model::CALLOUT_ICON.to_string())
+}
+
+/// The line that starts each column of lines that stand side by side, and
+/// the line that ends the set (see `columns`):
+///
+/// ```text
+/// <!-- column -->
+/// ## Monday
+/// <!-- column -->
+/// ## Tuesday
+/// <!-- end columns -->
+/// ```
+pub const COLUMN: &str = "<!-- column -->";
+pub const COLUMNS_END: &str = "<!-- end columns -->";
+
+/// Whether a line is a mark of columns: `Some(true)` for one that starts a
+/// column, `Some(false)` for one that ends the set. Read with some give
+/// ("column 2", "/columns"), as an AI tool may write them.
+fn column_mark(line: &str) -> Option<bool> {
+    let words = line.strip_prefix("<!--")?.strip_suffix("-->")?.trim().to_lowercase();
+    let words = words.split_whitespace().collect::<Vec<_>>();
+    match words.as_slice() {
+        ["column" | "columns"] => Some(true),
+        ["column", n] if n.chars().all(|c| c.is_ascii_digit()) => Some(true),
+        ["end", "column" | "columns"] | ["columns" | "column", "end"] | ["/column" | "/columns"] => Some(false),
+        _ => None,
+    }
+}
+
+/// Give each block the column the marks put it in (see `column_mark`), as
+/// a page keeps it (`Place::col`, see `columns`).
+fn put_in_columns(blocks: &mut [Block], marks: &[(usize, bool)]) {
+    let mut col = 0u8;
+    let mut next = marks.iter().peekable();
+    for (i, b) in blocks.iter_mut().enumerate() {
+        while let Some(&(_, starts)) = next.next_if(|(at, _)| *at <= i) {
+            col = if starts { (col + 1).min(crate::columns::MOST) } else { 0 };
+        }
+        b.place.col = col;
+    }
+    crate::columns::tidy(blocks);
+}
+
+/// A toggle (a line whose lines under it fold away) is a list item that
+/// starts with a triangle: "- ▸ What is Rune?", its lines indented under
+/// it. (Markdown had none: a toggle came back as a bullet, and the AI
+/// could make none.) The other triangles are read too.
+pub const TOGGLE_MARK: &str = "▸";
+const TOGGLE_MARKS: [&str; 4] = ["▸ ", "▶ ", "▸\u{FE0F} ", "▶\u{FE0F} "];
+
+/// The words of a quote or a list item as the writer keeps them from
+/// being read as more than that: a quote whose words start with an emoji
+/// Rune has an icon for (`> 💡 idea`) was read back as a callout, and an
+/// item that starts with a triangle (`- ▸ Next`) as a toggle; so the
+/// writer puts a backslash before it (see `render`).
+fn guarded(text: &str, reads_as_more: bool) -> String {
+    if reads_as_more { format!("\\{text}") } else { text.to_string() }
+}
+
+/// The words with that backslash taken away. (Before any other sign that
+/// is not ASCII: in the stored form a backslash of the person's is
+/// written twice.)
+fn unguarded(text: &str) -> &str {
+    match text.strip_prefix('\\') {
+        Some(rest) if rest.chars().next().is_some_and(|c| !c.is_ascii()) => rest,
+        _ => text,
+    }
 }
 
 /// The sign before the day a to-do is due, at the end of its line:
@@ -302,6 +522,17 @@ fn split_due(text: &str) -> (&str, Option<chrono::NaiveDate>) {
         Some(day) => (text[..at].trim_end(), Some(day)),
         None => (text, None),
     }
+}
+
+/// A to-do's words as written after its box: its words, and the day and
+/// the reminder at their end.
+fn todo_parts(rest: &str) -> (String, Option<chrono::NaiveDate>, Option<chrono::NaiveTime>) {
+    let (words, remind) = split_remind(rest);
+    let (words, due) = split_due(words);
+    // (A time with no day before it is no reminder: the words stay as written.)
+    let (words, due) = if remind.is_some() && due.is_none() { split_due(rest) } else { (words, due) };
+    // (A time with no day is no reminder: it needs a day.)
+    (clean_inline(words), due, remind.filter(|_| due.is_some()))
 }
 
 fn todo_item(line: &str) -> Option<(bool, &str)> {
@@ -339,30 +570,51 @@ pub fn render(title: &str, blocks: &[Block], mut special: impl FnMut(&Block) -> 
         out.push_str(&format!("# {}\n\n", title.trim()));
     }
     let numbers = crate::model::list_numbers(blocks);
-    for (b, n) in blocks.iter().zip(numbers) {
+    // Lines side by side: a mark before each column, and one after the set.
+    let layout = crate::columns::layout(blocks);
+    let mut was: Option<(usize, usize)> = None;
+    for ((b, n), at) in blocks.iter().zip(numbers).zip(layout) {
+        if was.is_some_and(|(set, _)| at.map(|(s, _)| s) != Some(set)) {
+            out.push_str(COLUMNS_END);
+            out.push_str("\n\n");
+        }
+        if at.is_some() && at != was {
+            out.push_str(COLUMN);
+            out.push_str("\n\n");
+        }
+        was = at;
         let pad = "  ".repeat(b.indent as usize);
+        // (The lines of a list item or a heading after its first, with room
+        // before them: they are read back as more of its words, not as a
+        // paragraph of their own.)
+        let more = |text: &str| text.replace('\n', &format!("\n{pad}  "));
         let line = if let Some(line) = special(b) {
             line
         } else {
             match b.kind {
             BlockKind::Text => format!("{pad}{}", b.text),
-            BlockKind::Heading1 => format!("## {}", b.text),
-            BlockKind::Heading2 => format!("### {}", b.text),
-            BlockKind::Heading3 => format!("#### {}", b.text),
-            BlockKind::Bulleted | BlockKind::Toggle => format!("{pad}- {}", b.text),
-            BlockKind::Numbered => format!("{pad}{}. {}", n.unwrap_or(1), b.text),
+            BlockKind::Heading1 => format!("## {}", more(&b.text)),
+            BlockKind::Heading2 => format!("### {}", more(&b.text)),
+            BlockKind::Heading3 => format!("#### {}", more(&b.text)),
+            BlockKind::Bulleted => format!("{pad}- {}", guarded(&more(&b.text), TOGGLE_MARKS.iter().any(|m| b.text.starts_with(m)))),
+            BlockKind::Toggle => format!("{pad}- {TOGGLE_MARK} {}", more(&b.text)),
+            BlockKind::Numbered => format!("{pad}{}. {}", n.unwrap_or(1), more(&b.text)),
             BlockKind::Todo => {
                 let due = b.due.map(|d| format!(" {DUE_MARK} {}", d.format("%Y-%m-%d"))).unwrap_or_default()
                     + &b.remind.filter(|_| b.due.is_some()).map(|t| format!(" {REMIND_MARK} {}", t.format("%H:%M"))).unwrap_or_default();
-                format!("{pad}- [{}] {}{due}", if b.checked { "x" } else { " " }, b.text)
+                format!("{pad}- [{}] {}{due}", if b.checked { "x" } else { " " }, more(&b.text))
             }
-            BlockKind::Quote => b.text.lines().map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n"),
-            // The icon is written only when it is a sign of its own (an
-            // emoji), not the app's name for one of its icons ("lightbulb:yellow").
-            BlockKind::Callout => match b.icon.as_deref().filter(|i| !i.is_empty() && !i.is_ascii()) {
-                Some(icon) => format!("> {icon} {}", b.text),
-                None => format!("> {}", b.text),
-            },
+            BlockKind::Quote => {
+                let as_callout = b.text.chars().next().is_some_and(|c| !c.is_ascii()) && callout_of(&[b.text.lines().next().unwrap_or_default().to_string()]).is_some();
+                guarded(&b.text, as_callout).lines().map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n")
+            }
+            // With its icon, so that it is read back as a callout (see
+            // `callout_of`), and each line with its mark: a second line with
+            // none was read back as a paragraph of its own.
+            BlockKind::Callout => {
+                let icon = b.icon.as_deref().map(str::trim).filter(|i| !i.is_empty()).unwrap_or(crate::model::CALLOUT_ICON);
+                format!("> [!{}] {}", icon.replace([']', '\n'], ""), b.text.split('\n').collect::<Vec<_>>().join("\n> "))
+            }
             // (A fence longer than any run of backticks that begins a line of
             // the code: else such a line ended the block when it was read.)
             BlockKind::Code => {
@@ -383,6 +635,9 @@ pub fn render(title: &str, blocks: &[Block], mut special: impl FnMut(&Block) -> 
         };
         out.push_str(&line);
         out.push_str("\n\n");
+    }
+    if was.is_some() {
+        out.push_str(COLUMNS_END);
     }
     out.trim_end().to_string()
 }
@@ -458,6 +713,37 @@ mod tests {
         assert!(back.contains("<!-- table: Expenses | beside -->") && back.contains("<!-- table: Income | icon plus:green -->"), "{back}");
         let again = to_blocks(&back);
         assert_eq!(again.iter().map(|b| (b.kind, b.data.clone(), b.place)).collect::<Vec<_>>(), blocks.iter().map(|b| (b.kind, b.data.clone(), b.place)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn lines_with_a_line_break_and_lines_inside_others_come_back_whole() {
+        let mut todo = Block::new(BlockKind::Todo, "Pack\nthe bags");
+        todo.due = chrono::NaiveDate::from_ymd_opt(2026, 11, 20);
+        let mut callout = Block::new(BlockKind::Callout, "Two\nlines");
+        callout.icon = Some("\u{1F4A1}".into());
+        let blocks = vec![
+            Block::new(BlockKind::Bulleted, "A bullet\non two lines"),
+            Block::new(BlockKind::Bulleted, "Nested").with_indent(1),
+            Block::text("Words under it").with_indent(2),
+            todo,
+            callout,
+            Block::new(BlockKind::Heading2, "A heading\nbroken"),
+            Block::text("At the edge"),
+        ];
+        let md = from_blocks("", &blocks, |_| String::new());
+        let back = to_blocks(&md);
+        let seen = |bs: &[Block]| bs.iter().map(|b| (b.kind, b.text.clone(), b.indent, b.due)).collect::<Vec<_>>();
+        let mut want = seen(&blocks);
+        // (A callout comes back as a callout, with its icon: see `callout_of`.)
+        assert_eq!(back[4].icon.as_deref(), Some("lightbulb:yellow"));
+        // (This writer puts headings a step down: the page's name is its `#`.)
+        want[5].0 = BlockKind::Heading3;
+        assert_eq!(seen(&back), want, "{md}");
+        // A paragraph stands at most one step under the line above it; pasted lines are at the edge.
+        assert_eq!(to_blocks("Top\n\n      Deep").iter().map(|b| b.indent).collect::<Vec<_>>(), [0, 1]);
+        assert_eq!(to_blocks_by_line("  one\n  two").iter().map(|b| b.indent).collect::<Vec<_>>(), [0, 0]);
+        // A mark of the order of bytes first is no word.
+        assert_eq!(to_blocks("\u{FEFF}# Plan")[0].text, "Plan");
     }
 
     #[test]
@@ -602,5 +888,67 @@ mod tests {
         let blocks = vec![Block::new(BlockKind::Heading1, "Goals"), todo, Block::new(BlockKind::Numbered, "one")];
         let md = from_blocks("Plan", &blocks, |_| String::new());
         assert_eq!(md, "# Plan\n\n## Goals\n\n- [x] ship\n\n1. one");
+    }
+
+    #[test]
+    fn lines_side_by_side_go_to_markdown_and_back() {
+        let mut blocks = vec![Block::text("Top"), Block::new(BlockKind::Heading2, "Left"), Block::new(BlockKind::Bulleted, "a"), Block::new(BlockKind::Heading2, "Right"), Block::new(BlockKind::Todo, "b"), Block::text("Under")];
+        for (i, col) in [(1, 1), (2, 1), (3, 2), (4, 2)] {
+            blocks[i].place.col = col;
+        }
+        let md = from_blocks("", &blocks, |t| t.to_string());
+        assert_eq!(md, "Top\n\n<!-- column -->\n\n### Left\n\n- a\n\n<!-- column -->\n\n### Right\n\n- [ ] b\n\n<!-- end columns -->\n\nUnder");
+        let back = to_blocks(&md);
+        assert_eq!(back.iter().map(|b| (b.plain_text(), b.place.col)).collect::<Vec<_>>(), blocks.iter().map(|b| (b.plain_text(), b.place.col)).collect::<Vec<_>>());
+        // A page that ends in a set ends with the mark; one column alone is no set.
+        let md = from_blocks("", &blocks[..5], |t| t.to_string());
+        assert!(md.ends_with("- [ ] b\n\n<!-- end columns -->"), "{md}");
+        assert!(to_blocks("<!-- column -->\nOnly one\n<!-- end columns -->").iter().all(|b| b.place.col == 0));
+        // A fourth column goes in the third; a mark that is not one shows as it is.
+        let four = to_blocks("<!-- column -->\nA\n<!-- column -->\nB\n<!-- column -->\nC\n<!-- column -->\nD");
+        assert_eq!(four.iter().map(|b| b.place.col).collect::<Vec<_>>(), [1, 2, 3, 3]);
+        assert_eq!(to_blocks("<!-- columns: text | date -->")[0].text, "<!-- columns: text | date -->");
+    }
+
+    #[test]
+    fn a_callout_goes_to_markdown_and_back_with_its_icon() {
+        // As an AI writes one: with an emoji Rune has, with a kind of
+        // GitHub's, with Rune's own icon; a quote stays a quote.
+        let blocks = to_blocks("> 💡 Book early: prices go up.\n\n> [!WARNING]\n> Bring the **passport**.\n> And the visa.\n\n> [!plane:blue] Flight at 9.\n\n> To be or not to be.\n\n> — Hamlet");
+        let seen: Vec<(BlockKind, Option<&str>, &str)> = blocks.iter().map(|b| (b.kind, b.icon.as_deref(), b.text.as_str())).collect();
+        assert_eq!(
+            seen,
+            vec![
+                (BlockKind::Callout, Some("lightbulb:yellow"), "Book early: prices go up."),
+                (BlockKind::Callout, Some("warning:orange"), "Bring the **passport**.\nAnd the visa."),
+                (BlockKind::Callout, Some("plane:blue"), "Flight at 9."),
+                (BlockKind::Quote, None, "To be or not to be."),
+                (BlockKind::Quote, None, "— Hamlet"),
+            ]
+        );
+        // Written, each says its icon, and read back it is the same.
+        let md = from_blocks("", &blocks, |t| t.to_string());
+        assert!(md.starts_with("> [!lightbulb:yellow] Book early: prices go up.\n\n> [!warning:orange] Bring the **passport**.\n> And the visa.\n\n> [!plane:blue] Flight at 9."), "{md}");
+        let back = to_blocks(&md);
+        assert_eq!(back.iter().map(|b| (b.kind, b.icon.clone(), b.text.clone())).collect::<Vec<_>>(), blocks.iter().map(|b| (b.kind, b.icon.clone(), b.text.clone())).collect::<Vec<_>>());
+        // A callout of before, with no icon kept, or an emoji kept as its icon.
+        let mut old = Block::new(BlockKind::Callout, "Old one");
+        old.icon = None;
+        let mut legacy = Block::new(BlockKind::Callout, "Older one");
+        legacy.icon = Some("📌".into());
+        let back = to_blocks(&from_blocks("", &[old, legacy], |t| t.to_string()));
+        assert_eq!(back.iter().map(|b| (b.kind, b.icon.as_deref())).collect::<Vec<_>>(), vec![(BlockKind::Callout, Some("lightbulb:yellow")), (BlockKind::Callout, Some("pin:red"))]);
+    }
+
+    #[test]
+    fn a_toggle_goes_to_markdown_and_back() {
+        // An FAQ as an AI writes it: each question a toggle, its answer under it.
+        let blocks = to_blocks("- ▸ What is Rune?\n  - A notes app.\n- ▶ Does it sync?\n  - [ ] Ask Sam\n- A plain bullet");
+        let seen: Vec<(BlockKind, u8, &str)> = blocks.iter().map(|b| (b.kind, b.indent, b.text.as_str())).collect();
+        assert_eq!(seen, vec![(BlockKind::Toggle, 0, "What is Rune?"), (BlockKind::Bulleted, 1, "A notes app."), (BlockKind::Toggle, 0, "Does it sync?"), (BlockKind::Todo, 1, "Ask Sam"), (BlockKind::Bulleted, 0, "A plain bullet")]);
+        let md = from_blocks("", &blocks, |t| t.to_string());
+        assert!(md.starts_with("- ▸ What is Rune?\n\n  - A notes app.\n\n- ▸ Does it sync?"), "{md}");
+        let back = to_blocks(&md);
+        assert_eq!(back.iter().map(|b| (b.kind, b.indent, b.text.clone())).collect::<Vec<_>>(), blocks.iter().map(|b| (b.kind, b.indent, b.text.clone())).collect::<Vec<_>>());
     }
 }

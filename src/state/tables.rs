@@ -153,6 +153,34 @@ fn page_of(pages: &HashMap<Id, Page>, block: &str, row: &str) -> Option<(Id, boo
     pages.values().filter(|p| p.row_of.as_deref() == Some(key.as_str())).min_by_key(|p| (p.trashed, p.created_at, p.id.clone())).map(|p| (p.id.clone(), p.trashed))
 }
 
+/// The page of a row of the table `block` (`row`: what the row goes by),
+/// if it has one: its id and whether it is in the Trash.
+pub fn row_page_id(pages: &HashMap<Id, Page>, block: &str, row: &str) -> Option<(Id, bool)> {
+    page_of(pages, block, row)
+}
+
+/// The lines the page of a new row of `table` (the block `block`) starts
+/// with: those of its template's page (as new lines), else a table of what
+/// its rollup columns take from, else one empty line.
+pub fn new_row_lines(pages: &HashMap<Id, Page>, blocks: &HashMap<Id, Vec<Block>>, block: &str, table: &Table) -> Vec<Block> {
+    // (Never a template's page that is in the Trash.)
+    let template = table.template.as_ref().and_then(|_| template_page(pages, block).map(|p| p.id.clone()));
+    // With no template, the page of a row of a table with rollup columns
+    // starts with a table of what they take from.
+    let for_rollups = || {
+        let t = table_for_rollups(table)?;
+        let mut b = Block::new(BlockKind::Table, t.plain_text());
+        b.data = t.to_data();
+        Some(vec![b])
+    };
+    template
+        .and_then(|t| blocks.get(&t).cloned())
+        .filter(|lines| !lines.is_empty())
+        .map(|lines| lines.into_iter().map(|b| Block { id: new_id(), ..b }).collect())
+        .or_else(for_rollups)
+        .unwrap_or_else(|| vec![Block::text("")])
+}
+
 /// The page of a table's template that is not in the Trash, if it has one.
 fn template_page<'a>(pages: &'a HashMap<Id, Page>, block: &str) -> Option<&'a Page> {
     page_of(pages, block, TEMPLATE).filter(|(_, trashed)| !trashed).and_then(|(id, _)| pages.get(&id))
@@ -1125,22 +1153,10 @@ impl AppState {
             Some(r) => table.title(r).to_string(),
             None => "Template".to_string(),
         };
-        // (Never a template's page that is in the Trash.)
-        let template = row.and(table.template.as_ref()).and_then(|_| template_page(&self.pages.peek(), id).map(|p| p.id.clone()));
-        // With no template, the page of a row of a table with rollup
-        // columns starts with a table of what they take from.
-        let for_rollups = || {
-            let t = row.and_then(|_| table_for_rollups(&table))?;
-            let mut b = Block::new(BlockKind::Table, t.plain_text());
-            b.data = t.to_data();
-            Some(vec![b])
+        let lines: Vec<Block> = match row {
+            Some(_) => new_row_lines(&self.pages.peek(), &self.blocks.peek(), id, &table),
+            None => vec![Block::text("")],
         };
-        let lines: Vec<Block> = template
-            .and_then(|t| self.blocks.peek().get(&t).cloned())
-            .filter(|lines| !lines.is_empty())
-            .map(|lines| lines.into_iter().map(|b| Block { id: new_id(), ..b }).collect())
-            .or_else(for_rollups)
-            .unwrap_or_else(|| vec![Block::text("")]);
         let pid = new.id.clone();
         self.pages.write().insert(pid.clone(), new);
         self.blocks.write().insert(pid.clone(), lines);

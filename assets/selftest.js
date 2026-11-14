@@ -5768,6 +5768,39 @@ await run('The AI changes what is on the page', async () => {
     const said = await until(() => /put under it/.test($('.toast')?.textContent || ''), 3000);
     check('A rewrite of a line is not put over words typed in the line meanwhile: it goes under the line', item && put && said && (await until(() => !$('.ai-panel') && rows().length > linesBefore && rows().some((r) => r.includes('Wait: ') && r.includes('Teh plan is good')), 4000)), `${rows().join('|')} / ${said}`);
   }
+  // A rewrite of a to-do with a day (Improve writing): the reply takes the
+  // line's place as that to-do still, with its day. (Its words say what the
+  // stand-in AI answers.)
+  {
+    const lastLine = $$('.block-row .blk', pane()).pop();
+    lastLine.focus();
+    getSelection().selectAllChildren(lastLine);
+    getSelection().collapseToEnd();
+    const line = await nextLine(lastLine);
+    typeIn(line, '[] ');
+    const todo = await until(() => document.activeElement?.closest('.block-row.kind-todo') && document.activeElement);
+    typeIn(todo, 'Call Sam [[reply: Call Sam today]]');
+    const id = todo.closest('.block-row')?.dataset.id;
+    const row = () => $$('.block-row', pane()).find((r) => r.dataset.id === id);
+    await wait(300);
+    $('.due-chip', row())?.click();
+    const menu = await until(() => $('.due-menu.anchored'));
+    await wait(260);
+    menu && menuItem(menu, 'Today')?.click();
+    await until(() => !$('.due-menu'));
+    const blk = $('.blk', row());
+    blk.focus();
+    getSelection().selectAllChildren(blk);
+    getSelection().collapseToEnd();
+    typeIn(blk, ' /improve');
+    const item = await until(() => $$('.slash-menu .menu-item').find((i) => /Improve writing/.test(i.textContent)), 3000);
+    item?.click();
+    const put = await until(() => $$('.ai-actions button').find((b) => b.textContent === 'Replace'), 8000);
+    await wait(300);
+    put?.click();
+    const words = () => $('.blk', row())?.textContent.replace(/\u200b/g, '').trim();
+    check('A rewrite of a to-do with a day keeps the line a to-do with its day', item && put && (await until(() => !$('.ai-panel') && row()?.classList.contains('kind-todo') && words() === 'Call Sam today' && $('.due-chip', row())?.textContent.trim() === 'Today', 4000)), `${row()?.className} / ${words()} / ${$('.due-chip', row())?.textContent}`);
+  }
   // A question is answered as before: Insert, not Replace.
   T().command('ai_anywhere');
   const again = await until(() => $('#ai-input'));
@@ -6055,6 +6088,77 @@ await run('A table takes a total from the pages of its rows', async () => {
   const cost = () => cell($('.table-block', shownPane('Trips')), 1, 1)?.value;
   check('…and what is typed there shows in the row, as money', await until(() => cost() === '€120.00', 3000), `${cost()} (Trips ${shownPane('Trips') ? 'shown' : 'not shown'})`);
   await closeDay(lisbon);
+});
+
+await run('The AI builds what a person asks for in one go', async () => {
+  await oneTab();
+  const title = await newPage('Week plan');
+  key(title, 'Enter');
+  const first = await until(() => document.activeElement?.classList.contains('blk') && document.activeElement);
+  typeIn(first, 'My week.');
+  await wait(200);
+  const pane = () => shownPane('Week plan');
+  const words = (row) => row.querySelector('.blk')?.textContent.replace(/​/g, '') ?? '';
+  // The page as it shows: plain lines by their words, a set of columns as
+  // [a|b] with the lines of each column joined by commas.
+  const seen = () =>
+    [...$('.blocks', pane()).children]
+      .map((el) => (el.classList.contains('columns') ? `[${[...el.children].map((c) => $$('.block-row', c).map(words).join(',')).join('|')}]` : words(el)))
+      .filter(Boolean)
+      .join(' ');
+  const ask = async (words) => {
+    askAi();
+    const box = await until(() => $('.ai-dock #ai-input'));
+    box.value = words;
+    box.dispatchEvent(new Event('input', { bubbles: true }));
+    await until(() => $('#ai-send'));
+    key(box, 'Enter');
+  };
+  // "Plan my week in two columns": the page with its days side by side.
+  const week = ['@replace', '# Week plan', '', 'My week.', '', '<!-- column -->', '## Monday', '- [ ] Gym', '<!-- column -->', '## Tuesday', '- [ ] Read', '<!-- end columns -->', '', 'Notes.'].join('\\n');
+  await ask(`plan my week in two columns [[reply: ${week}]]`);
+  (await until(() => $('#ai-replace'), 6000))?.click();
+  check('The AI puts the days side by side, as it wrote them', await until(() => seen() === 'My week. [Monday,Gym|Tuesday,Read] Notes.', 4000), seen());
+  // Asked again on the page, it is given the columns as it wrote them, and
+  // a change in one column leaves the set as it is.
+  const again = ['@replace', '# Week plan', '', 'My week.', '', '> 💡 Plan it on Sunday.', '', '<!-- column -->', '## Monday', '- [x] Gym', '<!-- column -->', '## Tuesday', '- [ ] Read', '- [ ] Swim', '<!-- end columns -->', '', 'Notes.', '', '- ▸ Ideas', '  - Hike'].join('\\n');
+  await ask(`tick the gym, add a swim on Tuesday, a tip at the top and ideas that fold [[reply: ${again}]]`);
+  (await until(() => $('#ai-replace'), 6000))?.click();
+  check('A change in one column keeps the days side by side', await until(() => seen().startsWith('My week. Plan it on Sunday. [Monday,Gym|Tuesday,Read,Swim] Notes.'), 4000), seen());
+  const fold = $$('.block-row.kind-toggle', pane())[0];
+  const hike = $$('.block-row', pane()).find((r) => words(r) === 'Hike');
+  // (A line's step in is room inside its row.)
+  const stepIn = (row) => parseFloat(row?.style.paddingLeft || '0');
+  check('Ideas that fold are a toggle with the idea under it', fold && words(fold) === 'Ideas' && hike && stepIn(hike) > stepIn(fold), fold ? `${words(fold)} / ${hike ? `${stepIn(fold)} → ${stepIn(hike)}` : 'no Hike'}` : 'no toggle');
+  const tip = $$('.block-row.kind-callout', pane())[0];
+  check('A tip the AI writes as a quote with an emoji is a callout with that icon', tip && words(tip) === 'Plan it on Sunday.' && $('.page-ico', tip)?.getAttribute('style')?.includes('yellow'), tip ? `${words(tip)} / ${$('.page-ico', tip)?.getAttribute('style')}` : 'no callout');
+  await wait(250);
+  snap('ai-builds');
+  // "Contacts linked to their companies": two pages by the tools, the
+  // second with a column that names the first table by its name.
+  const firms = ['| Company | Town |', '| --- | --- |', '| Acme | Leeds |', '| Globex | York |', '<!-- table: Companies | icon briefcase:blue -->'].join('\n');
+  const people = ['| Name | Company |', '| --- | --- |', '| Ann | Acme |', '| Bo | Globex |', '<!-- columns: text | relation Companies -->', '<!-- table: Contacts -->'].join('\n');
+  await ask(`contacts linked to companies [[tool: create_page ${JSON.stringify({ title: 'Companies', markdown: firms })}]] [[tool: create_page ${JSON.stringify({ title: 'Contacts', markdown: people })}]] [[reply: I made Companies and Contacts.]]`);
+  check('The AI makes the companies and the contacts in one go', await until(() => treeItem('Contacts'), 8000));
+  (await until(() => $('#ai-ok') || $('#ai-done-run'), 4000))?.click();
+  treeItem('Contacts')?.click();
+  const contacts = await until(() => shownPane('Contacts') && $('.table-block', shownPane('Contacts')) && shownPane('Contacts'), 4000);
+  const tag = () => contacts && $('tr[data-r="1"] .tag.as-link', contacts);
+  check('A contact’s company is a link to its row, with no table left to choose', tag()?.textContent === 'Acme' && !$('.cell-note', contacts), contacts ? `${tag()?.textContent} / ${$('.cell-note', contacts)?.textContent}` : 'no Contacts');
+  tag()?.click();
+  check('…and it opens the row of that company', await until(() => shownPane('Acme'), 3000));
+  // "Write what each company does in its page": the page of a row, by the tools.
+  treeItem('Companies')?.click();
+  const firmsPane = await until(() => shownPane('Companies') && $('.table-wrap', shownPane('Companies')) && shownPane('Companies'), 3000);
+  const firmsId = firmsPane && $('.table-wrap', firmsPane).dataset.page;
+  await ask(`write what Globex does in its page [[tool: update_table_row ${JSON.stringify({ page_id: firmsId, match: { Company: 'Globex' }, page: '## About\n- Makes widgets' })}]] [[reply: I wrote it in the page of Globex.]]`);
+  (await until(() => $('#ai-ok') || $('#ai-done-run'), 6000))?.click();
+  treeItem('Companies')?.click();
+  const firmsTable = await until(() => shownPane('Companies') && $('.table-block', shownPane('Companies')), 3000);
+  $('tr[data-r="2"] .row-open', firmsTable)?.click();
+  const globex = await until(() => shownPane('Globex'), 3000);
+  const lines = () => globex && $$('.block-row .blk', globex).map((b) => b.textContent.replace(/​/g, '')).join('|');
+  check('The page of a row holds what the AI wrote in it', await until(() => lines() === 'About|Makes widgets', 3000), lines());
 });
 
 await run('Diagrams', async () => {

@@ -382,6 +382,13 @@ impl Block {
         chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok()
     }
 
+    /// The icon of a callout as its Markdown writes it, before its words:
+    /// only one that is a sign of its own (an emoji), not the app's name for
+    /// one of its icons ("lightbulb:yellow").
+    pub fn icon_in_markdown(&self) -> Option<&str> {
+        self.icon.as_deref().filter(|i| self.kind == BlockKind::Callout && !i.is_empty() && !i.is_ascii())
+    }
+
     /// A picture that is off the lines of the page (see `Place`).
     pub fn floats(&self) -> bool {
         self.kind == BlockKind::Image && self.place.free
@@ -1137,7 +1144,24 @@ pub fn keep_unchanged(old: &[Block], new: Vec<Block>) -> Vec<Block> {
         // name changed and whose cells did not is a changed table. By its
         // words alone, it stayed the old block, and the change was lost.)
         BlockKind::Table => format!("table:{}", crate::markdown::table_markdown(b, "")),
-        _ => format!("text:{}", b.plain_text().trim()),
+        // (A chart is all its Markdown: by its title alone, a chart with
+        // another shape or column was the old chart, and the change was lost.)
+        BlockKind::Chart => format!("chart:{}", crate::chart::Chart::parse(&b.data).to_data()),
+        // (Its icon, when Markdown has it, comes back as the first word of a quote.)
+        BlockKind::Callout => match b.icon_in_markdown() {
+            Some(sign) => format!("text:{sign} {}", b.text.trim()),
+            None => format!("text:{}", b.text.trim()),
+        },
+        // (A line that is only a link to a page comes back as the page's
+        // link line: it is the same line.)
+        BlockKind::Text => match crate::mcp::page_link_target(&b.text) {
+            Some(page) => format!("page:{page}"),
+            None => format!("text:{}", b.text.trim()),
+        },
+        // (By the words with their marks: by the words alone, a word made
+        // bold or a link given another address was the old line, and the
+        // change was lost.)
+        _ => format!("text:{}", b.text.trim()),
     };
     let a: Vec<String> = old.iter().map(key).collect();
     let b: Vec<String> = new.iter().map(key).collect();
@@ -1190,33 +1214,70 @@ pub fn keep_unchanged(old: &[Block], new: Vec<Block>) -> Vec<Block> {
             };
         }
     }
+    // A line whose words the change touched, in the place of an old line
+    // (between the same two lines that did not change), is that old line
+    // with new words: what Markdown cannot say of it stays (see `carry`).
+    // Lines are paired in their order: one for one when the change left as
+    // many lines there as there were, else only lines that share most of
+    // their words. (Taken as new, such a line lost its colour, a toggle
+    // became a bullet, a callout a quote, and a line of a closed toggle
+    // came out of it.)
+    let mut edited: Vec<Option<usize>> = vec![None; m];
+    let mut j = 0;
+    while j < m {
+        if same[j].is_some() {
+            j += 1;
+            continue;
+        }
+        let from = (0..j).rev().find_map(|k| same[k]).map_or(0, |i| i + 1);
+        let start = j;
+        while j < m && same[j].is_none() {
+            j += 1;
+        }
+        let to = same.get(j).copied().flatten().unwrap_or(n);
+        // (Lines of words, or two charts: a chart has no words, and a
+        // changed one came out of its toggle.)
+        let pairs = |a: &Block, b: &Block| (a.kind.is_editable() && b.kind.is_editable()) || (a.kind == BlockKind::Chart && b.kind == BlockKind::Chart);
+        // (One for one only a line of the same kind, or with most of the
+        // same words: a paragraph written where a closed toggle was took
+        // its fold and its colour, and its words were hidden in it.)
+        let same_kind = |a: &Block, b: &Block| {
+            a.kind == b.kind || matches!((a.kind, b.kind), (BlockKind::Toggle, BlockKind::Bulleted) | (BlockKind::Callout, BlockKind::Quote))
+        };
+        if to - from == j - start {
+            for k in start..j {
+                let i = from + k - start;
+                edited[k] = (pairs(&old[i], &new[k]) && (same_kind(&old[i], &new[k]) || alike(&old[i], &new[k]))).then_some(i);
+            }
+        } else {
+            let mut next = from;
+            for k in start..j {
+                if let Some(i) = (next..to).find(|&i| pairs(&old[i], &new[k]) && (new[k].kind == BlockKind::Chart || alike(&old[i], &new[k]))) {
+                    edited[k] = Some(i);
+                    next = i + 1;
+                }
+            }
+        }
+    }
+    for (k, i) in edited.iter().enumerate() {
+        if let Some(i) = i {
+            cols[k] = old[*i].place.col;
+        }
+    }
     let mut out: Vec<Block> = new
         .into_iter()
-        .zip(same)
+        .zip(same.into_iter().zip(edited))
         .zip(cols)
-        .map(|((mut fresh, was), col)| {
-            fresh.place.col = col;
-            let Some(was) = was.map(|i| &old[i]) else { return fresh };
-            // What Markdown cannot say stays as it was; what it can say
-            // (a line made a heading, a to-do ticked, its nesting) is taken.
-            let lost_in_markdown = matches!((was.kind, fresh.kind), (BlockKind::Toggle, BlockKind::Bulleted) | (BlockKind::Callout, BlockKind::Quote));
-            if was.kind == fresh.kind || lost_in_markdown {
-                let mut kept = was.clone();
-                // (Markdown says how deep a list item is, and no more: a
-                // line of text, a heading or code under a toggle or in a
-                // list comes back with no step in. Taken from there, every
-                // line of a meeting's transcript left its closed toggle.)
-                if matches!(fresh.kind, BlockKind::Bulleted | BlockKind::Numbered | BlockKind::Todo) {
-                    kept.indent = fresh.indent;
-                }
-                if kept.kind == BlockKind::Todo {
-                    kept.checked = fresh.checked;
-                    kept.due = fresh.due;
-                }
-                kept
-            } else {
-                Block { id: was.id.clone(), ..fresh }
-            }
+        .map(|((fresh, (was, edit)), col)| {
+            let mut b = match (was, edit) {
+                // (The same link to a page; a picture, a table, a divider as it was.)
+                (Some(i), _) if old[i].kind == BlockKind::Text && fresh.kind == BlockKind::PageLink => old[i].clone(),
+                (Some(i), _) if !fresh.kind.is_editable() || !old[i].kind.is_editable() => old[i].clone(),
+                (Some(i), _) | (None, Some(i)) => carry(&old[i], fresh),
+                (None, None) => fresh,
+            };
+            b.place.col = col;
+            b
         })
         .collect();
     // A table with a changed cell has other words, so above it came out as
@@ -1225,6 +1286,50 @@ pub fn keep_unchanged(old: &[Block], new: Vec<Block>) -> Vec<Block> {
     // (A line that changed stands among the lines of its column again.)
     crate::columns::tidy(&mut out);
     out
+}
+
+/// `fresh` is the line `was` as it came back from Markdown, its words the
+/// same or changed: it takes what its Markdown says (its words, its kind, a
+/// tick, a day and a reminder, a list item's step in, a code's language)
+/// and keeps what Markdown cannot say (its id, its colour, its place, a
+/// toggle that is shut, a callout's icon, how deep a line that is no list
+/// item stands).
+pub fn carry(was: &Block, fresh: Block) -> Block {
+    // (Markdown has no toggle and no callout: they come back as a bullet and a quote.)
+    let kind = match (was.kind, fresh.kind) {
+        (BlockKind::Toggle, BlockKind::Bulleted) => BlockKind::Toggle,
+        (BlockKind::Callout, BlockKind::Quote) => BlockKind::Callout,
+        (_, kind) => kind,
+    };
+    let text = match was.icon_in_markdown().filter(|_| kind == BlockKind::Callout) {
+        Some(sign) => fresh.text.strip_prefix(sign).map(|t| t.trim_start().to_string()).unwrap_or(fresh.text.clone()),
+        None => fresh.text.clone(),
+    };
+    // (Markdown says how deep a list item is, and no more: a line of text,
+    // a heading or code under a toggle or in a list comes back with no step
+    // in. Taken from there, every line of a meeting's transcript left its
+    // closed toggle.)
+    let list = matches!(fresh.kind, BlockKind::Bulleted | BlockKind::Numbered | BlockKind::Todo);
+    Block {
+        id: was.id.clone(),
+        kind,
+        text,
+        indent: if list { fresh.indent } else { was.indent },
+        collapsed: kind == BlockKind::Toggle && was.kind == BlockKind::Toggle && was.collapsed,
+        icon: if kind == BlockKind::Callout { was.icon.clone() } else { fresh.icon.clone() },
+        place: was.place,
+        tint: was.tint.clone(),
+        ..fresh
+    }
+}
+
+/// Two lines that share most of their words (a line written again with a
+/// word or two changed).
+fn alike(a: &Block, b: &Block) -> bool {
+    let words = |b: &Block| b.plain_text().to_lowercase().split_whitespace().map(str::to_string).collect::<Vec<_>>();
+    let (x, y) = (words(a), words(b));
+    let shared = x.iter().filter(|w| y.contains(w)).count();
+    shared * 2 >= x.len().max(y.len()).max(1)
 }
 
 /// A page was written anew as Markdown and read back as `new`. Each table
@@ -1281,6 +1386,10 @@ pub fn keep_tables(old: &[Block], new: &mut [Block]) {
         b.text = now[n].plain_text();
         b.place.beside |= spare[w].place.beside;
         b.place.col = spare[w].place.col;
+        // (Markdown does not say that a table is inside a toggle: one with a
+        // changed cell came out of it.)
+        b.indent = spare[w].indent;
+        b.tint = spare[w].tint.clone();
     }
 }
 
@@ -1886,10 +1995,15 @@ mod tests {
         assert_eq!(out[3], old[3]);
         assert_eq!((out[4].id.as_str(), out[4].checked), (old[4].id.as_str(), true));
         assert_eq!(out[5], old[5]);
-        // The changed line and the added line are new blocks; the old closing line is gone.
-        assert_eq!(out[1].text, "Monday: swim");
-        assert!(!ids(&old).contains(&out[1].id) && !ids(&old).contains(&out[6].id));
+        // A changed line in the place of an old one is that line with new
+        // words (as the line in place of the old closing line is); the old
+        // closing line's words are gone.
+        assert_eq!((out[1].text.as_str(), out[1].id.as_str()), ("Monday: swim", old[1].id.as_str()));
+        assert_eq!((out[6].text.as_str(), out[6].id.as_str()), ("A new line", old[6].id.as_str()));
         assert!(!out.iter().any(|b| b.text == "Old closing line"));
+        // A line added among lines that stay is a new block.
+        let out = keep_unchanged(&old, vec![old[0].clone(), Block::text("Added"), old[1].clone()]);
+        assert!(!ids(&old).contains(&out[1].id) && out[0] == old[0] && out[2] == old[1]);
         // A line whose kind the Markdown changed keeps its id and takes the new kind.
         let old = vec![Block::text("Title")];
         let out = keep_unchanged(&old, vec![Block::new(BlockKind::Heading1, "Title")]);

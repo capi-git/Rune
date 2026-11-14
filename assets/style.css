@@ -2098,6 +2098,18 @@ body[data-resizing="rows"] * {
   flex: 1 1 0;
   min-width: 0;
 }
+/* A faint line down the middle of the room between two columns. (Not
+   while a line is let go there: the mark of the drop stands in its place.) */
+.column + .column:not(.drop-left)::before {
+  content: "";
+  position: absolute;
+  left: -26px;
+  top: 2px;
+  bottom: 2px;
+  width: 1px;
+  background: var(--sep);
+  pointer-events: none;
+}
 /* (The tops of the columns are level, also when one begins with a heading.) */
 .column > .block-row:first-child {
   margin-top: 1px;
@@ -2107,6 +2119,9 @@ body[data-resizing="rows"] * {
   .columns {
     flex-direction: column;
     gap: 0;
+  }
+  .column + .column:not(.drop-left)::before {
+    display: none;
   }
 }
 
