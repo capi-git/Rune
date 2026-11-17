@@ -273,8 +273,11 @@ impl Found {
     }
 }
 
+/// The search box (⌘K). `made`: it was opened by the + of the tab row,
+/// over a tab on Home; Some(true) when the + made that tab just now, and a
+/// page chosen then takes that tab's place.
 #[component]
-pub fn QuickFind() -> Element {
+pub fn QuickFind(#[props(default)] made: Option<bool>) -> Element {
     let state = use_context::<AppState>();
     let mut query = use_signal(String::new);
     let mut selected = use_signal(|| 0usize);
@@ -289,15 +292,15 @@ pub fn QuickFind() -> Element {
     let mut hits: Vec<(u8, i64, Hit)> = Vec::new();
     if q.is_empty() {
         let recent = state.ui.read().recent.clone();
-        let mut ordered: Vec<&Page> = recent.iter().filter_map(|id| pages.get(id)).filter(|p| !p.trashed && p.space_id == space).collect();
-        let mut rest: Vec<&Page> = pages.values().filter(|p| !p.trashed && p.space_id == space && !recent.contains(&p.id)).collect();
+        let mut ordered: Vec<&Page> = recent.iter().filter_map(|id| pages.get(id)).filter(|p| !p.trashed && (p.space_id == space || crate::stream::is_stream_page(p))).collect();
+        let mut rest: Vec<&Page> = pages.values().filter(|p| !p.trashed && (p.space_id == space || crate::stream::is_stream_page(p)) && !recent.contains(&p.id)).collect();
         rest.sort_by_key(|p| std::cmp::Reverse(p.updated_at));
         ordered.extend(rest);
         for p in ordered.into_iter().take(30) {
             hits.push((0, 0, Hit { id: p.id.clone(), icon: p.display_icon().into(), title: p.display_title().into(), snippet: None, path: path_of(p) }));
         }
     } else {
-        for p in pages.values().filter(|p| !p.trashed && p.space_id == space) {
+        for p in pages.values().filter(|p| !p.trashed && (p.space_id == space || crate::stream::is_stream_page(p))) {
             // (A locked page is found by its name only, also while it is open.)
             let lines: Vec<String> = blocks
                 .get(&p.id)
@@ -345,6 +348,9 @@ pub fn QuickFind() -> Element {
     // Open a page, run a command or make the page.
     let choose = move |found: &Found, new_tab: bool| match found {
         Found::Page(hit) => {
+            if made == Some(true) {
+                state.let_go_made_tab();
+            }
             if new_tab {
                 state.open_in_new_tab(Route::Page(hit.id.clone()))
             } else {
@@ -358,6 +364,9 @@ pub fn QuickFind() -> Element {
         Found::Create { .. } => {
             let typed = query.peek().trim().to_string();
             state.set_modal(None);
+            if made == Some(true) {
+                state.let_go_made_tab();
+            }
             state.new_page_at_path(&typed);
         }
     };
@@ -369,7 +378,7 @@ pub fn QuickFind() -> Element {
                     span { class: "qf-glass", Icon { name: "search", size: 18 } }
                     input {
                         class: "qf-input",
-                        placeholder: "Search pages or commands…",
+                        placeholder: if made.is_some() { "Open a page…" } else { "Search pages or commands…" },
                         onmounted: move |e: MountedEvent| async move {
                             let _ = e.set_focus(true).await;
                         },
@@ -458,7 +467,9 @@ pub fn QuickFind() -> Element {
                         }
                     }
                 }
-                div { class: "qf-footer", "↑↓ select  ·  ↵ open  ·  ⌘↵ open in new tab  ·  esc close" }
+                div { class: "qf-footer",
+                    if made.is_some() { "↑↓ select  ·  ↵ open  ·  esc close" } else { "↑↓ select  ·  ↵ open  ·  ⌘↵ open in new tab  ·  esc close" }
+                }
             }
         }
     }
@@ -1711,7 +1722,7 @@ pub fn AskNotesModal() -> Element {
             return state.toast("Rune is still reading what you gave. Ask again in a moment.");
         }
         let tools = ai::takes_tools()
-            .then(|| ai::Tools { journal: std::env::temp_dir().join(format!("rune-ask-{}-{}.jsonl", std::process::id(), crate::model::now_ms())) });
+            .then(|| ai::Tools { journal: std::env::temp_dir().join(format!("rune-ask-{}-{}.jsonl", std::process::id(), crate::model::now_ms())), shown: Vec::new() });
         let notes = state.notes_for(&q);
         if notes.is_empty() && tools.is_none() {
             status.set("There are no pages to look in yet.".into());

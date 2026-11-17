@@ -80,6 +80,9 @@ fn build(store: &Store) -> Ids {
     let mut intro = line(BlockKind::Text, &format!("Intro with **bold**, _italic_, `code`, a [link](https://example.com) and [Other page](rune://page/{}): the quick fox.", other.id));
     intro.tint = "red blue-bg".into();
     blocks.push(intro);
+    // (A line of the person's that starts as the mark of a sub-page does:
+    // it stays a line of the page, see `ai::split_pages_of`.)
+    blocks.push(line(BlockKind::Text, "@page margins are set in the print styles"));
     let mut h1 = line(BlockKind::Heading1, "Big heading");
     h1.tint = "green".into();
     blocks.push(h1);
@@ -709,7 +712,7 @@ fn by_box(change: &Change) -> (Loaded, Loaded) {
         None => format!("{}{}{reply}", crate::ai::REVISE_MARK, if reply.contains('\r') { "\r\n" } else { "\n" }),
     };
     let body = crate::ai::split_revision(&crate::ai::clean_reply(&output).0).expect("a page again");
-    let (body, _) = crate::ai::split_pages(&body);
+    let (body, _, _) = crate::ai::split_pages_of(&body, &given);
     let title = pages[&ids.page].title.clone();
     let new = crate::mcp::parse_body(pages, &crate::mcp::strip_title_heading(&body, &title));
     let mut lines = crate::state::revised_page(&all[&ids.page], new);

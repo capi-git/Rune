@@ -833,20 +833,32 @@ impl Store {
 
     /// Save one block's text after typing, and mark the page as changed, in
     /// one transaction. Much cheaper than rewriting the page on every key.
-    pub fn save_block_text(&self, page_id: &str, block_id: &str, text: &str, at: i64) -> rusqlite::Result<()> {
+    /// Says whether the line was in the file: a line that an earlier save
+    /// did not write is not there, and then nothing is written (the caller
+    /// saves the whole page).
+    pub fn save_block_text(&self, page_id: &str, block_id: &str, text: &str, at: i64) -> rusqlite::Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
-        tx.prepare_cached("UPDATE blocks SET text=?2 WHERE id=?1")?.execute(params![block_id, text])?;
+        let rows = tx.prepare_cached("UPDATE blocks SET text=?2 WHERE id=?1 AND page_id=?3")?.execute(params![block_id, text, page_id])?;
+        if rows == 0 {
+            return Ok(false);
+        }
         tx.prepare_cached("UPDATE pages SET updated_at=?2 WHERE id=?1")?.execute(params![page_id, at])?;
-        tx.commit()
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Save a table's cells, with the words kept beside them for search, and
-    /// mark the page as changed, in one transaction.
-    pub fn save_block_cells(&self, page_id: &str, block_id: &str, text: &str, data: &str, at: i64) -> rusqlite::Result<()> {
+    /// mark the page as changed, in one transaction. Says whether the table
+    /// was in the file (as `save_block_text`).
+    pub fn save_block_cells(&self, page_id: &str, block_id: &str, text: &str, data: &str, at: i64) -> rusqlite::Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
-        tx.prepare_cached("UPDATE blocks SET text=?2, data=?3 WHERE id=?1")?.execute(params![block_id, text, data])?;
+        let rows = tx.prepare_cached("UPDATE blocks SET text=?2, data=?3 WHERE id=?1 AND page_id=?4")?.execute(params![block_id, text, data, page_id])?;
+        if rows == 0 {
+            return Ok(false);
+        }
         tx.prepare_cached("UPDATE pages SET updated_at=?2 WHERE id=?1")?.execute(params![page_id, at])?;
-        tx.commit()
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Save a drawing's scene and mark the page as changed, in one transaction.
@@ -1031,6 +1043,27 @@ pub fn db_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typing_into_a_line_that_is_not_in_the_file_says_so() {
+        let store = Store::open_in_memory().unwrap();
+        let page = Page::new(None, 1.0);
+        store.save_page(&page).unwrap();
+        let line = Block::text("kept");
+        store.save_blocks(&page.id, std::slice::from_ref(&line)).unwrap();
+        assert!(store.save_block_text(&page.id, &line.id, "kept and more", 5).unwrap());
+        assert_eq!(store.load_page_blocks(&page.id).unwrap()[0].text, "kept and more");
+        // A line that an earlier save did not write: nothing is written,
+        // and the caller hears of it (it saves the whole page then).
+        let missing = Block::text("new");
+        assert!(!store.save_block_text(&page.id, &missing.id, "new words", 6).unwrap());
+        assert!(!store.save_block_cells(&page.id, &missing.id, "a", "{}", 6).unwrap());
+        // A line of another page is not written from this one.
+        let other = Page::new(None, 2.0);
+        store.save_page(&other).unwrap();
+        assert!(!store.save_block_text(&other.id, &line.id, "wrong page", 7).unwrap());
+        assert_eq!(store.load_page_blocks(&page.id).unwrap()[0].text, "kept and more");
+    }
 
     #[test]
     fn a_page_of_a_row_and_a_table_beside_another_are_kept() {

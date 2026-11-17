@@ -339,7 +339,7 @@ pub fn start_with(prefs: Prefs, messages: Vec<ChatMessage>, tools: Option<Tools>
             }
             if !calls.is_empty() {
                 if let Ok(store) = crate::store::Store::open(crate::store::Store::default_path()) {
-                    let mut server = crate::mcp::Server::new(store).with_journal(tools.journal.clone());
+                    let mut server = crate::mcp::Server::new(store).with_journal(tools.journal.clone()).with_shown(&tools.shown);
                     for call in calls {
                         let (name, args) = call.split_once(' ').unwrap_or((call.as_str(), "{}"));
                         let args: serde_json::Value = serde_json::from_str(args.trim()).unwrap_or_else(|_| serde_json::json!({}));
@@ -423,6 +423,8 @@ pub enum AiEvent {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tools {
     pub journal: std::path::PathBuf,
+    /// The pages given whole in the request: they count as read by the tools.
+    pub shown: Vec<crate::model::Id>,
 }
 
 /// The model that answers now, for a quiet line beside a box to ask in: how
@@ -808,17 +810,40 @@ pub const MOST_PAGES: usize = 12;
 /// A reply that changes the page, split into the page itself and the
 /// sub-pages it asks for (the name and the Markdown of each).
 pub fn split_pages(body: &str) -> (String, Vec<(String, String)>) {
+    let (main, pages, _) = split_pages_of(body, "");
+    (main, pages)
+}
+
+/// `split_pages`, for a reply to the page as it was given to the AI
+/// (`given`), and how many sub-pages were put into the last one.
+/// - A line of the page as given is the person's line, also when it
+///   starts with the mark: it stays where it is. (Taken as a mark, it
+///   moved every line under it out of the page into a new sub-page.)
+/// - No text is dropped: past `MOST_PAGES`, each sub-page goes into the
+///   last one that is made, under a heading with its name. (They were
+///   thrown away, and the page linked to pages that were never made.)
+pub fn split_pages_of(body: &str, given: &str) -> (String, Vec<(String, String)>, usize) {
+    let persons: std::collections::HashSet<&str> = given.lines().map(str::trim).filter(|l| l.contains(PAGE_MARK.trim())).collect();
     let mut main = String::new();
     let mut pages: Vec<(String, String)> = Vec::new();
     let mut in_code = false;
+    let mut merged = 0;
     for line in body.lines() {
         let t = line.trim();
         if t.starts_with("```") {
             in_code = !in_code;
         }
-        let name = (!in_code).then(|| t.trim_matches('`').strip_prefix(PAGE_MARK)).flatten().map(|n| n.trim().trim_matches(['"', '“', '”', '*', '#', ' ']).to_string());
+        let name = (!in_code && !persons.contains(t)).then(|| t.trim_matches('`').strip_prefix(PAGE_MARK)).flatten().map(|n| n.trim().trim_matches(['"', '“', '”', '*', '#', ' ']).to_string());
         if let Some(name) = name.filter(|n| !n.is_empty()) {
-            pages.push((name, String::new()));
+            if pages.len() < MOST_PAGES {
+                pages.push((name, String::new()));
+            } else if let Some((_, text)) = pages.last_mut() {
+                merged += 1;
+                if !text.is_empty() && !text.ends_with("\n\n") {
+                    text.push('\n');
+                }
+                text.push_str(&format!("## {name}\n\n"));
+            }
             continue;
         }
         let into = match pages.last_mut() {
@@ -828,8 +853,7 @@ pub fn split_pages(body: &str) -> (String, Vec<(String, String)>) {
         into.push_str(line);
         into.push('\n');
     }
-    pages.truncate(MOST_PAGES);
-    (main, pages)
+    (main, pages, merged)
 }
 
 /// Put links in place of the names of sub-pages: `[[Workout A]]` becomes a
@@ -1143,6 +1167,35 @@ mod tests {
         // Never more than a few.
         let many: String = (0..40).map(|i| format!("@page P{i}\nx\n")).collect();
         assert_eq!(split_pages(&many).1.len(), MOST_PAGES);
+    }
+
+    #[test]
+    fn sub_pages_past_the_most_are_put_into_the_last_one() {
+        let many: String = (0..15).map(|i| format!("@page P{i}\nWords of {i}.\n")).collect();
+        let (main, pages, merged) = split_pages_of(&many, "");
+        assert_eq!((main.as_str(), pages.len(), merged), ("", MOST_PAGES, 3));
+        // Every word is still there, with the names of the pages put in.
+        let last = &pages[MOST_PAGES - 1];
+        assert_eq!(last.0, "P11");
+        assert_eq!(last.1, "Words of 11.\n\n## P12\n\nWords of 12.\n\n## P13\n\nWords of 13.\n\n## P14\n\nWords of 14.\n");
+        let all: String = std::iter::once(main).chain(pages.iter().map(|(_, t)| t.clone())).collect();
+        for i in 0..15 {
+            assert!(all.contains(&format!("Words of {i}.")), "{i}");
+        }
+    }
+
+    #[test]
+    fn a_line_of_the_page_that_starts_with_the_mark_stays_in_the_page() {
+        // The person's page has a line that starts as the mark does (a note
+        // on print styles, say). The AI gives it back, with a new line under it.
+        let given = "Print notes\n\n@page margins are set in CSS\n\nThe end";
+        let reply = "Print notes\n\n@page margins are set in CSS\n\nThe end\n\nA new line.\n";
+        let (main, pages, merged) = split_pages_of(reply, given);
+        assert_eq!((main.as_str(), pages.len(), merged), (reply, 0, 0));
+        // A real mark of the AI is still one.
+        let (main, pages, _) = split_pages_of(&format!("{reply}@page Margins\nTop and bottom.\n"), given);
+        assert_eq!(main, reply);
+        assert_eq!(pages, vec![("Margins".to_string(), "Top and bottom.\n".to_string())]);
     }
 
     use super::*;

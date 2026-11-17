@@ -16,13 +16,20 @@ pub fn Sidebar() -> Element {
     let on_home = *ui.tab().route() == Route::Home;
     let on_calendar = *ui.tab().route() == Route::Calendar;
     let on_graph = *ui.tab().route() == Route::Graph;
+    let on_stream = matches!(ui.tab().route(), Route::Page(id) if state.is_stream(id));
     let pinned = ui.sidebar_open;
     let space_menu = ui.popover == Some(Popover::SpaceMenu);
     drop(ui);
     let pages = state.pages.read();
-    let roots = roots_in(&pages, &space_id);
-    let mut favorites: Vec<Page> =
-        pages.values().filter(|p| p.favorite && !p.trashed && p.space_id == space_id).cloned().collect();
+    // (The Stream opens from its tile, not from the lists.)
+    let streams = state.stream_ids();
+    let mut roots = roots_in(&pages, &space_id);
+    roots.retain(|p| !streams.contains(&p.id));
+    let mut favorites: Vec<Page> = pages
+        .values()
+        .filter(|p| p.favorite && !p.trashed && p.space_id == space_id && !streams.contains(&p.id))
+        .cloned()
+        .collect();
     favorites.sort_by_key(|a| a.display_title().to_lowercase());
     drop(pages);
     let spaces = state.spaces.read().clone();
@@ -71,6 +78,13 @@ pub fn Sidebar() -> Element {
                     title: "Home",
                     onclick: move |_| state.navigate(Route::Home),
                     Icon { name: "home", size: 16 }
+                }
+                button {
+                    class: if on_stream { "tile current" } else { "tile" },
+                    title: "Stream (⌃⌥S, from any app)",
+                    "aria-label": "Stream",
+                    onclick: move |_| state.open_stream(),
+                    Icon { name: "stream", size: 16 }
                 }
                 button {
                     class: if on_calendar { "tile current" } else { "tile" },

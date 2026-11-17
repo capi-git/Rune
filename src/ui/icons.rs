@@ -64,6 +64,7 @@ pub const UI_ICONS: &[&str] = &[
     "ring",
     "days",
     "sliders",
+    "stream",
 ];
 
 /// Icons offered for pages and callouts, in picker order.
@@ -209,6 +210,9 @@ pub fn paths(name: &str) -> Option<&'static str> {
         }
         "graph" => {
             r#"<circle cx="6.25" cy="7" r="2.25"/><circle cx="17.75" cy="8.25" r="2.25"/><circle cx="11" cy="17.5" r="2.25"/><path d="M8.5 7.25l7 .75M7.2 9.05l2.9 6.4M16.4 10.05l-4.1 5.65"/>"#
+        }
+        "stream" => {
+            r#"<path d="M4 7.5c2.67-2 5.33-2 8 0s5.33 2 8 0M4 12c2.67-2 5.33-2 8 0s5.33 2 8 0M4 16.5c2.67-2 5.33-2 8 0s5.33 2 8 0"/>"#
         }
         "image" => {
             r#"<rect x="3.75" y="4.75" width="16.5" height="14.5" rx="2"/><circle cx="8.75" cy="9.5" r="1.5"/><path d="M4.5 17.25l4.75-4.75 3.5 3.25 2.75-2.5 4.25 4"/>"#

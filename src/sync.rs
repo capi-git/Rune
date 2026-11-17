@@ -28,6 +28,9 @@ pub enum SyncMsg {
     Look { glass: u8, blur: u8, tint: String, accent: String },
     /// Everything as it is on disk, after an outside change.
     Reload(Rc<Loaded>),
+    /// The window that listened to a meeting in this page went: this
+    /// window finishes the listening and writes the notes.
+    TakeListening(Id),
 }
 
 thread_local! {
@@ -62,6 +65,20 @@ pub fn leave(key: u64) {
 
 pub fn window_count() -> usize {
     PEERS.with(|p| p.borrow().len())
+}
+
+/// The keys of the windows that are open, the oldest first.
+pub fn window_keys() -> Vec<u64> {
+    PEERS.with(|p| p.borrow().iter().map(|(k, _)| *k).collect())
+}
+
+/// Tell one window.
+pub fn to(key: u64, msg: SyncMsg) {
+    PEERS.with(|p| {
+        if let Some((_, tx)) = p.borrow().iter().find(|(k, _)| *k == key) {
+            let _ = tx.unbounded_send(msg);
+        }
+    });
 }
 
 /// Tell every other window.

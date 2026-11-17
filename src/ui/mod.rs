@@ -71,6 +71,9 @@ fn parse_hex(s: &str) -> Option<(f64, f64, f64)> {
 #[component]
 pub fn Root(primary: bool, route: Option<Route>) -> Element {
     let state = use_context_provider(move || AppState::load(primary, route));
+    // Count the changes to the lines, so that a key typed in one page does
+    // not read or draw every page again (see backlinks.rs).
+    use_hook(move || crate::backlinks::watch(state.win.key, state.blocks));
 
     // Keyboard, focus, editing and drag-and-drop events from the page.
     use_future(move || async move {
@@ -102,6 +105,8 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
         loop {
             crate::ai::sleep_ms(1500).await;
             sync::check_outside_changes();
+            // Pages whose last save failed are written again.
+            state.save_unsaved();
             // A read or a write of the notes file that failed.
             if let Some(fault) = crate::store::trouble() {
                 state.notice(fault);
@@ -109,11 +114,14 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
         }
     });
     use_drop(move || {
+        // (A window that goes while the app listens for it: see
+        // `window_gone`. First: a locked page it listens in stays open for
+        // the window that takes the listening over.)
+        crate::state::window_gone(state.win.key);
         // (The pages this window opened with their passwords lock again.)
         crate::lock::window_closed(state.win.key);
+        crate::backlinks::forget(state.win.key);
         sync::leave(state.win.key);
-        // (A window that goes while the app listens for it: see `window_gone`.)
-        crate::state::window_gone(state.win.key);
     });
 
     // The calendars of this Mac, when the person has turned them on: read
@@ -136,26 +144,35 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
             crate::notify::install();
         }
     });
+    // Any change to the notes (a line, a page's name) asks for a fresh look at
+    // the to-do reminders; nothing is walked until then.
+    let mut todo_watch = use_hook(|| CopyValue::new(crate::notify::TodoWatch::default()));
+    use_effect(move || {
+        let _ = (state.blocks.read(), state.pages.read());
+        if primary {
+            todo_watch.write().touch();
+        }
+    });
     use_future(move || async move {
         if !primary {
             return;
         }
         let mut since_plan = 0u32;
         let mut ticks = 0u32;
-        let mut todos_seen = String::new();
         loop {
             crate::ai::sleep_ms(500).await;
             since_plan += 1;
             ticks += 1;
             // A to-do's reminder came, changed or went (here, in another
-            // window, or by the AI): plan again.
+            // window, or by the AI): plan again. (The notes are walked only
+            // when they changed or a reminder's time came: see `TodoWatch`.)
             if ticks % 4 == 0 {
-                // (Its words and its page's name too: a reminder planned
-                // before the words changed said the old words.)
-                let seen = format!("{:?}", state.todo_reminders().iter().map(|r| (&r.1, &r.2, &r.3, r.4)).collect::<Vec<_>>());
-                if seen != todos_seen {
-                    todos_seen = seen;
-                    crate::notify::mark_dirty();
+                let (now, today) = (crate::model::now_ms(), crate::when::today());
+                if todo_watch.peek().due(now, today) {
+                    let reminders = state.todo_reminders();
+                    if todo_watch.write().take(&reminders, today) {
+                        crate::notify::mark_dirty();
+                    }
                 }
             }
             // Replan when events change (debounced), and hourly so the
@@ -203,6 +220,19 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
                 window.set_visible(true);
                 window.set_focus();
                 state.command("ai_anywhere");
+            }
+        });
+    }
+
+    // The Stream from anywhere: Control-Option-S in any app brings this
+    // window forward on the Stream, with the caret at today's line.
+    if primary && std::env::var_os("RUNE_SELFTEST").is_none() {
+        let _ = dioxus::desktop::use_global_shortcut(crate::state::STREAM_SHORTCUT, move |key| {
+            if key == dioxus::desktop::HotKeyState::Pressed {
+                let window = dioxus::desktop::window();
+                window.set_visible(true);
+                window.set_focus();
+                state.open_stream();
             }
         });
     }
@@ -576,6 +606,7 @@ pub fn Root(primary: bool, route: Option<Route>) -> Element {
             }
             match modal {
                 Some(Modal::QuickFind) => rsx! { modals::QuickFind {} },
+                Some(Modal::NewTab { made }) => rsx! { modals::QuickFind { made: Some(made) } },
                 Some(Modal::Trash) => rsx! { modals::TrashModal {} },
                 Some(Modal::History) => rsx! { modals::HistoryModal {} },
                 Some(Modal::Voice) => rsx! { modals::VoiceModal {} },

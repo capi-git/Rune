@@ -121,6 +121,10 @@ pub fn run_stdio() -> i32 {
     if let Some(journal) = std::env::var_os(JOURNAL_ENV).filter(|p| !p.is_empty()) {
         server = server.with_journal(PathBuf::from(journal));
     }
+    if let Some(shown) = std::env::var(SHOWN_ENV).ok().filter(|s| !s.is_empty()) {
+        let ids: Vec<Id> = shown.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        server = server.with_shown(&ids);
+    }
     match server.serve(io::stdin().lock(), io::stdout().lock()) {
         Ok(()) => 0,
         Err(e) => {
@@ -147,6 +151,10 @@ type ToolResult = Result<String, String>;
 
 /// The environment variable that names the file for the record of changes.
 pub const JOURNAL_ENV: &str = "RUNE_AI_JOURNAL";
+
+/// The pages the app's own AI was given whole in its request, with commas
+/// between their ids: they count as read (see `Server::with_shown`).
+pub const SHOWN_ENV: &str = "RUNE_AI_SHOWN";
 
 /// One thing a tool changed, with what was there before it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -432,6 +440,20 @@ impl Server {
     /// Write every change down in this file (see `Change`).
     pub fn with_journal(mut self, path: PathBuf) -> Server {
         self.journal = Some(path);
+        self
+    }
+
+    /// Pages the AI was given whole in its request count as read, as they
+    /// are now: it may then replace them without a read_page first (and is
+    /// still refused if someone types in them meanwhile).
+    pub fn with_shown(self, ids: &[Id]) -> Server {
+        if let Ok((_, blocks)) = self.load() {
+            for id in ids {
+                if let Some(b) = blocks.get(id) {
+                    self.seen.borrow_mut().insert(id.clone(), b.clone());
+                }
+            }
+        }
         self
     }
 
@@ -847,6 +869,11 @@ impl Server {
             self.save_blocks(pid, &parent_blocks)?;
         }
         self.keep_row_templates(&page.id, &markdown)?;
+        // (The AI made it: it knows its lines, and may replace them until
+        // someone changes them, see `changed_since_read`.)
+        if let Ok(now) = self.store.load_page_blocks(&page.id) {
+            self.seen.borrow_mut().insert(page.id.clone(), now);
+        }
         let mut answer = json!({
             "id": page.id,
             "title": page.display_title(),
@@ -1192,7 +1219,10 @@ impl Server {
     /// read any more (nor what the tools wrote since): someone changed it in
     /// Rune meanwhile. The page written from what was read would take that
     /// change away (a line typed while the AI worked, the end of a meeting's
-    /// transcript), so it is refused, with what to do.
+    /// transcript), so it is refused, with what to do. A page with lines
+    /// that was not read at all (nor made by the tools) in this run is
+    /// refused too: the AI would write over lines it never saw. (An empty
+    /// page has nothing to lose.)
     fn changed_since_read(&self, id: &str, now: &[Block]) -> Result<(), String> {
         match self.seen.borrow().get(id) {
             Some(read) if read.as_slice() != now => Err(
@@ -1201,6 +1231,10 @@ impl Server {
                  To only add to a page that keeps changing, use append_to_page."
                     .into(),
             ),
+            None if !is_blank(now) => Err(format!(
+                "You have not read this page, so it was not replaced: its lines may be the person's, and your Markdown would take them away. Nothing was changed. \
+                 Read it first with read_page (page_id {id}) and make your change on what it gives. To only add to the page, use append_to_page."
+            )),
             _ => Ok(()),
         }
     }
@@ -1846,7 +1880,7 @@ fn tool_definitions() -> Value {
         {
             "name": "replace_page_content",
             "title": "Replace a page's content",
-            "description": "Replace everything in a page's body with new Markdown (optionally renaming it). Read the page first and keep its [Title](rune://page/<id>) link lines to keep links to sub-pages; sub-pages themselves are never removed.",
+            "description": "Replace everything in a page's body with new Markdown (optionally renaming it). Read the page first with read_page (a page with lines that was not read, or made, in this session is refused) and keep its [Title](rune://page/<id>) link lines to keep links to sub-pages; sub-pages themselves are never removed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2012,8 +2046,9 @@ fn page_icon(given: &str) -> Result<Option<String>, String> {
         return Ok(None);
     }
     match crate::ui::icons::known_icon(&given.to_lowercase()) {
-        Some((name, color)) => Ok(Some(crate::ui::icons::format_icon(&name, &color))),
-        None => Err(format!(
+        // (The Stream's icon marks the Stream: no other page gets it.)
+        Some((name, color)) if crate::ui::icons::PAGE_ICONS.contains(&name.as_str()) => Ok(Some(crate::ui::icons::format_icon(&name, &color))),
+        _ => Err(format!(
             "Rune has no icon “{given}”: it draws its own icons, not emoji. Give NAME:COLOUR, as book:blue; NAME one of {}; COLOUR one of {}.",
             crate::ui::icons::PAGE_ICONS.join(", "),
             crate::ui::icons::ICON_COLORS.iter().map(|(id, _)| *id).collect::<Vec<_>>().join(", ")
@@ -2696,6 +2731,49 @@ mod tests {
 
     fn json_of(text: &str) -> Value {
         serde_json::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn a_page_that_was_not_read_is_not_replaced() {
+        // The person wrote a page in Rune; the AI knows its id (from a
+        // search, say) but did not read it.
+        let store = Store::open_in_memory().unwrap();
+        let page = Page::new(None, 1.0);
+        store.save_page(&page).unwrap();
+        store.save_blocks(&page.id, &[Block::text("My own words")]).unwrap();
+        let empty = Page::new(None, 2.0);
+        store.save_page(&empty).unwrap();
+        let mut s = Server::new(store);
+        let (said, err) = call(&mut s, "replace_page_content", json!({ "page_id": page.id, "markdown": "Blind words" }));
+        assert!(err && said.contains("You have not read this page") && said.contains("read_page") && said.contains("Nothing was changed"), "{said}");
+        assert_eq!(s.store.load_page_blocks(&page.id).unwrap()[0].text, "My own words");
+        // Read first, it is replaced.
+        call(&mut s, "read_page", json!({ "page_id": page.id }));
+        let (said, err) = call(&mut s, "replace_page_content", json!({ "page_id": page.id, "markdown": "My own words\n\nAnd the AI's" }));
+        assert!(!err, "{said}");
+        // An empty page has nothing to lose.
+        let (said, err) = call(&mut s, "replace_page_content", json!({ "page_id": empty.id, "markdown": "First lines" }));
+        assert!(!err, "{said}");
+        // A page the AI made in this run is known to it.
+        let (made, _) = call(&mut s, "create_page", json!({ "title": "Plan", "markdown": "Step one" }));
+        let plan = json_of(&made)["id"].as_str().unwrap().to_string();
+        let (said, err) = call(&mut s, "replace_page_content", json!({ "page_id": plan, "markdown": "Step one\n\nStep two" }));
+        assert!(!err, "{said}");
+    }
+
+    #[test]
+    fn a_page_given_whole_to_the_apps_ai_counts_as_read() {
+        let store = Store::open_in_memory().unwrap();
+        let page = Page::new(None, 1.0);
+        store.save_page(&page).unwrap();
+        store.save_blocks(&page.id, &[Block::text("My own words")]).unwrap();
+        let mut s = Server::new(store).with_shown(std::slice::from_ref(&page.id));
+        let (said, err) = call(&mut s, "replace_page_content", json!({ "page_id": page.id, "markdown": "My own words\n\nAnd the AI's" }));
+        assert!(!err, "{said}");
+        // Typed in after it was given: refused, as after a read.
+        s.store.save_blocks(&page.id, &[Block::text("Something new")]).unwrap();
+        let (said, err) = call(&mut s, "replace_page_content", json!({ "page_id": page.id, "markdown": "Blind" }));
+        assert!(err && said.contains("changed in Rune"), "{said}");
     }
 
     #[test]
@@ -3556,6 +3634,10 @@ mod tests {
         assert!(page.contains("title: \"Workouts\""), "{page}");
         let (_, err) = call(&mut s, "update_page", json!({ "page_id": id, "icon": "flame:orange" }));
         assert!(!err);
+        assert_eq!(icon_of(&mut s, &id), "flame:orange");
+        // The Stream's icon marks the Stream: the AI cannot give it to a page.
+        let (said, err) = call(&mut s, "update_page", json!({ "page_id": id, "icon": "stream:gray" }));
+        assert!(err && said.contains("no icon"), "{said}");
         assert_eq!(icon_of(&mut s, &id), "flame:orange");
         // The names the tool's words list are the icons a page can have.
         let tools = tool_definitions();

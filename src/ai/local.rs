@@ -278,6 +278,9 @@ pub fn tools_config(tools: &Tools) -> String {
         .unwrap_or_else(|| std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "rune".into()));
     let mut env = serde_json::Map::new();
     env.insert(crate::mcp::JOURNAL_ENV.into(), Value::String(tools.journal.display().to_string()));
+    if !tools.shown.is_empty() {
+        env.insert(crate::mcp::SHOWN_ENV.into(), Value::String(tools.shown.join(",")));
+    }
     if let Some(db) = std::env::var_os("RUNE_DB").filter(|d| !d.is_empty()) {
         env.insert("RUNE_DB".into(), Value::String(db.to_string_lossy().into_owned()));
     }
@@ -1112,7 +1115,7 @@ mod tests {
         // with the tools of Rune may have, and does not say that.
         let (how, _, _) = run(stand_in("silent-plain", &[text], "sleep 60"));
         assert!(matches!(&how, Attempt::Failed(why) if why.contains("Nothing was changed")), "{how:?}");
-        let tools = Tools { journal: std::env::temp_dir().join("rune-stand-in-none.jsonl") };
+        let tools = Tools { journal: std::env::temp_dir().join("rune-stand-in-none.jsonl"), shown: Vec::new() };
         let path = stand_in("silent-tools", &[text], "sleep 60");
         let (tx, _rx) = futures_channel::mpsc::unbounded();
         let how = super::super::runtime().block_on(async { attempt(Provider::ClaudeCode, &path, "", "", "", "Hello", &[], Some(&tools), &[], &tx).await });
@@ -1221,7 +1224,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"x
         assert!(!a.contains(&"--model".to_string()) && !a.contains(&"--effort".to_string()));
         let b = claude_args("", "sonnet", "high", false, None);
         // With the tools of Rune: this program as the one connector, its tools allowed, no safe mode (it would switch them off).
-        let tools = Tools { journal: PathBuf::from("/tmp/run.jsonl") };
+        let tools = Tools { journal: PathBuf::from("/tmp/run.jsonl"), shown: Vec::new() };
         let t = claude_args("Be brief.", "", "", true, Some(&tools));
         assert!(!t.contains(&"--safe-mode".to_string()) && t.contains(&"--strict-mcp-config".to_string()));
         assert!(t.windows(2).any(|w| w[0] == "--tools" && w[1].is_empty()) && t.windows(2).any(|w| w[0] == "--setting-sources" && w[1].is_empty()));
@@ -1377,7 +1380,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"x
         let messages = build_agent_messages(&here, "Workout Plan", "# Workout Plan\n\nThree days a week.", asked, "2026-11-10 17:30, Tuesday");
         let prefs = super::super::Prefs { provider: Some(Provider::ClaudeCode), ..Default::default() };
         let started = Instant::now();
-        let rx = start_with(prefs, messages, Some(Tools { journal: journal.clone() }), Vec::new());
+        let rx = start_with(prefs, messages, Some(Tools { journal: journal.clone(), shown: Vec::new() }), Vec::new());
         let events: Vec<AiEvent> = super::super::runtime().block_on(futures_util::StreamExt::collect(rx));
         let steps: Vec<String> = events
             .iter()
@@ -1441,7 +1444,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"x
         let messages = build_agent_messages(&here, "Home", "# Home\n\nMy notes.", &asked, "2026-11-11 09:30, Wednesday");
         let prefs = super::super::Prefs { provider: Some(Provider::ClaudeCode), ..Default::default() };
         let started = Instant::now();
-        let rx = start_with(prefs, messages, Some(Tools { journal }), Vec::new());
+        let rx = start_with(prefs, messages, Some(Tools { journal, shown: Vec::new() }), Vec::new());
         let events: Vec<AiEvent> = super::super::runtime().block_on(futures_util::StreamExt::collect(rx));
         let text: String = events.iter().filter_map(|e| if let AiEvent::Delta(t) = e { Some(t.as_str()) } else { None }).collect();
         assert_eq!(events.last(), Some(&AiEvent::Done), "{events:?}");
@@ -1505,7 +1508,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"x
         let messages = build_agent_messages(&here, "", "", &asked, "2026-11-10 19:50, Tuesday");
         let prefs = super::super::Prefs { provider: Some(Provider::ClaudeCode), claude_model: model.clone(), effort: effort.clone(), ..Default::default() };
         let started = Instant::now();
-        let mut rx = start_with(prefs, messages, Some(Tools { journal: journal.clone() }), Vec::new());
+        let mut rx = start_with(prefs, messages, Some(Tools { journal: journal.clone(), shown: Vec::new() }), Vec::new());
         let mut text = String::new();
         let mut first_text = None;
         let mut steps = 0;

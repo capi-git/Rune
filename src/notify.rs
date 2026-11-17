@@ -310,10 +310,74 @@ pub fn take_dirty() -> bool {
     DIRTY.with(|d| d.replace(false))
 }
 
+/// When the to-do reminders need a fresh look. Walking every line of every
+/// page (and every table) is not free, so it happens only when the notes
+/// changed, when the next reminder's time came (it goes from the list) or
+/// when the day turned (a table's "Friday" is another day then). An idle app
+/// does nothing.
+#[derive(Default)]
+pub struct TodoWatch {
+    changed: bool,
+    seen: Option<String>,
+    next: Option<i64>,
+    day: Option<chrono::NaiveDate>,
+}
+
+impl TodoWatch {
+    /// The notes changed (any line, any page's name).
+    pub fn touch(&mut self) {
+        self.changed = true;
+    }
+
+    /// Is a fresh look due now?
+    pub fn due(&self, now: i64, today: chrono::NaiveDate) -> bool {
+        self.changed || self.seen.is_none() || self.next.is_some_and(|t| t <= now) || self.day != Some(today)
+    }
+
+    /// Take in a fresh look: true when the reminders differ from the last.
+    pub fn take(&mut self, reminders: &[(String, String, String, String, i64)], today: chrono::NaiveDate) -> bool {
+        self.changed = false;
+        self.day = Some(today);
+        self.next = reminders.iter().map(|r| r.4).min();
+        // (Its words and its page's name too: a reminder planned before the
+        // words changed said the old words.)
+        let seen = format!("{:?}", reminders.iter().map(|r| (&r.1, &r.2, &r.3, r.4)).collect::<Vec<_>>());
+        let differ = self.seen.as_deref() != Some(seen.as_str());
+        self.seen = Some(seen);
+        differ
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::{NaiveDate, NaiveTime};
+
+    #[test]
+    fn to_do_reminders_are_looked_at_only_when_something_moved() {
+        let day = NaiveDate::from_ymd_opt(2026, 11, 10).unwrap();
+        let r = |words: &str, at| ("p".to_string(), "b".to_string(), "Plan".to_string(), words.to_string(), at);
+        let mut w = TodoWatch::default();
+        // The first look is due, and it is news.
+        assert!(w.due(0, day));
+        assert!(w.take(&[r("Call", 100)], day));
+        // Nothing changed: no look, at any time before the reminder.
+        assert!(!w.due(50, day));
+        // A change: a look, but the same reminders are no news.
+        w.touch();
+        assert!(w.due(50, day));
+        assert!(!w.take(&[r("Call", 100)], day));
+        // New words are news.
+        w.touch();
+        assert!(w.take(&[r("Call Sam", 100)], day));
+        // The reminder's time came: a look (it goes from the list).
+        assert!(!w.due(99, day));
+        assert!(w.due(100, day));
+        assert!(w.take(&[], day));
+        assert!(!w.due(1_000_000, day));
+        // A new day: a look.
+        assert!(w.due(1_000_000, day.succ_opt().unwrap()));
+    }
 
     #[test]
     fn a_reminder_names_the_day_as_it_is_when_it_shows() {

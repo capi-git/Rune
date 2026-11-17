@@ -3,7 +3,7 @@
 //! of the page card (breadcrumbs and page actions).
 
 use super::icons::{Icon, PageIcon};
-use crate::state::{ancestors, AppState, Popover, Route};
+use crate::state::{ancestors, AiStatus, AppState, Popover, Route};
 use dioxus::prelude::*;
 
 /// Icon and title for what a route shows.
@@ -29,6 +29,51 @@ fn pin_letter(route: &Route, pages: &std::collections::HashMap<String, crate::mo
     page.title.trim().chars().next().map(|c| c.to_uppercase().to_string())
 }
 
+/// Something that goes on in the page of a tab, shown on its tab (or on
+/// its part of the tab) by a small dot: Rune listens to a meeting there, or
+/// the AI writes there. The tab of a meeting in another tab was not to be
+/// found, and a wait for the AI on one page gave no sign on the others.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Busy {
+    Listening,
+    Writing,
+}
+
+impl Busy {
+    fn class(self) -> &'static str {
+        match self {
+            Busy::Listening => "tab-busy listening",
+            Busy::Writing => "tab-busy writing",
+        }
+    }
+
+    fn says(self) -> &'static str {
+        match self {
+            Busy::Listening => "Rune is listening",
+            Busy::Writing => "The AI is writing",
+        }
+    }
+}
+
+/// The sign for a page shown by a tab: listening first (it is the one that
+/// must not be missed), then writing.
+fn busy_at(route: &Route, listening: Option<&str>, writing: Option<&str>) -> Option<Busy> {
+    let Route::Page(id) = route else { return None };
+    if listening == Some(id.as_str()) {
+        Some(Busy::Listening)
+    } else if writing == Some(id.as_str()) {
+        Some(Busy::Writing)
+    } else {
+        None
+    }
+}
+
+/// The sign of a whole tab: the strongest of its pages.
+fn busy_of<'a>(routes: impl IntoIterator<Item = &'a Route>, listening: Option<&str>, writing: Option<&str>) -> Option<Busy> {
+    let signs: Vec<Busy> = routes.into_iter().filter_map(|r| busy_at(r, listening, writing)).collect();
+    signs.iter().copied().find(|b| *b == Busy::Listening).or(signs.first().copied())
+}
+
 #[derive(Clone, PartialEq)]
 struct Shown {
     index: usize,
@@ -36,8 +81,10 @@ struct Shown {
     icon: Option<String>,
     title: String,
     /// One part per page, in reading order, when the tab holds several:
-    /// (pane, icon, title).
-    segs: Vec<(String, Option<String>, String)>,
+    /// (pane, icon, title, sign).
+    segs: Vec<(String, Option<String>, String, Option<Busy>)>,
+    /// The sign of the tab, when it is drawn as one part.
+    busy: Option<Busy>,
     /// The pane in focus.
     focus: String,
     active: bool,
@@ -52,6 +99,14 @@ struct Shown {
 #[component]
 pub fn TopRow() -> Element {
     let state = use_context::<AppState>();
+    // (Memos: the row is drawn again when the page of a sign changes, not
+    // at each word the AI or the transcript adds.)
+    let listening = use_memo(move || state.listening.read().as_ref().map(|l| l.page.clone()));
+    let writing = use_memo(move || {
+        state.ai.read().as_ref().filter(|a| matches!(a.status, AiStatus::Prompting | AiStatus::Streaming)).map(|a| a.page_id.clone())
+    });
+    let (listening, writing) = (listening(), writing());
+    let (listening, writing) = (listening.as_deref(), writing.as_deref());
     let ui = state.ui.read();
     let pages = state.pages.read();
     let shown: Vec<Shown> = ui
@@ -65,17 +120,23 @@ pub fn TopRow() -> Element {
                     .into_iter()
                     .map(|p| {
                         let (icon, title) = label(p.route(), &pages);
-                        (p.id.clone(), icon, title)
+                        (p.id.clone(), icon, title, busy_at(p.route(), listening, writing))
                     })
                     .collect()
             } else {
                 Vec::new()
             };
+            let busy = busy_of(t.ordered().into_iter().map(|p| p.route()), listening, writing);
             let names = if segs.is_empty() { title.clone() } else { segs.iter().map(|s| s.2.as_str()).collect::<Vec<_>>().join(" | ") };
+            let names = match busy {
+                Some(b) => format!("{names} · {}", b.says()),
+                None => names,
+            };
             // A pinned tab is drawn as one part, with the icon of its first page.
             let (icon, segs) = if t.pinned { (segs.first().map(|s| s.1.clone()).unwrap_or(icon), Vec::new()) } else { (icon, segs) };
+            let busy = if segs.is_empty() { busy } else { None };
             let letter = t.ordered().first().filter(|_| t.pinned).and_then(|first| pin_letter(first.route(), &pages));
-            Shown { index: i, id: t.id.clone(), icon, title, segs, focus: t.focus.clone(), active: i == ui.active, pinned: t.pinned, names, letter }
+            Shown { index: i, id: t.id.clone(), icon, title, segs, busy, focus: t.focus.clone(), active: i == ui.active, pinned: t.pinned, names, letter }
         })
         .collect();
     let menu = match &ui.popover {
@@ -155,7 +216,7 @@ pub fn TopRow() -> Element {
                             // One part per page: click it to work there, drag
                             // it along the bar to move the tab, or pull it
                             // out to give that page a tab (or a place) of its own.
-                            for (pane, icon, title) in t.segs.clone() {
+                            for (pane, icon, title, busy) in t.segs.clone() {
                                 span {
                                     key: "{pane}",
                                     class: if t.active && t.focus == pane { "tab-seg on" } else { "tab-seg" },
@@ -185,8 +246,14 @@ pub fn TopRow() -> Element {
                                     },
                                     span { class: "tab-icon", PageIcon { icon, size: 14 } }
                                     span { class: "tab-title", "{title}" }
+                                    if let Some(b) = busy {
+                                        span { class: b.class(), title: b.says() }
+                                    }
                                 }
                             }
+                        }
+                        if let Some(b) = t.busy {
+                            span { class: b.class(), title: b.says() }
                         }
                         if !t.pinned {
                             button {
@@ -208,7 +275,7 @@ pub fn TopRow() -> Element {
                 button {
                     class: "bar-btn new-tab",
                     title: "New tab (⌘T)",
-                    onclick: move |_| state.new_tab(),
+                    onclick: move |_| state.new_tab_to_find(),
                     Icon { name: "plus", size: 16 }
                 }
             }
@@ -670,5 +737,20 @@ mod tests {
         assert_eq!(letter("bare"), None);
         assert_eq!(letter("gone"), None);
         assert_eq!(pin_letter(&Route::Home, &pages), None);
+    }
+
+    #[test]
+    fn a_tab_shows_what_goes_on_in_its_pages() {
+        let (meeting, draft, other) = (Route::Page("m".into()), Route::Page("d".into()), Route::Page("o".into()));
+        assert_eq!(busy_at(&meeting, Some("m"), None), Some(Busy::Listening));
+        assert_eq!(busy_at(&draft, Some("m"), Some("d")), Some(Busy::Writing));
+        assert_eq!(busy_at(&other, Some("m"), Some("d")), None);
+        assert_eq!(busy_at(&Route::Home, Some("m"), Some("d")), None);
+        // Listening is the sign of a tab that has both, whatever the order.
+        assert_eq!(busy_of([&draft, &meeting], Some("m"), Some("d")), Some(Busy::Listening));
+        assert_eq!(busy_of([&other, &draft], Some("m"), Some("d")), Some(Busy::Writing));
+        assert_eq!(busy_of([&other], None, None), None);
+        // The AI and the meeting on one page: listening.
+        assert_eq!(busy_at(&meeting, Some("m"), Some("m")), Some(Busy::Listening));
     }
 }

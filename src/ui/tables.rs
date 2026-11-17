@@ -229,8 +229,6 @@ pub fn TableView(page_id: String, id: String, data: String) -> Element {
         });
     }
     let layout = table.view.layout;
-    let today = crate::when::today();
-    let has_date = table.first_of(Kind::Date).is_some();
     let named = !table.name.is_empty() || !table.icon.is_empty();
     let (p, b) = (page_id.clone(), id.clone());
     let body = match layout {
@@ -265,18 +263,9 @@ pub fn TableView(page_id: String, id: String, data: String) -> Element {
                     IconMenu { page_id: page_id.clone(), id: id.clone(), icon: table.icon.clone() }
                 }
             }
+            // (The plain layout has its new row as the last row of the grid.)
             if layout != Layout::Table {
                 button { class: "table-today", "data-new-row": "1", onclick: move |_| state.new_card(&p, &b, &[]),
-                    Icon { name: "plus", size: 14 }
-                    span { "New row" }
-                }
-            } else if has_date {
-                button { class: "table-today", "data-new-row": "1", title: "Add a row with the date of {format_day(today, today)}", onclick: move |_| state.add_today_row(&p, &b),
-                    Icon { name: "plus", size: 14 }
-                    span { "New row" }
-                }
-            } else {
-                button { class: "table-today", "data-new-row": "1", onclick: move |_| state.new_table_row(&p, &b, &[]),
                     Icon { name: "plus", size: 14 }
                     span { "New row" }
                 }
@@ -559,6 +548,9 @@ fn Grid(page_id: String, id: String, table: Table, order: Vec<usize>, picked: Ve
     // cut at its left edge while it is scrolled sideways is made again.)
     document::eval(&format!("window.__rune && window.__rune.freezeColumns && window.__rune.freezeColumns({})", serde_json::to_string(&id).unwrap_or_default()));
     let b_kinds = id.clone();
+    let (p_new, b_new) = (page_id.clone(), id.clone());
+    let today = crate::when::today();
+    let has_date = table.first_of(Kind::Date).is_some();
     let block_class = format!("table-block{}{}{}{}", if typed { " typed" } else { "" }, if any_menu { " menu-open" } else { "" }, if locked { " locked" } else { "" }, if table.view.sort.is_empty() { "" } else { " sorted" });
     rsx! {
         div { class: "table-frame",
@@ -658,6 +650,10 @@ fn Grid(page_id: String, id: String, table: Table, order: Vec<usize>, picked: Ve
                                                                     Icon { name: "triangle-right", size: 10 }
                                                                 }
                                                             }
+                                                            // (A row of a table with kinds opens as a page: it says so.)
+                                                            if typed {
+                                                                span { class: "row-page-ico", "aria-hidden": "true", Icon { name: "file", size: 15 } }
+                                                            }
                                                             CellBody {
                                                                 page_id: page_id.clone(),
                                                                 id: id.clone(),
@@ -706,6 +702,25 @@ fn Grid(page_id: String, id: String, table: Table, order: Vec<usize>, picked: Ve
                                                 }
                                             }
                                         }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // A new row: the last line of the table, under its rows
+                    // (its button stays at the left while the table scrolls).
+                    tbody { class: "new-row-line",
+                        tr {
+                            td { colspan: "{cols.len()}",
+                                if has_date {
+                                    button { class: "table-today", "data-new-row": "1", title: "Add a row with the date of {format_day(today, today)}", onclick: move |_| state.add_today_row(&p_new, &b_new),
+                                        Icon { name: "plus", size: 14 }
+                                        span { if typed { "New page" } else { "New row" } }
+                                    }
+                                } else {
+                                    button { class: "table-today", "data-new-row": "1", onclick: move |_| state.new_table_row(&p_new, &b_new, &[]),
+                                        Icon { name: "plus", size: 14 }
+                                        span { if typed { "New page" } else { "New row" } }
                                     }
                                 }
                             }

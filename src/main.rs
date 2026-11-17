@@ -15,6 +15,7 @@ mod ai;
 mod ai_keep_tests;
 mod attach;
 mod aven;
+mod backlinks;
 mod backup;
 mod calc;
 mod chart;
@@ -43,6 +44,7 @@ mod pad;
 mod player;
 mod quickadd;
 mod slots;
+mod stream;
 mod state;
 mod store;
 mod sync;
@@ -66,6 +68,39 @@ thread_local! {
     static MENU: Menu = build_menu();
     /// View ▸ Typewriter Mode: its check mark (see `check_typewriter`).
     static TYPEWRITER: CheckMenuItem = CheckMenuItem::with_id("typewriter", "Typewriter Mode", true, false, None);
+    /// The Edit menu, and its two AI items: they are in it only while an AI
+    /// tool is connected (see `show_ai_menu`).
+    static EDIT: std::cell::RefCell<Option<Submenu>> = const { std::cell::RefCell::new(None) };
+    static AI_ITEMS: [MenuItem; 2] = [
+        MenuItem::with_id("ai", "Ask AI…", true, "CmdOrCtrl+J".parse::<Accelerator>().ok()),
+        MenuItem::with_id("ask_notes", "Ask Your Notes…", true, "CmdOrCtrl+Shift+J".parse::<Accelerator>().ok()),
+    ];
+    static AI_IN_MENU: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// With no AI tool connected, nothing of the AI shows: Edit ▸ Ask AI… and
+/// Ask Your Notes… are in the menu only while one is.
+pub fn show_ai_menu(on: bool) {
+    if AI_IN_MENU.with(|c| c.get()) == on {
+        return;
+    }
+    let done = EDIT.with(|edit| {
+        let edit = edit.borrow();
+        let Some(edit) = edit.as_ref() else { return false };
+        AI_ITEMS.with(|items| {
+            for item in items {
+                if on {
+                    let _ = edit.append(item);
+                } else {
+                    let _ = edit.remove(item);
+                }
+            }
+        });
+        true
+    });
+    if done {
+        AI_IN_MENU.with(|c| c.set(on));
+    }
 }
 
 /// The check mark of View ▸ Typewriter Mode says whether it is on.
@@ -287,11 +322,12 @@ fn build_menu() -> Menu {
             &item("find_prev", "Find Previous", Some("CmdOrCtrl+Shift+G")),
             &PredefinedMenuItem::separator(),
             &item("quick_find", "Search…", Some("CmdOrCtrl+K")),
-            &item("ai", "Ask AI…", Some("CmdOrCtrl+J")),
-            &item("ask_notes", "Ask Your Notes…", Some("CmdOrCtrl+Shift+J")),
         ],
     )
     .expect("edit menu");
+    EDIT.with(|e| *e.borrow_mut() = Some(edit.clone()));
+    // (As the app last knew it, until the AI tools are looked for.)
+    show_ai_menu(ai::shown());
 
     let format = Submenu::with_items(
         "Format",
@@ -314,6 +350,7 @@ fn build_menu() -> Menu {
             &item("toggle_sidebar", "Show/Hide Sidebar", Some("CmdOrCtrl+\\")),
             &item("focus_mode", "Focus Mode", Some("CmdOrCtrl+.")),
             &TYPEWRITER.with(|t| t.clone()),
+            &item("stream", "Stream (⌃⌥S, from any app)", None),
             &item("calendar", "Calendar", Some("CmdOrCtrl+Shift+C")),
             &item("read_aloud", "Read Page Aloud / Stop", Some("CmdOrCtrl+Shift+R")),
             &item("close_split", "Close Pane", None),

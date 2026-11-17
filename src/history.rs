@@ -4,8 +4,15 @@
 //! grouped into a single step until there's a pause. Undo works on the page
 //! you're looking at; side effects on other pages (a sub-page created by the
 //! `/page` command, linked pages trashed with a deleted block) are undone too.
+//!
+//! A step keeps the page as two lists of shared lines: a line that one step
+//! did not change is the same line in memory as in the step before. (With a
+//! full copy of the page twice in each of 300 steps, a long page such as the
+//! Stream took hundreds of megabytes.)
 
 use crate::model::{utf16_len, Block, Caret, Id};
+use std::collections::HashMap;
+use std::rc::Rc;
 
 const GROUP_TYPING_MS: i64 = 1200;
 /// The longest run of typing that is one step. (With no pause it had no
@@ -13,11 +20,62 @@ const GROUP_TYPING_MS: i64 = 1200;
 const LONGEST_TYPING_MS: i64 = 5000;
 const LIMIT: usize = 300;
 
+/// A page as one step saw it: its lines, each shared with the steps that
+/// have the same line.
+type Snap = Rc<Vec<Rc<Block>>>;
+
+/// The lines of `blocks`, sharing each line that is the same in `like`
+/// (the page as the step before saw it).
+fn share(blocks: Vec<Block>, like: Option<&Snap>) -> Snap {
+    let Some(like) = like else { return Rc::new(blocks.into_iter().map(Rc::new).collect()) };
+    // Most lines are where they were; the others are found by their id.
+    let mut by_id: Option<HashMap<&str, &Rc<Block>>> = None;
+    let mut all_same = blocks.len() == like.len();
+    let out: Vec<Rc<Block>> = blocks
+        .into_iter()
+        .enumerate()
+        .map(|(i, b)| {
+            if let Some(old) = like.get(i).filter(|old| old.id == b.id) {
+                if **old == b {
+                    return old.clone();
+                }
+                all_same = false;
+                return Rc::new(b);
+            }
+            all_same = false;
+            let map = by_id.get_or_insert_with(|| like.iter().map(|o| (o.id.as_str(), o)).collect());
+            match map.get(b.id.as_str()) {
+                Some(old) if ***old == b => (*old).clone(),
+                _ => Rc::new(b),
+            }
+        })
+        .collect();
+    if all_same {
+        like.clone()
+    } else {
+        Rc::new(out)
+    }
+}
+
+fn unshare(snap: &Snap) -> Vec<Block> {
+    snap.iter().map(|b| (**b).clone()).collect()
+}
+
+/// Change the lines of `snap` that `pick` picks (each only for this step).
+fn change(snap: &mut Snap, pick: impl Fn(&Block) -> bool, edit: impl Fn(&mut Block)) {
+    if !snap.iter().any(|b| pick(b)) {
+        return;
+    }
+    for b in Rc::make_mut(snap).iter_mut().filter(|b| pick(b)) {
+        edit(Rc::make_mut(b));
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry {
     pub page: Id,
-    pub before: Vec<Block>,
-    pub after: Vec<Block>,
+    before: Snap,
+    after: Snap,
     /// Set while the step is plain typing in this block (so it can grow).
     typing: Option<Id>,
     at: i64,
@@ -57,12 +115,22 @@ impl Joined {
 }
 
 impl Entry {
+    /// The page before this step.
+    pub fn before(&self) -> Vec<Block> {
+        unshare(&self.before)
+    }
+
+    /// The page after this step.
+    pub fn after(&self) -> Vec<Block> {
+        unshare(&self.after)
+    }
+
     /// A block of this step has another id in the page now (a table that
     /// came back as a copy, see `tables_put_back` in state.rs): the step
     /// goes by that id.
     pub fn rename_block(&mut self, was: &str, now: &str) {
-        for b in self.before.iter_mut().chain(self.after.iter_mut()).filter(|b| b.id == was) {
-            b.id = now.to_string();
+        for snap in [&mut self.before, &mut self.after] {
+            change(snap, |b| b.id == was, |b| b.id = now.to_string());
         }
     }
 }
@@ -83,11 +151,15 @@ impl History {
         self.redo.retain(|e| e.page != page);
         if let (Some(t), Some(last)) = (typing, self.undo.last_mut()) {
             if last.page == page && last.typing.as_deref() == Some(t) && now - last.at < GROUP_TYPING_MS && now - last.since < LONGEST_TYPING_MS {
-                last.after = after;
+                last.after = share(after, Some(&last.after));
                 last.at = now;
                 return;
             }
         }
+        // (The lines this step did not change are those of the page's last step.)
+        let like = self.undo.iter().rfind(|e| e.page == page).map(|e| &e.after);
+        let before = share(before, like);
+        let after = share(after, Some(&before));
         self.undo.push(Entry {
             page: page.to_string(),
             before,
@@ -110,10 +182,8 @@ impl History {
     /// page steps carry the latest drawing rather than winding it back.
     pub fn set_data(&mut self, block: &str, data: &str) {
         for e in self.undo.iter_mut().chain(self.redo.iter_mut()) {
-            for b in e.before.iter_mut().chain(e.after.iter_mut()) {
-                if b.id == block && b.data != data {
-                    b.data = data.to_string();
-                }
+            for snap in [&mut e.before, &mut e.after] {
+                change(snap, |b| b.id == block && b.data != data, |b| b.data = data.to_string());
             }
         }
     }
@@ -291,7 +361,7 @@ mod tests {
         h.record("p", a.clone(), b.clone(), Some(&id), 0);
         h.record("p", b.clone(), c.clone(), Some(&id), 500);
         let e = h.take_undo("p").unwrap();
-        assert_eq!((e.before, e.after), (a.clone(), c.clone()));
+        assert_eq!((e.before(), e.after()), (a.clone(), c.clone()));
         h.record("p", a, b.clone(), Some(&id), 0);
         h.record("p", b, c, Some(&id), 5000);
         assert!(h.take_undo("p").is_some() && h.take_undo("p").is_some());
@@ -306,7 +376,7 @@ mod tests {
             h.record("p", before.clone(), after.clone(), Some(&id), n * 500);
             before = after;
         }
-        let steps: Vec<usize> = std::iter::from_fn(|| h.take_undo("p")).map(|e| e.after[0].text.len() - e.before[0].text.len()).collect();
+        let steps: Vec<usize> = std::iter::from_fn(|| h.take_undo("p")).map(|e| e.after()[0].text.len() - e.before()[0].text.len()).collect();
         assert_eq!(steps, [10, 10, 10]);
     }
 
@@ -462,6 +532,74 @@ mod tests {
         // With nothing before it, it goes first.
         let now = vec![heard.clone()];
         assert_eq!(ids(&rebase(&now, &[], &before)), ["one", "two", "Sam: hello"]);
+    }
+
+    /// How many lines the history holds in memory (a shared line once).
+    fn lines_held(h: &History) -> usize {
+        let mut seen = std::collections::HashSet::new();
+        for e in h.undo.iter().chain(h.redo.iter()) {
+            for b in e.before.iter().chain(e.after.iter()) {
+                seen.insert(Rc::as_ptr(b));
+            }
+        }
+        seen.len()
+    }
+
+    #[test]
+    fn a_long_page_is_not_copied_into_every_step() {
+        let mut page: Vec<Block> = (0..5000).map(|n| Block::text(&format!("line {n}"))).collect();
+        let mut h = History::default();
+        // 300 steps: a line changed, a line added, a line taken out.
+        for n in 0..300 {
+            let before = page.clone();
+            match n % 3 {
+                0 => page[n].text.push('!'),
+                1 => page.insert(n, Block::text("new")),
+                _ => {
+                    page.remove(n + 1);
+                }
+            }
+            h.record("p", before, page.clone(), None, n as i64 * 10_000);
+        }
+        assert_eq!(h.undo.len(), 300);
+        // The lines of the page once, and one more for each step: not two
+        // pages for each step (3,000,000 lines).
+        assert!(lines_held(&h) <= 5000 + 300 + 1, "{}", lines_held(&h));
+        // Each step still gives the whole page back, step by step.
+        for _ in 0..300 {
+            let e = h.take_undo("p").unwrap();
+            assert_eq!(e.after(), page);
+            page = e.before();
+            h.push_redo(e);
+        }
+        assert_eq!(page.len(), 5000);
+        assert_eq!(page[0].text, "line 0");
+        // And Redo brings it all back.
+        while let Some(e) = h.take_redo("p") {
+            assert_eq!(e.before(), page);
+            page = e.after();
+        }
+        assert_eq!(page.len(), 5000 + 100 - 100);
+    }
+
+    #[test]
+    fn a_drawing_or_a_new_id_changes_only_the_steps_that_have_that_line() {
+        let a = Block::text("a");
+        let mut drawing = Block::text("");
+        drawing.data = "old".into();
+        let mut a2 = a.clone();
+        a2.text = "a!".into();
+        let mut h = History::default();
+        h.record("p", vec![a.clone(), drawing.clone()], vec![a2.clone(), drawing.clone()], None, 0);
+        h.record("q", vec![a.clone()], vec![a2.clone()], None, 0);
+        h.set_data(&drawing.id, "new");
+        let q = h.take_undo("q").unwrap();
+        assert_eq!((q.before(), q.after()), (vec![a.clone()], vec![a2.clone()]));
+        let mut e = h.take_undo("p").unwrap();
+        assert!(e.before()[1].data == "new" && e.after()[1].data == "new");
+        e.rename_block(&a.id, "copy");
+        assert_eq!((e.before()[0].id.as_str(), e.after()[0].id.as_str()), ("copy", "copy"));
+        assert_eq!(q.before()[0].id, a.id, "the other page's step keeps its line");
     }
 
     #[test]

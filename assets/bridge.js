@@ -1743,14 +1743,54 @@ document.addEventListener('click', (e) => {
 
 // ----- sliding highlight under the active tab (as in Aven) -------------------
 
+// More tabs than the row has room for: data-more says at which side more
+// are, and the row fades out there (style.css).
+const tabEdges = (tabs) => {
+  const left = tabs.scrollLeft > 1;
+  const right = tabs.scrollLeft + tabs.clientWidth < tabs.scrollWidth - 1;
+  const more = [left && 'left', right && 'right'].filter(Boolean).join(' ');
+  if ((tabs.dataset.more || '') === more) return;
+  if (more) tabs.dataset.more = more;
+  else delete tabs.dataset.more;
+};
+document.addEventListener(
+  'scroll',
+  (e) => {
+    if (e.target.classList && e.target.classList.contains('tabs')) tabEdges(e.target);
+  },
+  true,
+);
+
+// A tab that comes to the front is brought into sight in the row, clear of
+// the fade (a new tab went in at the end, out of sight, and nothing showed
+// where it was). Only when the tab in front changes or the row's width
+// does: a row the person scrolled stays where they put it.
+const tabInSight = (tabs, active, animate) => {
+  const pad = 40;
+  const from = active.offsetLeft - (active.previousElementSibling && active.previousElementSibling.classList.contains('tab') ? pad : 0);
+  const to = active.offsetLeft + active.offsetWidth + pad;
+  let left = tabs.scrollLeft;
+  if (from < left) left = from;
+  else if (to > left + tabs.clientWidth) left = to - tabs.clientWidth;
+  left = Math.max(0, Math.min(left, tabs.scrollWidth - tabs.clientWidth));
+  if (Math.abs(left - tabs.scrollLeft) < 1) return;
+  const smooth = animate && !matchMedia('(prefers-reduced-motion: reduce)').matches;
+  tabs.scrollTo({ left, behavior: smooth ? 'smooth' : 'auto' });
+};
+
 const placeGlider = (animate) => {
   document.querySelectorAll('.tabs').forEach((tabs) => {
+    tabEdges(tabs);
     const glider = tabs.querySelector(':scope > .tab-glider');
     if (!glider) return;
     const active = tabs.querySelector(':scope > .tab.active');
     if (!active) {
       glider.style.opacity = '0';
       return;
+    }
+    if (tabs._front !== active.dataset.tab || tabsResized) {
+      tabs._front = active.dataset.tab;
+      tabInSight(tabs, active, animate && glider._placed);
     }
     // Another space has other tabs: nothing to slide from.
     const jump = !animate || !glider._placed || glider._space !== tabs.dataset.space;
@@ -1766,6 +1806,7 @@ const placeGlider = (animate) => {
     glider._placed = true;
     tabs.dataset.glider = '1';
   });
+  tabsResized = false;
 };
 let gliderQueued = 0;
 const queueGlider = (animate) => {
@@ -1785,11 +1826,13 @@ const gliderWatch = new MutationObserver((mutations) => {
   if (mutations.some((m) => m.type !== 'attributes' || lasting(m.oldValue) !== lasting(m.target.getAttribute('class')))) queueGlider(true);
 });
 let tabsWidth = 0;
+let tabsResized = false;
 const tabsResize = typeof ResizeObserver !== 'undefined'
   ? new ResizeObserver((entries) => {
       const w = Math.round(entries[0].contentRect.width);
       if (w !== tabsWidth) {
         tabsWidth = w;
+        tabsResized = true;
         queueGlider(false); // follow resizes instantly, slide only on switches
       }
     })
@@ -5456,6 +5499,41 @@ const queueOutline = () => {
   requestAnimationFrame(markOutline);
 };
 document.addEventListener('scroll', queueOutline, true);
+
+// The Stream: while it is scrolled back, the date of the day in view shows
+// in the small label at its top (`.stream-now`, style.css).
+let streamQueued = false;
+const markStreamDay = () => {
+  streamQueued = false;
+  document.querySelectorAll('.stream-now').forEach((label) => {
+    const scroller = label.closest('.scroller');
+    const page = scroller && scroller.querySelector('.page.stream');
+    if (!page) return;
+    const top = scroller.getBoundingClientRect().top;
+    // The last date line above the top (a halving search: the Stream grows
+    // a date line each day, and this runs on each frame of a scroll).
+    const days = page.querySelectorAll('.block-row.kind-heading3');
+    let lo = 0;
+    let hi = days.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (days[mid].getBoundingClientRect().top <= top + 40) lo = mid + 1;
+      else hi = mid;
+    }
+    const day = lo > 0 ? days[lo - 1] : null;
+    // Only when that day's own date line is out of view.
+    const on = !!day && day.getBoundingClientRect().bottom < top + 4;
+    const span = label.firstElementChild;
+    if (on) span.textContent = day.querySelector('.blk')?.textContent.trim() || '';
+    label.classList.toggle('on', on && !!span.textContent);
+  });
+};
+const queueStreamDay = () => {
+  if (streamQueued) return;
+  streamQueued = true;
+  requestAnimationFrame(markStreamDay);
+};
+document.addEventListener('scroll', queueStreamDay, true);
 
 // ----- a page keeps its scroll place -------------------------------------------------
 // The box that scrolls a pane is used again for the next tab, and made anew

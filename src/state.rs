@@ -419,6 +419,10 @@ pub enum Popover {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Modal {
     QuickFind,
+    /// The search box over a tab on Home that the + of the tab row (or ⌘T)
+    /// brought forward; `made`: the + made that tab just now, so a page
+    /// chosen in the box takes its place (see `let_go_made_tab`).
+    NewTab { made: bool },
     Settings,
     Trash,
     /// Earlier versions of the page in `Ui::history`.
@@ -435,6 +439,9 @@ pub enum Modal {
 
 /// The keys that open the AI from any app (Settings ▸ AI ▸ Voice).
 pub const AI_SHORTCUT: &str = "ctrl+alt+space";
+
+/// The Stream from anywhere (see `open_stream`).
+pub const STREAM_SHORTCUT: &str = "ctrl+alt+s";
 
 /// What the voice box does with what is said (see `Modal::Voice`).
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -462,8 +469,17 @@ fn view_tab(tab: &Tab) -> Option<&Route> {
 }
 
 /// A tab that only shows Home (one pane, on Home).
+#[cfg(test)]
 fn is_home_tab(tab: &Tab) -> bool {
     view_tab(tab) == Some(&Route::Home)
+}
+
+/// The view of a tab that counts for "one tab at most" (see
+/// `one_home_tab`): not that of a pinned tab, the person's own place,
+/// which stays as it is. (A pinned tab on Home was the one Home tab: "+"
+/// brought it forward, the tab already in front, and did nothing to see.)
+fn one_of_its_view(tab: &Tab) -> Option<&Route> {
+    view_tab(tab).filter(|_| !tab.pinned)
 }
 
 /// One tab at most for each of Home, the calendar and the graph in a row
@@ -478,7 +494,7 @@ fn one_home_tab(tabs: &mut Vec<Tab>, active: &mut usize) -> bool {
 }
 
 fn one_tab_of(tabs: &mut Vec<Tab>, active: &mut usize, view: &Route) -> bool {
-    let homes: Vec<usize> = (0..tabs.len()).filter(|&i| view_tab(&tabs[i]) == Some(view)).collect();
+    let homes: Vec<usize> = (0..tabs.len()).filter(|&i| one_of_its_view(&tabs[i]) == Some(view)).collect();
     if homes.len() < 2 {
         return false;
     }
@@ -523,6 +539,46 @@ struct TabUse {
 thread_local! {
     /// The order of use of each window's tabs, by the window's key.
     static TAB_USE: std::cell::RefCell<HashMap<u64, TabUse>> = std::cell::RefCell::new(HashMap::new());
+    /// The pages whose last save failed, by the key of the window that
+    /// holds their words: each is written whole again (see `save_unsaved`).
+    static UNSAVED: std::cell::RefCell<HashMap<u64, HashSet<Id>>> = std::cell::RefCell::new(HashMap::new());
+}
+
+/// Mark a page of a window as not saved (`yes`), or as saved.
+fn mark_unsaved(key: u64, page_id: &str, yes: bool) {
+    UNSAVED.with(|u| {
+        let mut u = u.borrow_mut();
+        if yes {
+            u.entry(key).or_default().insert(page_id.to_string());
+        } else if let Some(set) = u.get_mut(&key) {
+            set.remove(page_id);
+        }
+    });
+}
+
+/// Whether the last save of this page in this window failed.
+fn is_unsaved(key: u64, page_id: &str) -> bool {
+    UNSAVED.with(|u| u.borrow().get(&key).is_some_and(|set| set.contains(page_id)))
+}
+
+#[cfg(test)]
+mod unsaved_tests {
+    use super::*;
+
+    #[test]
+    fn a_page_whose_save_failed_stays_marked_until_a_save_works_or_its_window_goes() {
+        mark_unsaved(901, "page-a", true);
+        assert!(is_unsaved(901, "page-a"));
+        // Only that window, and only that page.
+        assert!(!is_unsaved(902, "page-a"));
+        assert!(!is_unsaved(901, "page-b"));
+        // A save that worked takes the mark away.
+        mark_unsaved(901, "page-a", false);
+        assert!(!is_unsaved(901, "page-a"));
+        mark_unsaved(901, "page-a", true);
+        window_gone(901);
+        assert!(!is_unsaved(901, "page-a"));
+    }
 }
 
 /// This tab was used now: it comes first.
@@ -582,7 +638,8 @@ impl TabUse {
 /// in no space of their own.
 fn tab_space(tab: &Tab, pages: &HashMap<Id, Page>) -> Option<Id> {
     match tab.route() {
-        Route::Page(id) => pages.get(id).map(|p| p.space_id.clone()).filter(|s| !s.is_empty()),
+        // (A tab on the Stream stays in the space it was opened in.)
+        Route::Page(id) => pages.get(id).filter(|p| !crate::stream::is_stream_page(p)).map(|p| p.space_id.clone()).filter(|s| !s.is_empty()),
         _ => None,
     }
 }
@@ -2317,7 +2374,8 @@ impl Graph {
 /// The graph of the pages of one space: a link in the text of a page to
 /// another page joins the two; so does a page inside another (nesting).
 pub fn page_graph(pages: &HashMap<Id, Page>, blocks: &HashMap<Id, Vec<Block>>, space: &str) -> Graph {
-    let mut shown: Vec<&Page> = pages.values().filter(|p| !p.trashed && p.space_id == space).collect();
+    // (The Stream is no page of a space: it is not in the graph.)
+    let mut shown: Vec<&Page> = pages.values().filter(|p| !p.trashed && p.space_id == space && !crate::stream::is_stream_page(p)).collect();
     // An order that does not change as pages are edited, so a dot keeps its place.
     shown.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
     let at: HashMap<&str, usize> = shown.iter().enumerate().map(|(i, p)| (p.id.as_str(), i)).collect();
@@ -2493,6 +2551,51 @@ pub fn listening_in() -> Option<(u64, Id)> {
     LISTENER_WINDOW.with(|w| w.borrow().clone())
 }
 
+/// What the app holds while it listens to a meeting: what it hears, and
+/// the transcript so far with where it goes in the page.
+struct MeetingEars {
+    page: Id,
+    started: i64,
+    heard: futures_channel::mpsc::UnboundedReceiver<crate::listen::Heard>,
+    transcript: crate::listen::Transcript,
+    /// The "Transcript" toggle of the page, the lines it had before, and
+    /// the line that says when the app began to listen again.
+    toggle: Option<Id>,
+    kept: usize,
+    again: Option<Block>,
+    /// Words of the page that no notes were written from yet.
+    earlier: String,
+    /// The lines as they were written the last time (see `keep_changes`).
+    shown: Vec<String>,
+}
+
+/// The listening of a meeting, held by the window that reads it. A window
+/// that goes while it listens leaves it here, with every word heard so
+/// far: another window goes on from it, finishes the last words and
+/// writes the notes, as Stop does (see `window_gone`). Before, the words
+/// since the last write and the notes were lost.
+struct Ears(Option<MeetingEars>);
+
+impl Drop for Ears {
+    fn drop(&mut self) {
+        if let Some(job) = self.0.take() {
+            // (`try_with`: as the app quits, this store can be gone first.)
+            let _ = LEFT_EARS.try_with(|o| *o.borrow_mut() = Some(job));
+        }
+    }
+}
+
+thread_local! {
+    /// The listening of a meeting whose window went (see `Ears`).
+    static LEFT_EARS: std::cell::RefCell<Option<MeetingEars>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The other window that a listening goes on in when its window goes: the
+/// first that is still open.
+fn heir_window(gone: u64) -> Option<u64> {
+    sync::window_keys().into_iter().find(|k| *k != gone)
+}
+
 #[cfg(test)]
 pub fn listen_for_test(at: Option<(u64, Id)>) {
     LISTENER_WINDOW.with(|w| *w.borrow_mut() = at);
@@ -2518,17 +2621,85 @@ fn spaces_told(mine: &[Space], told: Vec<Space>, in_file: Option<Vec<Space>>) ->
     (list, gone)
 }
 
-/// A window goes. When the listener wrote for that window, it ends now: the
-/// tasks that read what it hears went with the window, and the microphone
-/// stayed on, unread, until the app quit. The words heard since the last
-/// write to the page (20 seconds at the most) and the notes are not
-/// written; the next notes of that page are written from all its transcript.
+/// A window goes. When the listener wrote for that window, the tasks that
+/// read what it hears go with the window. Another window that is open takes
+/// the listening over: it stops it as Stop does, so the last words go into
+/// the page and the notes are written (see `Ears`). The page stays open for
+/// that window if it is locked: call this before `lock::window_closed`.
+/// With no other window the listener ends now (the microphone stayed on,
+/// unread, until the app quit), and the next notes of that page are
+/// written from all its transcript.
 /// (The order of use of its tabs goes too: see `walk_tabs`.)
 pub fn window_gone(key: u64) {
     TAB_USE.with(|u| u.borrow_mut().remove(&key));
+    UNSAVED.with(|u| u.borrow_mut().remove(&key));
     let Some((_, page)) = LISTENER_WINDOW.with(|w| w.borrow_mut().take_if(|(of, _)| *of == key)) else { return };
+    if let Some(heir) = heir_window(key) {
+        LISTENER_WINDOW.with(|w| *w.borrow_mut() = Some((heir, page.clone())));
+        sync::to(heir, SyncMsg::TakeListening(page));
+        return;
+    }
     LISTENER.with(|l| l.borrow_mut().take());
     heard_not_noted(&page, None);
+}
+
+/// The ears that a window left, if they are of this page (see `Ears`).
+fn left_ears(page: &str) -> Option<MeetingEars> {
+    LEFT_EARS.with(|o| o.borrow_mut().take()).filter(|job| job.page == page)
+}
+
+#[cfg(test)]
+mod window_gone_tests {
+    use super::*;
+
+    fn ears(page: &str) -> Ears {
+        let (_tx, heard) = futures_channel::mpsc::unbounded();
+        let mut transcript = crate::listen::Transcript::default();
+        transcript.add(crate::listen::Who::Me, "So the budget is agreed.", 1.0);
+        Ears(Some(MeetingEars { page: page.into(), started: 1, heard, transcript, toggle: None, kept: 0, again: None, earlier: String::new(), shown: Vec::new() }))
+    }
+
+    #[test]
+    fn a_window_that_goes_while_it_listens_hands_the_meeting_to_another_window() {
+        let first = sync::join();
+        let second = sync::join();
+        let mut inbox = sync::take_receiver(second).unwrap();
+        listen_for_test(Some((first, "meeting-page".into())));
+        // The first window goes: its task drops what it heard, with every word.
+        drop(ears("meeting-page"));
+        window_gone(first);
+        sync::leave(first);
+        // The second window listens now, and is told to finish it.
+        assert_eq!(listening_in(), Some((second, "meeting-page".to_string())));
+        assert!(matches!(inbox.try_next(), Ok(Some(SyncMsg::TakeListening(p))) if p == "meeting-page"));
+        // What was heard is there for it, with the words.
+        let job = left_ears("meeting-page").expect("the words heard are kept");
+        assert_eq!(job.transcript.words(), 5);
+        assert!(HEARD_NOT_NOTED.with(|h| h.borrow().is_empty()));
+        listen_for_test(None);
+    }
+
+    #[test]
+    fn the_last_window_that_goes_while_it_listens_ends_the_listener() {
+        let only = sync::join();
+        listen_for_test(Some((only, "meeting-page".into())));
+        window_gone(only);
+        sync::leave(only);
+        assert_eq!(listening_in(), None);
+        // The next notes of the page are written from all its transcript.
+        assert!(HEARD_NOT_NOTED.with(|h| h.borrow().iter().any(|(p, from)| p == "meeting-page" && from.is_none())));
+    }
+
+    #[test]
+    fn ears_left_for_another_page_are_not_taken() {
+        drop(ears("old-page"));
+        assert!(left_ears("meeting-page").is_none());
+        // Ears that finished are not left.
+        let mut done = ears("meeting-page");
+        done.0.take();
+        drop(done);
+        assert!(left_ears("meeting-page").is_none());
+    }
 }
 
 thread_local! {
@@ -3239,7 +3410,12 @@ impl AppState {
         let Some(bs) = self.blocks.peek().get(page_id).cloned() else { return };
         self.note_edit(page_id);
         let now = now_ms();
-        store::with(|s| s.save_blocks_at(page_id, &bs, now));
+        // A save that failed (the disk was full, another program held the
+        // file) leaves the page marked: it is written whole at the next
+        // edit, or at the window's next check, so the words on screen are
+        // not lost.
+        let saved = store::with(|s| s.save_blocks_at(page_id, &bs, now)).is_some();
+        mark_unsaved(self.win.key, page_id, !saved && store::is_open());
         if let Some(p) = self.pages.peek().get(page_id) {
             let mut p = p.clone();
             p.updated_at = now;
@@ -3252,7 +3428,7 @@ impl AppState {
     fn save_ui(&self) {
         let doubled = {
             let ui = self.ui.peek();
-            let twice = |tabs: &Vec<Tab>| ONE_TAB_VIEWS.iter().any(|v| tabs.iter().filter(|t| view_tab(t) == Some(v)).count() > 1);
+            let twice = |tabs: &Vec<Tab>| ONE_TAB_VIEWS.iter().any(|v| tabs.iter().filter(|t| one_of_its_view(t) == Some(v)).count() > 1);
             twice(&ui.tabs) || ui.parked.values().any(|set| twice(&set.0))
         };
         if doubled {
@@ -3290,39 +3466,50 @@ impl AppState {
     /// Save one table after a letter was typed in a cell: its cells and the
     /// words kept beside them, in one row.
     fn save_block_cells(&self, page_id: &str, block_id: &str) {
-        // (A locked page is sealed whole at each save.)
-        if crate::lock::is_open(page_id) {
+        self.save_one_block(page_id, block_id, |s, b| s.save_block_cells(page_id, block_id, &b.text, &b.data, now_ms()));
+    }
+
+    fn save_block_text(&self, page_id: &str, block_id: &str) {
+        self.save_one_block(page_id, block_id, |s, b| s.save_block_text(page_id, block_id, &b.text, now_ms()));
+    }
+
+    /// Write one block of a page with `write`. The whole page is written
+    /// instead when it is locked (it is sealed whole at each save), when an
+    /// earlier save of it failed, or when the block is not in the file yet
+    /// (it was made by a save that failed): one row written to nothing lost
+    /// the words typed into that line.
+    fn save_one_block(&self, page_id: &str, block_id: &str, write: impl FnOnce(&store::Store, &Block) -> rusqlite::Result<bool>) {
+        if crate::lock::is_open(page_id) || is_unsaved(self.win.key, page_id) {
             return self.save_blocks(page_id);
         }
         self.note_edit(page_id);
-        let for_others = {
+        let (written, for_others) = {
             let blocks = self.blocks.peek();
             let Some(bs) = blocks.get(page_id) else { return };
-            if let Some(b) = bs.iter().find(|b| b.id == block_id) {
-                store::with(|s| s.save_block_cells(page_id, block_id, &b.text, &b.data, now_ms()));
-            }
-            (sync::window_count() > 1).then(|| bs.clone())
+            let written = match bs.iter().find(|b| b.id == block_id) {
+                Some(b) => store::with(|s| write(s, b)),
+                None => Some(true),
+            };
+            (written, (sync::window_count() > 1).then(|| bs.clone()))
         };
+        if written != Some(true) && store::is_open() {
+            return self.save_blocks(page_id);
+        }
         if let Some(bs) = for_others {
             sync::others(self.win.key, SyncMsg::Blocks(page_id.to_string(), bs));
         }
     }
 
-    fn save_block_text(&self, page_id: &str, block_id: &str) {
-        if crate::lock::is_open(page_id) {
-            return self.save_blocks(page_id);
-        }
-        self.note_edit(page_id);
-        let for_others = {
-            let blocks = self.blocks.peek();
-            let Some(bs) = blocks.get(page_id) else { return };
-            if let Some(b) = bs.iter().find(|b| b.id == block_id) {
-                store::with(|s| s.save_block_text(page_id, block_id, &b.text, now_ms()));
+    /// Write again the pages whose last save failed. The window asks at
+    /// short intervals (with its check for a fault of the notes file).
+    pub fn save_unsaved(&self) {
+        let pages: Vec<Id> = UNSAVED.with(|u| u.borrow().get(&self.win.key).map(|set| set.iter().cloned().collect()).unwrap_or_default());
+        for page_id in pages {
+            if self.blocks.peek().contains_key(&page_id) {
+                self.save_blocks(&page_id);
+            } else {
+                mark_unsaved(self.win.key, &page_id, false);
             }
-            (sync::window_count() > 1).then(|| bs.clone())
-        };
-        if let Some(bs) = for_others {
-            sync::others(self.win.key, SyncMsg::Blocks(page_id.to_string(), bs));
         }
     }
 
@@ -4324,6 +4511,97 @@ impl AppState {
         self.toast("Saved as a page");
     }
 
+    // ----- the Stream (see stream.rs) ---------------------------------------
+
+    /// The Stream page: one for the whole app, whatever space is in front.
+    /// It is known by its own icon, which goes with the page to the iPhone
+    /// and to other Macs (a setting stays on this Mac). Two of them (made on
+    /// two devices before they met): the older one is the Stream.
+    fn stream_id(&self) -> Option<Id> {
+        self.pages
+            .peek()
+            .values()
+            .filter(|p| !p.trashed && crate::stream::is_stream_page(p))
+            .min_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)))
+            .map(|p| p.id.clone())
+    }
+
+    /// The Stream, as a list (the sidebar keeps it out of its lists).
+    pub fn stream_ids(&self) -> HashSet<Id> {
+        self.stream_id().into_iter().collect()
+    }
+
+    /// Whether `page_id` is the Stream.
+    pub fn is_stream(&self, page_id: &str) -> bool {
+        self.stream_id().as_deref() == Some(page_id)
+    }
+
+    /// Open the Stream (made the first time, or again when its page went to
+    /// the trash) at today, with the caret at its foot. It opens in the
+    /// space in front, and the window stays in that space (see
+    /// `enter_space_of`): the page itself does not move.
+    pub fn open_stream(mut self) {
+        let id = match self.stream_id() {
+            Some(id) => id,
+            None => {
+                let id = self.create_page(None);
+                if let Some(p) = self.pages.write().get_mut(&id) {
+                    p.title = "Stream".into();
+                    p.icon = Some(crate::stream::ICON.into());
+                }
+                self.save_page(&id);
+                id
+            }
+        };
+        self.open_page(&id);
+        self.stream_today(&id);
+    }
+
+    /// Bring the Stream page `page_id` to today (see `stream::open_day`) and
+    /// put the caret at its foot.
+    pub fn stream_today(mut self, page_id: &str) {
+        if crate::lock::sealed(self.blocks.peek().get(page_id).map(|b| b.as_slice()).unwrap_or_default()).is_some() {
+            return;
+        }
+        let today = crate::stream::day_of(chrono::Local::now());
+        let (caret, changed) = {
+            let mut all = self.blocks.write();
+            let blocks = all.entry(page_id.to_string()).or_default();
+            crate::stream::open_day(blocks, today)
+        };
+        if changed {
+            self.save_blocks(page_id);
+        }
+        self.focus(Caret::end(&caret));
+    }
+
+    /// A new day came while the Stream is open (it was left open past 4 in
+    /// the morning): its date line goes at the foot. The caret moves to the
+    /// new line only when the line it was on went (an empty line at the foot).
+    pub fn stream_new_day(mut self, page_id: &str) {
+        let today = crate::stream::day_of(chrono::Local::now());
+        // (A look first, so that a minute with no new day writes nothing.)
+        let due = self.blocks.peek().get(page_id).is_some_and(|bs| crate::lock::sealed(bs).is_none() && crate::stream::last_day(bs).is_some_and(|d| d < today));
+        if !due {
+            return;
+        }
+        let (was_last, caret, changed) = {
+            let mut all = self.blocks.write();
+            let Some(blocks) = all.get_mut(page_id) else { return };
+            let was_last = blocks.last().map(|b| b.id.clone());
+            let (caret, changed) = crate::stream::open_day(blocks, today);
+            (was_last, caret, changed)
+        };
+        if !changed {
+            return;
+        }
+        self.save_blocks(page_id);
+        let gone = was_last.is_some_and(|id| !self.blocks.peek().get(page_id).is_some_and(|bs| bs.iter().any(|b| b.id == id)));
+        if gone {
+            self.focus(Caret::end(&caret));
+        }
+    }
+
     /// Open the calendar on an event (from Home).
     pub fn show_event(mut self, id: &str) {
         let Some(start) = self.any_event(id).map(|e| e.start) else { return };
@@ -4449,8 +4727,15 @@ impl AppState {
     /// front first, so the page gets its tab among the tabs of its own
     /// space. The answer says whether a tab showing it was made on the way.
     fn enter_space_of(self, route: &Route) -> bool {
+        // (The Stream is in every space: it opens where the window is.)
         let space = match route {
-            Route::Page(id) => self.pages.peek().get(id).map(|p| p.space_id.clone()).filter(|s| !s.is_empty()),
+            Route::Page(id) => self
+                .pages
+                .peek()
+                .get(id)
+                .filter(|p| !crate::stream::is_stream_page(p))
+                .map(|p| p.space_id.clone())
+                .filter(|s| !s.is_empty()),
             _ => None,
         };
         match space {
@@ -5289,7 +5574,7 @@ impl AppState {
     pub fn new_tab(mut self) {
         // There is one Home tab at most: it comes forward. The read ends
         // before select_tab writes (a guard in the `if let` would live on).
-        let home = self.ui.peek().tabs.iter().position(is_home_tab);
+        let home = self.ui.peek().tabs.iter().position(|t| one_of_its_view(t) == Some(&Route::Home));
         if let Some(i) = home {
             self.select_tab(i);
             self.flash_active_tab();
@@ -5304,6 +5589,36 @@ impl AppState {
             if ui.modal == Some(Modal::Settings) {
                 ui.modal = None;
             }
+        }
+        self.save_ui();
+    }
+
+    /// The + of the tab row and ⌘T: a tab on Home (a new one, or the Home
+    /// tab there is) with the search box over it, so a page can be named
+    /// at once, as in the address bar of a browser. (A new tab on Home only
+    /// was of little use: Home is in the sidebar, and a press on + while the
+    /// Home tab was in front did nothing that could be seen.)
+    pub fn new_tab_to_find(self) {
+        let before = self.ui.peek().tabs.len();
+        self.new_tab();
+        let made = self.ui.peek().tabs.len() > before;
+        self.set_modal(Some(Modal::NewTab { made }));
+    }
+
+    /// A page chosen in the search box of a tab the + made: that Home tab
+    /// goes (not to the closed tabs: it was not the person's), and the page
+    /// opens in its place at the end of the row, so no second Home tab is
+    /// left behind.
+    pub fn let_go_made_tab(mut self) {
+        {
+            let mut ui = self.ui.write();
+            let i = ui.active.min(ui.tabs.len() - 1);
+            let tab = &ui.tabs[i];
+            if ui.tabs.len() < 2 || tab.pinned || tab.is_split() || tab.route() != &Route::Home {
+                return;
+            }
+            ui.tabs.remove(i);
+            ui.active = i.saturating_sub(1).min(ui.tabs.len() - 1);
         }
         self.save_ui();
     }
@@ -6099,6 +6414,7 @@ impl AppState {
     /// needs one, and words the microphones to match).
     pub fn show_ai_state(self) {
         let on = ai::shown();
+        crate::show_ai_menu(on);
         let mut ai_on = self.ai_on;
         if *ai_on.peek() != on {
             ai_on.set(on);
@@ -6654,7 +6970,7 @@ impl AppState {
         }
         self.confirm_meeting(page);
         self.listen_offer.set(None);
-        let (listener, mut heard) = match crate::listen::start(true) {
+        let (listener, heard) = match crate::listen::start(true) {
             Ok(started) => started,
             Err(e) => {
                 self.pad_problem(page, &e);
@@ -6678,32 +6994,39 @@ impl AppState {
                 }
             }
         });
-        spawn_forever(async move {
-            use crate::listen::Heard;
-            let last_words = |text: &str| {
-                let words: Vec<&str> = text.split_whitespace().collect();
-                words[words.len().saturating_sub(9)..].join(" ")
-            };
-            let mut transcript = crate::listen::Transcript::default();
-            // Words heard in this page before (Stop and then Listen again, or
-            // a meeting that went on after it was said to be over) stay: the
-            // new ones go on under them in the same toggle, after a line
-            // that says when.
-            let (mut toggle, kept) = self.blocks.peek().get(&page).map(|bs| crate::listen::transcript_so_far(bs)).unwrap_or((None, 0));
-            let again = (kept > 0).then(|| crate::listen::again_line(&when::time_label(started)));
-            // Words of this page that no notes were written from (the app
-            // was closed while it listened, or the notes failed): the notes
-            // at the end are written from them too. (They were written from
-            // the new part alone: the first part of the meeting had none.)
-            let earlier = match HEARD_NOT_NOTED.with(|h| h.borrow_mut().iter_mut().find(|(p, _)| *p == page).map(|(_, from)| *from.get_or_insert_with(|| self.blocks.peek().get(&page).map_or(0, |bs| crate::listen::last_part(bs))))) {
-                Some(from) => self.blocks.peek().get(&page).map(|bs| crate::listen::heard_before(bs, from)).unwrap_or_default(),
-                None => String::new(),
-            };
-            // (The lines as they were written the last time: see `keep_changes`.)
-            let mut shown = Vec::new();
-            let mut written_at = now_ms();
-            let mut problem = None;
-            while let Some(event) = heard.next().await {
+        // Words heard in this page before (Stop and then Listen again, or
+        // a meeting that went on after it was said to be over) stay: the
+        // new ones go on under them in the same toggle, after a line
+        // that says when.
+        let (toggle, kept) = self.blocks.peek().get(&page).map(|bs| crate::listen::transcript_so_far(bs)).unwrap_or((None, 0));
+        let again = (kept > 0).then(|| crate::listen::again_line(&when::time_label(started)));
+        // Words of this page that no notes were written from (the app
+        // was closed while it listened, or the notes failed): the notes
+        // at the end are written from them too. (They were written from
+        // the new part alone: the first part of the meeting had none.)
+        let earlier = match HEARD_NOT_NOTED.with(|h| h.borrow_mut().iter_mut().find(|(p, _)| *p == page).map(|(_, from)| *from.get_or_insert_with(|| self.blocks.peek().get(&page).map_or(0, |bs| crate::listen::last_part(bs))))) {
+            Some(from) => self.blocks.peek().get(&page).map(|bs| crate::listen::heard_before(bs, from)).unwrap_or_default(),
+            None => String::new(),
+        };
+        LEFT_EARS.with(|o| o.borrow_mut().take());
+        let ears = Ears(Some(MeetingEars { page, started, heard, transcript: crate::listen::Transcript::default(), toggle, kept, again, earlier, shown: Vec::new() }));
+        spawn_forever(self.hear_meeting(ears));
+    }
+
+    /// Read what the listener hears into the page of a meeting, until it
+    /// stops; then write the notes. When the window goes before it stops,
+    /// another window goes on from where it was (see `Ears`).
+    async fn hear_meeting(mut self, mut ears: Ears) {
+        use crate::listen::Heard;
+        let last_words = |text: &str| {
+            let words: Vec<&str> = text.split_whitespace().collect();
+            words[words.len().saturating_sub(9)..].join(" ")
+        };
+        let mut written_at = now_ms();
+        let mut problem = None;
+        {
+            let Some(job) = ears.0.as_mut() else { return };
+            while let Some(event) = job.heard.next().await {
                 match event {
                     Heard::Listening { others } => {
                         if let Some(l) = self.listening.write().as_mut() {
@@ -6716,19 +7039,19 @@ impl AppState {
                         }
                     }
                     Heard::Final { who, text, at } => {
-                        transcript.add(who, &text, at);
+                        job.transcript.add(who, &text, at);
                         if let Some(l) = self.listening.write().as_mut() {
-                            l.words = transcript.words();
+                            l.words = job.transcript.words();
                             l.latest = last_words(&text);
                         }
                         // Into the page now and then, so nothing is lost if the app closes.
                         if now_ms() - written_at > 20_000 {
                             written_at = now_ms();
-                            self.write_transcript(&page, &mut toggle, kept, again.as_ref(), &transcript, &mut shown);
+                            self.write_transcript(&job.page, &mut job.toggle, job.kept, job.again.as_ref(), &job.transcript, &mut job.shown);
                         }
                     }
                     Heard::Note(message) => {
-                        self.pad_problem(&page, &message);
+                        self.pad_problem(&job.page, &message);
                         self.notice(message)
                     }
                     Heard::Error(message) => {
@@ -6738,6 +7061,9 @@ impl AppState {
                     Heard::Done => break,
                 }
             }
+        }
+        let Some(MeetingEars { page, transcript, mut toggle, kept, again, earlier, mut shown, .. }) = ears.0.take() else { return };
+        {
             LISTENER.with(|l| l.borrow_mut().take());
             LISTENER_WINDOW.with(|w| w.borrow_mut().take());
             self.write_transcript(&page, &mut toggle, kept, again.as_ref(), &transcript, &mut shown);
@@ -6808,7 +7134,7 @@ impl AppState {
                     self.toast("The notes are in the page")
                 }
             }
-        });
+        }
     }
 
     /// Put the transcript so far into the page (inside its "Transcript"
@@ -6865,6 +7191,30 @@ impl AppState {
                 });
             }
         });
+    }
+
+    /// The window that listened to a meeting in `page` went (see
+    /// `window_gone`): this window goes on with what it heard, and stops it
+    /// as Stop does, so the last words go into the page and the notes are
+    /// written.
+    fn take_listening(mut self, page: &str) {
+        // (The listening was ended some other way before this came.)
+        if !listening_in().is_some_and(|(of, p)| of == self.win.key && p == page) {
+            return;
+        }
+        let Some(job) = left_ears(page) else {
+            // Not a meeting (the notes of a video), or what it heard is
+            // gone: it ends now, and the next notes of the page are written
+            // from all its transcript.
+            LISTENER_WINDOW.with(|w| w.borrow_mut().take());
+            LISTENER.with(|l| l.borrow_mut().take());
+            heard_not_noted(page, None);
+            return;
+        };
+        let (started, words) = (job.started, job.transcript.words());
+        self.listening.set(Some(Listening { page: page.to_string(), started, seconds: (now_ms() - started) / 1000, others: false, words, latest: String::new(), stopping: false, video: false }));
+        spawn_forever(self.hear_meeting(Ears(Some(job))));
+        self.stop_listening();
     }
 
     // ----- read aloud ------------------------------------------------------
@@ -8577,7 +8927,8 @@ impl AppState {
         let mut typed_to = 0;
         let mut mid_line = false;
         let origin = Origin::Typing { block: block_id, text: &value };
-        self.edit_blocks_from(page_id, origin, |bs| {
+        // (A key typed changes this page only: see backlinks.rs.)
+        crate::backlinks::one_page(self.win.key, page_id, || self.edit_blocks_from(page_id, origin, |bs| {
             let Some(i) = index_of(bs, block_id) else { return };
             let code = bs[i].kind == BlockKind::Code;
             let plain = inline::plain_for(bs[i].kind, &value);
@@ -8613,7 +8964,7 @@ impl AppState {
                 typed_to = utf16_len(typed);
                 mid_line = typed.len() < plain.len();
             }
-        });
+        }));
         // With words after the caret, "/" opens its list only while a
         // command fits: "see /usr" typed in the middle of a line is words,
         // and the arrows, Return and Tab stay with the line. (Before the
@@ -9606,7 +9957,7 @@ impl AppState {
     pub fn set_table_cell(self, page: &str, id: &str, row: usize, column: usize, text: &str) {
         let group = format!("{id}#{row},{column}");
         let mut named_row = None;
-        self.edit_blocks_from(page, Origin::Cell { block: id, group: &group }, |bs| {
+        crate::backlinks::one_page(self.win.key, page, || self.edit_blocks_from(page, Origin::Cell { block: id, group: &group }, |bs| {
             if let Some(i) = index_of(bs, id).filter(|&i| bs[i].kind == BlockKind::Table) {
                 let mut table = crate::table::Table::parse(&bs[i].data);
                 // (The headings of a locked table stay as they are.)
@@ -9620,7 +9971,7 @@ impl AppState {
                 bs[i].data = table.to_data();
                 bs[i].text = table.plain_text();
             }
-        });
+        }));
         // The first cell of a row is the name of the row's page.
         if let Some(row) = named_row {
             self.name_row_page(id, &row, text);
@@ -9987,9 +10338,9 @@ impl AppState {
         // Only what this step changed: a transcript or an AI's text that came
         // in after it is not part of the step, and stays.
         let mut target = if undo {
-            crate::history::rebase(&current, &e.after, &e.before)
+            crate::history::rebase(&current, &e.after(), &e.before())
         } else {
-            crate::history::rebase(&current, &e.before, &e.after)
+            crate::history::rebase(&current, &e.before(), &e.after())
         };
         let (back, copies) = tables_put_back(&mut target, &current, |id| self.table_in_another_page(&page, id));
         // (The step goes by the new id of a copy from now on: with the old
@@ -10136,6 +10487,7 @@ impl AppState {
                 }
             }
             SyncMsg::Look { glass, blur, tint, accent } => self.look.set(Look { glass, blur, tint, accent }),
+            SyncMsg::TakeListening(page) => self.take_listening(&page),
             SyncMsg::Reload(data) => {
                 let (pages, blocks) = &*data;
                 let changed_pages: Vec<Page> = pages
@@ -10785,7 +11137,11 @@ impl AppState {
         // run changed was forgotten, and no Undo took it back.)
         let earlier = session.journal.clone().filter(|_| !session.did.is_empty());
         let tools = (session.action == AiAction::Ask && ai::takes_tools())
-            .then(|| ai::Tools { journal: earlier.unwrap_or_else(|| std::env::temp_dir().join(format!("rune-ai-{}-{}.jsonl", std::process::id(), now_ms()))) });
+            .then(|| ai::Tools {
+                journal: earlier.unwrap_or_else(|| std::env::temp_dir().join(format!("rune-ai-{}-{}.jsonl", std::process::id(), now_ms()))),
+                // (The page it was given whole counts as read.)
+                shown: if whole { vec![session.page_id.clone()] } else { Vec::new() },
+            });
         let messages = match &tools {
             Some(_) => {
                 let title = self.pages.peek().get(&session.page_id).map(|p| p.title.clone()).unwrap_or_default();
@@ -11067,7 +11423,7 @@ impl AppState {
         let Some(session) = self.ai.peek().clone() else { return };
         let Some(body) = ai::split_revision(&ai::clean_reply(&session.output).0) else { return };
         // The page itself, and the sub-pages the reply asks for.
-        let (body, wanted) = ai::split_pages(markdown::unfenced(&body));
+        let (body, wanted, merged_pages) = ai::split_pages_of(markdown::unfenced(&body), &session.sent);
         let title = self.pages.peek().get(&session.page_id).map(|p| p.title.clone()).unwrap_or_default();
         let empty = |blocks: &[Block]| blocks.iter().all(|b| b.text.trim().is_empty() && b.kind.is_editable());
         // (A part has no line with the page's name before it: a heading of
@@ -11215,7 +11571,11 @@ impl AppState {
             // page says what was done, with a way to take it all back.
             self.ui.write().expanded.insert(session.page_id.clone());
             self.save_ui();
-            let text = format!("Page changed · {} {} made and linked", made.len(), if made.len() == 1 { "sub-page" } else { "sub-pages" });
+            let mut text = format!("Page changed · {} {} made and linked", made.len(), if made.len() == 1 { "sub-page" } else { "sub-pages" });
+            // (Past the most sub-pages, the rest went into the last one: see `ai::split_pages_of`.)
+            if merged_pages > 0 {
+                text.push_str(&format!(" · {merged_pages} more put into the last one"));
+            }
             self.show_ai_done(AiDone { page: session.page_id.clone(), text, step: true, made, changes: session.did.clone(), stamp: 0 });
         }
         if let Some(caret) = caret {
@@ -11300,7 +11660,7 @@ impl AppState {
         match name {
             "settings" => self.set_modal(Some(Modal::Settings)),
             "new_page" => self.new_page(None),
-            "new_tab" => self.new_tab(),
+            "new_tab" => self.new_tab_to_find(),
             "close_tab" => {
                 let i = self.ui.peek().active;
                 self.close_tab(i)
@@ -11470,6 +11830,7 @@ impl AppState {
                 document::eval("window.__rune && window.__rune.findStep(-1)");
             }
             "calendar" => self.navigate(Route::Calendar),
+            "stream" => self.open_stream(),
             "graph" => self.navigate(Route::Graph),
             "close_split" => self.close_pane(None),
             // (For the self-test: what was learned about meetings by their time is forgotten.)
@@ -11731,7 +12092,7 @@ mod tests {
         let mut page = vec![line];
         let mut step = |page: &mut Vec<Block>, undo: bool| {
             let mut e = if undo { h.take_undo("p") } else { h.take_redo("p") }.unwrap();
-            let mut target = if undo { crate::history::rebase(page, &e.after, &e.before) } else { crate::history::rebase(page, &e.before, &e.after) };
+            let mut target = if undo { crate::history::rebase(page, &e.after(), &e.before()) } else { crate::history::rebase(page, &e.before(), &e.after()) };
             let (_, copies) = tables_put_back(&mut target, page, |id| id == "moved");
             for (was, now) in &copies {
                 e.rename_block(was, now);
@@ -12992,6 +13353,14 @@ mod tests {
         let mut two = Tab::new(Route::Home);
         two.panes.push(Pane::new(Route::Page("x".into())));
         assert!(!is_home_tab(&two));
+        // A pinned tab on Home is the person's own: a Home tab beside it stays, and so does it.
+        let mut pinned = Tab::new(Route::Home);
+        pinned.pinned = true;
+        let mut tabs = vec![pinned, Tab::new(Route::Home)];
+        let mut active = 1;
+        assert!(!one_home_tab(&mut tabs, &mut active));
+        assert_eq!((tabs.len(), active), (2, 1));
+        assert_eq!(tabs.iter().position(|t| one_of_its_view(t) == Some(&Route::Home)), Some(1), "+ finds the Home tab that is not pinned");
     }
 
     #[test]

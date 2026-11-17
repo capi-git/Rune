@@ -535,7 +535,11 @@ button {
    to the window, and a pressed tab is the box it is placed in. A press on
    "Pin Tab" pressed the tab too: the menu jumped away from under the
    pointer, and the press reached nothing.) */
-.tab:active:not(:has(.tab-menu)) {
+/* (Nor while its × is pressed: the tab shrank to its middle, the × at its
+   right edge went from under the pointer, and a press on the right half
+   of the × reached the tab or nothing: it took several presses to close
+   a wide tab.) */
+.tab:active:not(:has(.tab-menu)):not(:has(.tab-close:active)) {
   transform: var(--press);
 }
 /* And no motion back from a press while the menu is open: the right press
@@ -603,6 +607,47 @@ button {
 }
 .new-tab {
   margin-left: 2px;
+}
+/* Something goes on in the page of a tab: a red dot while Rune listens to
+   a meeting there, a grey one while the AI writes there (see Busy in
+   chrome.rs). Both breathe as the dot of the listening bar does. */
+.tab-busy {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-3);
+  animation: listen-pulse 1.6s ease-in-out infinite;
+}
+.tab-busy.listening {
+  background: var(--danger);
+}
+/* (A pinned tab is its icon only: the dot sits at its corner.) */
+.tab.pinned .tab-busy {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tab-busy {
+    animation: none;
+  }
+}
+/* More tabs than the row has room for: the row fades out at the side where
+   more are (bridge.js sets data-more), so a tab out of sight is not taken
+   for no tab. (Not while a tab's menu is open: the menu is inside the row,
+   and the mask would cover it.) */
+.tabs[data-more="right"]:not(:has(.tab-menu)) {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent);
+}
+.tabs[data-more="left"]:not(:has(.tab-menu)) {
+  -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 40px), transparent);
+  mask-image: linear-gradient(to left, #000 calc(100% - 40px), transparent);
+}
+.tabs[data-more="left right"]:not(:has(.tab-menu)) {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 40px), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 40px), transparent);
 }
 /* A pinned tab: its icon only, at the left of the row, with no button to
    close it. Its name shows when the pointer rests on it. */
@@ -887,7 +932,7 @@ body[data-resizing="rows"] * {
 
 .tiles {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 8px;
   margin-bottom: 8px;
   flex-shrink: 0;
@@ -1661,6 +1706,108 @@ body[data-resizing="rows"] * {
   font-size: 1.25em;
   font-weight: 600;
   line-height: 1.3;
+}
+
+/* The Stream (stream.rs): only the dates and the words. No icon, title,
+   meta line or outline; each date is a small spaced label; the days before
+   today are a little quieter, so today's lines are the ones in front. */
+.page.stream .page-header {
+  display: none;
+}
+.page.stream .blocks {
+  padding-top: 56px;
+}
+.page.stream .block-row.kind-heading3 {
+  margin-top: 3.2em;
+}
+.page.stream .block-row.kind-heading3:first-child {
+  margin-top: 0;
+}
+.page.stream .kind-heading3 .blk {
+  font-size: 0.72em;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+/* While the Stream is scrolled back, the date of the day in view floats
+   at the top in a small glass label (set by bridge.js, `markStreamDay`). */
+.stream-now {
+  position: sticky;
+  top: 14px;
+  height: 0;
+  z-index: 6;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  pointer-events: none;
+}
+.stream-now span {
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
+  background: color-mix(in srgb, var(--float-bg) 62%, transparent);
+  -webkit-backdrop-filter: blur(24px) saturate(1.4);
+  backdrop-filter: blur(24px) saturate(1.4);
+  color: var(--text-2, var(--text-3));
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.stream-now.on span {
+  opacity: 1;
+  transform: none;
+}
+.stream-now span:empty {
+  display: none;
+}
+/* What was written a week and a year ago, quiet at the foot. */
+.stream-echoes {
+  margin: 44px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.stream-echo {
+  all: unset;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-left: 2px;
+  cursor: pointer;
+  color: var(--text-3);
+  opacity: 0.8;
+  transition: opacity 0.2s ease;
+}
+.stream-echo:hover,
+.stream-echo:focus-visible {
+  opacity: 1;
+}
+.stream-echo-when {
+  font-size: 0.7em;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+.stream-echo-words {
+  font-size: 0.92em;
+  line-height: 1.55;
+}
+.page.stream .kind-text .blk {
+  line-height: 1.65;
+}
+.page.stream .block-row:has(~ .kind-heading3) {
+  opacity: 0.62;
+  transition: opacity 0.2s ease;
+}
+.page.stream .block-row:has(~ .kind-heading3):hover,
+.page.stream .block-row:has(~ .kind-heading3):focus-within {
+  opacity: 1;
 }
 
 .marker {
@@ -6372,20 +6519,22 @@ body[data-dragging] iframe {
   border-width: 0 1px 1px 0;
   vertical-align: top;
 }
-.table-block tr > td:first-child {
-  border-left-width: 1px;
+/* (No lines at the outer sides of a table: lines between its rows and
+   between its columns only.) */
+.table-block tr > td:last-child {
+  border-right-width: 0;
 }
 .table-block tbody > tr:first-child > td {
   border-top-width: 1px;
 }
 .table-block td.head {
-  background: var(--fill-4);
+  background: transparent;
 }
 .table-block .cell {
   display: block;
   width: 100%;
-  min-height: 32px;
-  padding: 6px 9px;
+  min-height: 34px;
+  padding: 7px 9px;
   border: none;
   outline: none;
   resize: none;
@@ -6397,8 +6546,14 @@ body[data-dragging] iframe {
   line-height: 1.45;
   field-sizing: content;
 }
+/* The headings: quiet, in grey, beside the sign of their kind. */
 .table-block td.head .cell {
-  font-weight: 600;
+  font-weight: 400;
+  color: var(--text-2);
+}
+/* The name of a row that opens as a page. */
+.table-block.typed td.first .cell {
+  font-weight: 500;
 }
 .table-block td:focus-within {
   box-shadow: inset 0 0 0 1.5px var(--accent);

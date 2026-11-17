@@ -576,10 +576,50 @@ pub fn HomeView() -> Element {
 #[component]
 pub fn PageView(page_id: String) -> Element {
     let state = use_context::<AppState>();
+    // The Stream (see stream.rs) opens at today: a date line for the day
+    // at its foot if there is none yet, and the caret under it.
+    let stream = use_hook(|| {
+        let stream = state.is_stream(&page_id);
+        if stream {
+            let id = page_id.clone();
+            spawn(async move {
+                state.stream_today(&id);
+                // Left open past 4 in the morning, it gets the new day's
+                // date line (a look once a minute; nothing else is done).
+                loop {
+                    crate::ai::sleep_ms(60_000).await;
+                    state.stream_new_day(&id);
+                }
+            });
+        }
+        stream
+    });
+    // The page is drawn again when its own lines change, not at each key
+    // typed in another page (see backlinks.rs).
+    let key = state.win.key;
+    let mut seen = use_hook(|| CopyValue::new((0u64, 0u64)));
+    let version = use_memo({
+        let id = page_id.clone();
+        move || {
+            let _ = state.blocks.read();
+            let (since, version) = *seen.peek();
+            let (changed, now) = crate::backlinks::changed(key, &id, since);
+            let version = if changed { version + 1 } else { version };
+            seen.set((now, version));
+            version
+        }
+    });
+    // The pages that link to this one, worked out again only when a page
+    // changes, and from the index: not by reading every page.
+    let backlinks = use_memo({
+        let id = page_id.clone();
+        move || crate::backlinks::linked_from(key, &state.pages.read(), &state.blocks.read(), &id)
+    });
+    let _ = version.read();
     let Some(page) = state.pages.read().get(&page_id).cloned() else {
         return rsx! { div { class: "empty", "This page no longer exists." } };
     };
-    let blocks = state.blocks.read().get(&page_id).cloned().unwrap_or_default();
+    let blocks = state.blocks.peek().get(&page_id).cloned().unwrap_or_default();
     // A locked page that is not open: its name, and a field for its password.
     if crate::lock::sealed(&blocks).is_some() {
         return rsx! {
@@ -622,7 +662,7 @@ pub fn PageView(page_id: String) -> Element {
     // Their words, which the page script shows while they are picked (see
     // `showSelWords` in bridge.js).
     let picked_words: usize = blocks.iter().filter(|b| picked.contains(&b.id)).map(Block::words).sum();
-    let backlinks = crate::state::linked_from(&state.pages.read(), &state.blocks.read(), &page_id);
+    let backlinks = backlinks.read().clone();
     // Children of a toggle that was just opened ease in, one after another
     // (and so do the lines under a heading that was just opened).
     let reveal = state.reveal.read().clone().filter(|(p, _)| *p == page_id).and_then(|(_, t)| {
@@ -750,9 +790,12 @@ pub fn PageView(page_id: String) -> Element {
         .collect();
     // A meeting's page: who spoke when, from its transcript lines.
     let voices = crate::listen::voices(&crate::listen::spoken_in(&blocks));
+    // The Stream: what was written a week and a year ago, at its foot.
+    let echoes = if stream { crate::stream::echoes(&blocks, crate::stream::day_of(chrono::Local::now())) } else { Vec::new() };
     let page_class = format!(
-        "page{}{}{}",
+        "page{}{}{}{}",
         if has_cover { " has-cover" } else { "" },
+        if stream { " stream" } else { "" },
         // (An open locked page shows nothing of the AI: see `.no-ai`.)
         if crate::lock::is_open(&page_id) { " no-ai" } else { "" },
         match page.font.as_str() {
@@ -771,7 +814,8 @@ pub fn PageView(page_id: String) -> Element {
                 picking: cover_picker,
             }
         }
-        if outline.len() >= 2 {
+        // (The Stream shows its dates and words only: no outline.)
+        if outline.len() >= 2 && !stream {
             nav { class: "page-outline", "aria-label": "On this page", "data-page": "{page_id}",
                 div { class: "page-outline-list",
                     for (id, level, name) in outline {
@@ -782,6 +826,9 @@ pub fn PageView(page_id: String) -> Element {
                     }
                 }
             }
+        }
+        if stream {
+            div { class: "stream-now", "aria-hidden": "true", span {} }
         }
         div { class: "{page_class}",
             div { class: "page-header",
@@ -907,6 +954,25 @@ pub fn PageView(page_id: String) -> Element {
             }
             div { class: "blocks", "data-picked-words": "{picked_words}",
                 {parts.into_iter()}
+            }
+            if !echoes.is_empty() {
+                div { class: "stream-echoes", role: "navigation", "aria-label": "Written before",
+                    for e in echoes {
+                        button {
+                            key: "{e.line}",
+                            class: "stream-echo",
+                            title: "Go to that day",
+                            onclick: {
+                                let target = serde_json::to_string(&format!("blk-{}", e.line)).unwrap_or_default();
+                                move |_| {
+                                    document::eval(&format!("document.getElementById({target})?.closest('.block-row')?.scrollIntoView({{block: 'start', behavior: 'smooth'}})"));
+                                }
+                            },
+                            span { class: "stream-echo-when", "{e.label}" }
+                            span { class: "stream-echo-words", "{e.words}" }
+                        }
+                    }
+                }
             }
             // The pages that link to this one.
             if !backlinks.is_empty() {
@@ -2195,7 +2261,8 @@ fn AiPanel() -> Element {
     let streaming = session.status == AiStatus::Streaming;
     // A reply that changes the page can ask for sub-pages: they are named
     // before anything is done, and the text shown is the page itself.
-    let (reply, subpages) = if revises { crate::ai::split_pages(&reply) } else { (reply, Vec::new()) };
+    // (Past the most sub-pages, the rest go into the last one: the plan says so.)
+    let (reply, subpages, merged_pages) = if revises { crate::ai::split_pages_of(&reply, &session.sent) } else { (reply, Vec::new(), 0) };
     let planned = !subpages.is_empty() && session.status == AiStatus::Done;
     // A plan for a large job: what it will build, its steps, and "Do it".
     let job = if session.status == AiStatus::Done && !revises { crate::ai::split_plan(&reply) } else { None };
@@ -2381,6 +2448,9 @@ fn AiPanel() -> Element {
                     div { class: "ai-plan-row", role: "listitem", Icon { name: "file", size: 14 } span { "Change this page" } }
                     for (name, _) in subpages.iter() {
                         div { key: "{name}", class: "ai-plan-row", role: "listitem", "data-subpage": "{name}", Icon { name: "plus", size: 14 } span { "New sub-page: {name}" } }
+                    }
+                    if merged_pages > 0 {
+                        div { class: "ai-plan-row", role: "listitem", "data-merged": "{merged_pages}", Icon { name: "file", size: 14 } span { "{merged_pages} more put into the last sub-page" } }
                     }
                     div { class: "ai-plan-row", role: "listitem", Icon { name: "link", size: 14 } span { "Link the sub-pages in this page" } }
                 }

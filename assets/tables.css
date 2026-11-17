@@ -395,7 +395,7 @@ button.table-chip:hover,
    of its column when the pointer is not there.) */
 .th-menu {
   position: absolute;
-  top: 5px;
+  top: 6px;
   right: 4px;
   width: 22px;
   height: 22px;
@@ -493,7 +493,7 @@ button.table-chip:hover,
 .row-fold {
   flex-shrink: 0;
   width: 18px;
-  height: 32px;
+  height: 34px;
   margin-left: 4px;
   padding: 0;
   border: none;
@@ -512,10 +512,21 @@ button.table-chip:hover,
 .row-fold.closed svg {
   transform: none;
 }
+/* The sign of a page before the name of a row that opens as one. */
+.row-page-ico {
+  flex-shrink: 0;
+  display: inline-flex;
+  padding: 9px 0 0 9px;
+  color: var(--text-3);
+}
+.row-page-ico + .cell,
+.row-page-ico + div > .cell {
+  padding-left: 7px;
+}
 .row-open {
   position: absolute;
   right: 6px;
-  top: 5px;
+  top: 6px;
   height: 22px;
   padding: 0 8px 0 6px;
   display: none;
@@ -1030,20 +1041,40 @@ td:hover .cell-add,
   background: transparent;
 }
 .table-totals td {
-  padding: 6px 9px;
-  color: var(--text-2);
-  font-size: 12.5px;
+  padding: 8px 8px 6px;
+  color: var(--text);
+  font-size: 13px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow: visible;
 }
 .table-totals td.num {
   text-align: right;
 }
+/* A quiet SUM before the amount. */
 .total-word {
-  font-size: 11px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   color: var(--text-3);
+  margin-right: 2px;
+}
+/* The new row: the last line of the table, its words at the left while
+   the table scrolls sideways. */
+.table-block tbody.new-row-line > tr > td {
+  border-width: 0 0 1px;
+}
+.table-block tbody.new-row-line > tr > td:hover {
+  background: var(--hover);
+}
+.table-block tbody.new-row-line .table-today {
+  position: sticky;
+  left: 0;
+  margin: 0;
+  height: 34px;
+  padding: 0 9px;
+  border-radius: 0;
+  background: transparent;
 }
 .table-today {
   margin-top: 4px;
@@ -2291,7 +2322,7 @@ span.value-name {
 .row-check,
 .head-check {
   position: absolute;
-  top: 8px;
+  top: 9px;
   left: -25px;
   z-index: 1;
   width: 16px;

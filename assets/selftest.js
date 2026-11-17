@@ -134,6 +134,14 @@ const dragAlong = async (from, over) => {
   from.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: dt }));
   await wait(150);
 };
+// The + of the tab row: a tab on Home with the search box over it. Escape
+// closes the box and leaves the tab.
+const newTab = async () => {
+  $('.new-tab').click();
+  const box = await until(() => $('.qf-input'), 2000);
+  if (box) key(box, 'Escape');
+  await until(() => !$('.qf-input'), 2000);
+};
 const centre = (el, fx = 0.5) => {
   const r = el.getBoundingClientRect();
   return [el, r.left + r.width * fx, r.top + r.height / 2];
@@ -671,11 +679,15 @@ await run('Tabs and the sliding highlight', async () => {
   await oneTab();
   // One Home tab at most: a new tab from Home brings that tab forward.
   $('.new-tab').click();
+  const box = await until(() => $('.qf-input'), 2000);
+  check('The + opens the search box, ready to name a page', box && document.activeElement === box && box.placeholder === 'Open a page…', box?.placeholder);
+  if (box) key(box, 'Escape');
+  await until(() => !$('.qf-input'), 2000);
   await wait(300);
   check('With a Home tab open, a new tab opens no second Home tab', $$('.tab').length === 1 && $$('.tab .tab-title').filter((t) => t.textContent === 'Home').length === 1, $$('.tab .tab-title').map((t) => t.textContent).join(' | '));
   treeItem('Getting Started').click();
   await until(() => $$('.tab').length === 2);
-  $('.new-tab').click();
+  await newTab();
   check('From another tab, a new tab goes to the Home tab there is', await until(() => $$('.tab').length === 2 && $('.tab.active .tab-title')?.textContent === 'Home'), $$('.tab .tab-title').map((t) => t.textContent).join(' | '));
   $$('.tab')[1].click();
   await until(() => $('.tab.active .tab-title')?.textContent === 'Getting Started');
@@ -703,6 +715,47 @@ await run('Tabs and the sliding highlight', async () => {
   check('"Reopen" opens that tab again, and the message goes', (await until(() => $$('.tab').length === 2 && $('.tab.active .tab-title')?.textContent === 'Getting Started', 2000)) && !$('.toast'), $$('.tab .tab-title').map((t) => t.textContent).join(' | '));
   $('.tab.active .tab-close').click();
   await until(() => $$('.tab').length === 1);
+
+  // No tab on Home: the + makes one, with the search box over it, and a page
+  // chosen there takes the place of that tab.
+  const names = () => $$('.tab').map((t) => t.title).join(' | ');
+  treeItem('Getting Started').click();
+  await until(() => $$('.tab').length === 2);
+  $$('.tab').find((t) => t.title === 'Home').querySelector('.tab-close').click();
+  await until(() => names() === 'Getting Started');
+  $('.new-tab').click();
+  const find = await until(() => $('.qf-input'), 2000);
+  check('With no tab on Home, the + makes one and opens the search box over it', find && document.activeElement === find && names() === 'Getting Started | Home' && $('.tab.active')?.title === 'Home', names());
+  if (find) {
+    find.value = 'Reading';
+    find.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  const hit = await until(() => $$('.qf-item').find((i) => i.textContent.includes('Reading List')), 2000);
+  hit?.click();
+  check('A page chosen there takes the place of that tab: no tab is left on Home', await until(() => !$('.qf-input') && names() === 'Getting Started | Reading List' && $('.tab.active')?.title === 'Reading List', 2000), names());
+  await newTab();
+  check('Escape closes the box and keeps the new tab on Home', await until(() => names() === 'Getting Started | Reading List | Home' && $('.tab.active')?.title === 'Home', 2000), names());
+
+  // More tabs than room: the row fades at the side where more are, and the
+  // tab in front is brought into sight.
+  const row = $('.tabs');
+  const masked = () => (getComputedStyle(row).webkitMaskImage || getComputedStyle(row).maskImage || 'none') !== 'none';
+  $$('.tab')[0].click();
+  await until(() => $('.tab.active') === $$('.tab')[0]);
+  row.style.maxWidth = '300px';
+  check('With more tabs than room, the row fades at the right, where more are', await until(() => row.dataset.more === 'right' && masked(), 2000), `${row.dataset.more} ${row.scrollWidth}/${row.clientWidth}`);
+  const last = $$('.tab').at(-1);
+  last.click();
+  await until(() => $('.tab.active') === last);
+  check('A tab that comes to the front is brought into sight, and the row fades at the left then', await until(() => row.dataset.more === 'left' && last.getBoundingClientRect().right <= row.getBoundingClientRect().right, 2000), `${row.dataset.more} ${last.getBoundingClientRect().right} ${row.getBoundingClientRect().right}`);
+  row.scrollLeft = 40;
+  check('…and in the middle, at both sides', await until(() => row.dataset.more === 'left right', 2000), row.dataset.more);
+  $$('.tab')[0].dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+  check('No fade while the menu of a tab is open (it would cover the menu)', (await until(() => $('.tab-menu'), 2000)) && !masked());
+  $('.backdrop')?.click();
+  await until(() => !$('.tab-menu'), 2000);
+  row.style.maxWidth = '';
+  check('With room for all the tabs, no fade', await until(() => !row.dataset.more && !masked(), 2000), row.dataset.more);
 });
 
 await run('Ctrl+Tab in the order of use', async () => {
@@ -899,7 +952,7 @@ await run('Pull a page out of a combined tab', async () => {
   check('Dragged left past the tabs, it gets a tab first in line', await until(() => $$('.tab').length === 2 && !$('.tab.split') && $$('.tab')[0].textContent.includes('Getting Started') && $$('.tab')[1].textContent.includes('Reading List')));
   // Onto the middle of another tab: it joins that tab.
   await merge();
-  $('.new-tab').click();
+  await newTab();
   await until(() => $$('.tab').length === 2);
   seg = $$('.tab.split .tab-seg')[1];
   await dragAlong(seg, [centre($$('.tab')[1], 0.5)]);
@@ -1021,7 +1074,7 @@ await run('Settings: transparency', async () => {
   // (Two tabs: a page, and Home beside it.)
   treeItem('Typing test').click();
   await until(() => $('.tab.active')?.textContent.includes('Typing test'), 2000);
-  $('.new-tab').click();
+  await newTab();
   await until(() => $$('.tab').length > 1, 2000);
   await openSettings();
   await until(() => $('.settings-view'));
@@ -1224,7 +1277,7 @@ await run('Pin a tab', async () => {
   const sub = await until(() => $$('.page-link:not(.missing)', paneOf('Getting Started')).find((l) => l.textContent.includes('Ideas')), 2000);
   sub?.click();
   check('A page opened by a link from a pinned tab gets a tab of its own, after the pinned ones', sub && (await until(() => order() === '*Reading List | *Getting Started | Ideas' && $('.tab.active')?.title === 'Ideas', 2000)), order());
-  $('.new-tab').click();
+  await newTab();
   check('A new tab opens after the pinned ones too', await until(() => order() === '*Reading List | *Getting Started | Ideas | Home'), order());
   await dragTab(tabOf('Getting Started'), tabOf('Reading List'), 'before');
   check('A pinned tab dragged onto another pinned one takes its place', await until(() => order() === '*Getting Started | *Reading List | Ideas | Home'), order());
@@ -1473,7 +1526,7 @@ await run('Spaces', async () => {
   check('…and the mark of the move goes away when it is over', await until(() => $('.side-scroll').className === 'side-scroll', 2000), $('.side-scroll').className);
   check('Another space brings back its own tabs, with the one you left in front', await until(() => $('.tab.active .tab-title')?.textContent === 'Only in space two') && !tabTitles().includes('Getting Started'), tabTitles().join(' | '));
   check('The highlight is under the tab in front after a change of space', await until(() => Math.abs($('.tabs .tab-glider').getBoundingClientRect().left - $('.tab.active').getBoundingClientRect().left) < 2, 800), `${$('.tabs .tab-glider').getBoundingClientRect().left} and ${$('.tab.active').getBoundingClientRect().left}`);
-  $('.tabs .new-tab').click();
+  await newTab();
   check('A new tab belongs to the space in front', await until(() => $('.tab.active .tab-title')?.textContent === 'Home') && tabTitles().includes('Only in space two'), tabTitles().join(' | '));
   $('.tab.active .tab-close').click();
   await until(() => $('.tab.active .tab-title')?.textContent === 'Only in space two');
@@ -3343,10 +3396,61 @@ await run('Meeting notes', async () => {
   check('A call page that went leaves no dead line in "Meeting notes"', folder && $$('.page-link', folder).length === 1 && $$('.page-link.missing', folder).length === 0, folder ? `${$$('.page-link', folder).length} lines, ${$$('.page-link.missing', folder).length} dead` : 'no folder page');
 });
 
+await run('Stream', async () => {
+  await oneTab();
+  const tile = (name) => $$('.sidebar .tile').find((t) => t.title.startsWith(name));
+  tile('Stream').click();
+  const day = await until(() => $('.page.stream .kind-heading3 .blk'));
+  check('The Stream tile opens one page with a date line for today', day && /^[A-Z][a-z]+day, [A-Z][a-z]+ \d+, \d{4}$/.test(day.textContent.trim()), day?.textContent);
+  const last = () => $$('.page.stream .block-row').at(-1);
+  check('The caret is on the line under the date line', await until(() => last()?.contains(document.activeElement) && last().classList.contains('kind-text')), document.activeElement?.className);
+  check('The Stream tile shows as the place you are', await until(() => tile('Stream').classList.contains('current')));
+  check('The Stream is not in the sidebar list', $$('.sidebar .tree-item .tree-title').filter((t) => t.textContent === 'Stream').length === 0);
+  tile('Home').click();
+  await until(() => $('.home'));
+  tile('Stream').click();
+  await until(() => $('.page.stream'));
+  await wait(300);
+  check('Opened again the same day, it adds no second date line', $$('.page.stream .kind-heading3').length === 1 && $$('.page.stream .block-row').length === 2, `${$$('.page.stream .block-row').length} lines`);
+  typeIn($('.blk', last()), 'why? cuz am making steps towards it');
+  await wait(300);
+  snap('stream');
+  // One Stream for the whole app: from another space it is the same page,
+  // and the window stays in that space.
+  const words = $('.page.stream .block-row:last-child .blk')?.textContent;
+  const label = () => $('.ws-label')?.textContent;
+  const first = label();
+  $('.ws-name').click();
+  menuItem(await until(() => $('.space-menu')), 'New space').click();
+  const input = await until(() => $('.space-new input'));
+  input.value = 'Stream space';
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  await wait(50);
+  key(input, 'Enter');
+  await until(() => label() === 'Stream space');
+  tile('Stream').click();
+  await until(() => $('.page.stream'));
+  await wait(300);
+  check('From another space the Stream is the same page', $('.page.stream .block-row:last-child .blk')?.textContent === words && $$('.page.stream .kind-heading3').length === 1, $('.page.stream .block-row:last-child .blk')?.textContent);
+  check('…and the window stays in that space', label() === 'Stream space', label());
+  T().command('quick_find');
+  const qf = await until(() => $('.qf-input'), 2000);
+  if (qf) {
+    qf.value = 'making steps';
+    qf.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  check('Search finds the Stream from another space', !!(await until(() => $$('.qf-item').find((i) => i.textContent.includes('Stream')), 2000)));
+  if (qf) key(qf, 'Escape');
+  await until(() => !$('.qf-input'), 2000);
+  $('.ws-name').click();
+  menuItem(await until(() => $('.space-menu')), first).click();
+  await until(() => label() === first);
+});
+
 await run('Speak a page', async () => {
   await oneTab();
   const made = () => $$('.sidebar .tree-item .tree-title').filter((t) => t.textContent === 'Shop and call list').length;
-  check('The sidebar has no AI tile and no second microphone', $$('.sidebar .tile').map((t) => t.title.replace(/ \(.*/, '')).join(', ') === 'Home, Calendar, Graph: how your pages connect', $$('.sidebar .tile').map((t) => t.title).join(', '));
+  check('The sidebar has no AI tile and no second microphone', $$('.sidebar .tile').map((t) => t.title.replace(/ \(.*/, '')).join(', ') === 'Home, Stream, Calendar, Graph: how your pages connect', $$('.sidebar .tile').map((t) => t.title).join(', '));
   speakPage();
   const box = await until(() => $('.modal.voice #voice-text'));
   check('⇧⌘D opens the voice box with the cursor in it', box && (await until(() => document.activeElement === box)));
@@ -3554,8 +3658,8 @@ await run('Pictures, tables and covers', async () => {
   (await until(() => $$('.slash-menu .menu-item').find((i) => i.textContent.includes('Table')))).click();
   const table = await until(() => $('.table-block', pane()));
   const cells = () => $$('.cell', table);
-  const grid = () => $$('tr', table).map((tr) => $$('.cell', tr).map((c) => c.value).join('|')).join(' / ');
-  check('The slash menu adds a table: a header and two rows, three columns', table && $$('tr', table).length === 3 && cells().length === 9, grid());
+  const grid = () => $$('tr[data-r]', table).map((tr) => $$('.cell', tr).map((c) => c.value).join('|')).join(' / ');
+  check('The slash menu adds a table: a header and two rows, three columns', table && $$('tr[data-r]', table).length === 3 && cells().length === 9, grid());
   const put = (cell, text) => {
     cell.focus();
     cell.value = text;
@@ -3581,13 +3685,13 @@ await run('Pictures, tables and covers', async () => {
   await until(() => grid() === 'Item|Amount| / Rent|$2,000| / ||', 3000);
   cells()[8].focus();
   key(document.activeElement, 'Tab');
-  check('Tab past the last cell adds a row and goes to its start', await until(() => $$('tr', table).length === 4 && document.activeElement === cells()[9], 3000), `${$$('tr', table).length} rows, at ${cells().indexOf(document.activeElement)}`);
+  check('Tab past the last cell adds a row and goes to its start', await until(() => $$('tr[data-r]', table).length === 4 && document.activeElement === cells()[9], 3000), `${$$('tr[data-r]', table).length} rows, at ${cells().indexOf(document.activeElement)}`);
   await columnDo(table, 2, 'delete');
   check('The menu of a column takes the column out', await until(() => grid() === 'Item|Amount / Rent|$2,000 / | / |', 3000), grid());
   await columnDo(table, 1, 'right');
   check('…and puts a new column after it, with the caret in its heading', await until(() => grid() === 'Item|Amount| / Rent|$2,000| / || / ||' && document.activeElement === cells()[2], 3000), grid());
   await rowDo(table, 3, 'delete');
-  check('The menu of a row takes the row out', await until(() => $$('tr', table).length === 3, 3000), grid());
+  check('The menu of a row takes the row out', await until(() => $$('tr[data-r]', table).length === 3, 3000), grid());
   cells()[3].focus();
   key(document.activeElement, 'Enter');
   check('Return goes to the cell below', await until(() => document.activeElement === cells()[6]));
@@ -6053,7 +6157,7 @@ await run('A table takes a total from the pages of its rows', async () => {
   const note = ['| Item | Amount | Category | Note |', '| --- | --- | --- | --- |', '|  |  |  |  |', '<!-- columns: text | number USD sum | choice {Food:orange; Fun:purple; Bills:gray} | text -->'].join('\n');
   askAi();
   box = await until(() => $('.ai-dock #ai-input'));
-  box.value = `each day also needs a note [[tool: replace_page_content ${JSON.stringify({ page_id: tplId, markdown: note })}]] [[reply: Each new day now has a Note column.]]`;
+  box.value = `each day also needs a note [[tool: read_page ${JSON.stringify({ page_id: tplId })}]] [[tool: replace_page_content ${JSON.stringify({ page_id: tplId, markdown: note })}]] [[reply: Each new day now has a Note column.]]`;
   box.dispatchEvent(new Event('input', { bubbles: true }));
   await until(() => $('#ai-send'));
   key(box, 'Enter');
@@ -6455,9 +6559,12 @@ await run('The AI does things in Rune with its tools', async () => {
   (await until(() => treeItem('Slow 1'), 3000))?.click();
   const other = await until(() => shownPane('Slow 1'), 2000);
   const midRun = !!other && !$('.ai-panel');
+  const toolsTab = () => $$('.tab').find((t) => t.title.startsWith('Tools page'));
+  check('While the AI works on a page, the tab of that page shows a dot that says so', !!toolsTab()?.querySelector('.tab-busy.writing') && toolsTab().title === 'Tools page · The AI is writing', toolsTab()?.title);
   if (other) $('.ai-dock-btn', other)?.click();
   check('The AI button on another page while a job is at work shows the job, and does not stop it', midRun && (await until(() => shownPane('Tools page') && $('.ai-panel', shownPane('Tools page')) && !$('#ai-input'), 2000)) && $('.toast')?.textContent === 'The AI is still at work on this page', `${midRun} / ${$('.toast')?.textContent} / ${!!$('#ai-input')}`);
   check('…and the job comes to its end', await until(() => $('.ai-output')?.textContent.includes('I made the ten pages') && $('#ai-did') && treeItem('Slow 10'), 9000), `${$('.ai-output')?.textContent} / ${$('#ai-did')?.textContent}`);
+  check('…and then its tab shows no dot', await until(() => toolsTab() && !toolsTab().querySelector('.tab-busy'), 2000), toolsTab()?.title);
   $('#ai-undo-run')?.click();
   await until(() => !treeItem('Slow 1') && !$('.ai-panel'), 6000);
   // A job that comes to its end while another page is in front says so there.
@@ -8430,6 +8537,8 @@ await run('Listen to a meeting', async () => {
   if (!ask) return;
   ask.click();
   check('"Listen" starts it, and the page and the sidebar say so', await until(() => $('.listen-bar.on') && $('#listening-row')), $('.listen-bar')?.textContent);
+  const heard = $$('.tab').filter((t) => t.querySelector('.tab-busy.listening'));
+  check('…and its tab, by a red dot', heard.length === 1 && heard[0].title === `${page.querySelector('.title-input').value} · Rune is listening`, heard.map((t) => t.title).join(' | '));
   check('It shows the last words it heard', await until(() => ($('.listen-latest')?.textContent || '').includes('Friday'), 4000), $('.listen-latest')?.textContent);
   await wait(150);
   snap('listening');
@@ -8444,6 +8553,7 @@ await run('Listen to a meeting', async () => {
   };
   check('Then the AI writes the notes and the action items from it', await until(written, 8000), rows().join(' | '));
   check('The listening lines go away when it is done', await until(() => !$('.listen-bar.on') && !$('#listening-row'), 3000));
+  check('…and the dot of its tab', await until(() => !$('.tab-busy'), 3000), $$('.tab').map((t) => t.title).join(' | '));
 
   // Who spoke when: a band at the top of the page, a lane for each voice.
   const band = await until(() => $('.meeting-band', page), 3000);
@@ -9622,7 +9732,7 @@ await run('The graph of pages', async () => {
   await oneTab();
 
   const tile = $$('.tile').find((t) => t.title.startsWith('Graph'));
-  check('A third button beside Home and Calendar opens the graph', tile && $$('.tile').length === 3 && $$('.tile').every((t) => t.getBoundingClientRect().width >= 36), $$('.tile').map((t) => Math.round(t.getBoundingClientRect().width)).join(' '));
+  check('A button beside Home and Calendar opens the graph', tile && $$('.tile').length === 4 && $$('.tile').every((t) => t.getBoundingClientRect().width >= 36), $$('.tile').map((t) => Math.round(t.getBoundingClientRect().width)).join(' '));
   tile.click();
   const el = await until(() => $('.graph[data-graph]'));
   const g = await until(() => el?._graph?.fitted && el._graph.nodes.length && el._graph, 4000);
