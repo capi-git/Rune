@@ -331,6 +331,58 @@ final class SystemSound {
     private var device = AudioObjectID(kAudioObjectUnknown)
     private var proc: AudioDeviceIOProcID?
     private let queue = DispatchQueue(label: "rune-listen.system-sound")
+    /// The form of the sound as it really comes. The tap names its own rate
+    /// (48 kHz), but the sound comes at the rate of the private device, which
+    /// is the rate of the output: 44.1 kHz for Bluetooth headphones, and only
+    /// 16 kHz while their microphone is in use too (a call on a headset).
+    /// Read as 48 kHz, a headset call reached speech recognition three times
+    /// too fast and almost no words of the others were heard.
+    private var stream = AudioStreamBasicDescription()
+    private var format: AVAudioFormat?
+    private let formatLock = NSLock()
+    private var rateListener: AudioObjectPropertyListenerBlock?
+    private var rateAddress = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyNominalSampleRate,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain)
+
+    /// One form for all the sound that goes on (16 kHz, one channel, what
+    /// speech recognition works in), so that a change of the device's rate
+    /// in the middle of a call never reaches a recognition in progress.
+    private let steadyFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
+    private var converter: AVAudioConverter?
+
+    private func steady(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        if converter == nil || converter?.inputFormat != buffer.format {
+            converter = AVAudioConverter(from: buffer.format, to: steadyFormat)
+        }
+        guard let converter else { return nil }
+        let capacity = AVAudioFrameCount(Double(buffer.frameLength) * steadyFormat.sampleRate / buffer.format.sampleRate) + 32
+        guard let out = AVAudioPCMBuffer(pcmFormat: steadyFormat, frameCapacity: capacity) else { return nil }
+        var given = false
+        var error: NSError?
+        converter.convert(to: out, error: &error) { _, status in
+            if given {
+                status.pointee = .noDataNow
+                return nil
+            }
+            given = true
+            status.pointee = .haveData
+            return buffer
+        }
+        return error == nil && out.frameLength > 0 ? out : nil
+    }
+
+    /// The form of the tap's sound at the private device's rate now.
+    private func readFormat() -> AVAudioFormat? {
+        var rate = Float64(0)
+        var size = UInt32(MemoryLayout<Float64>.size)
+        var description = stream
+        if AudioObjectGetPropertyData(device, &rateAddress, 0, nil, &size, &rate) == noErr, rate > 0 {
+            description.mSampleRate = rate
+        }
+        return AVAudioFormat(streamDescription: &description)
+    }
 
     private func check(_ status: OSStatus, _ what: String) throws {
         if status != noErr {
@@ -413,17 +465,33 @@ final class SystemSound {
             mSelector: kAudioTapPropertyFormat,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
-        var stream = AudioStreamBasicDescription()
         var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
         try check(AudioObjectGetPropertyData(tap, &address, 0, nil, &size, &stream), "Couldn't read the form of the Mac's sound")
-        guard let format = AVAudioFormat(streamDescription: &stream) else {
+        guard let first = readFormat() else {
             throw NSError(domain: "rune-listen", code: 2, userInfo: [NSLocalizedDescriptionKey: "The Mac's sound is in a form this can't read."])
+        }
+        format = first
+        // A headset's microphone can come on after this started (the call
+        // program opens it a moment later): follow the device's new rate.
+        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self, let changed = self.readFormat() else { return }
+            self.formatLock.lock()
+            self.format = changed
+            self.formatLock.unlock()
+        }
+        if AudioObjectAddPropertyListenerBlock(device, &rateAddress, queue, listener) == noErr {
+            rateListener = listener
         }
 
         try check(
-            AudioDeviceCreateIOProcIDWithBlock(&proc, device, queue) { _, input, _, _, _ in
+            AudioDeviceCreateIOProcIDWithBlock(&proc, device, queue) { [weak self] _, input, _, _, _ in
+                guard let self else { return }
+                self.formatLock.lock()
+                let format = self.format
+                self.formatLock.unlock()
                 // The sound is only ours for the length of this call: copy it.
-                guard let borrowed = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: input, deallocator: nil),
+                guard let format,
+                    let borrowed = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: input, deallocator: nil),
                     let copy = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: borrowed.frameLength)
                 else { return }
                 copy.frameLength = borrowed.frameLength
@@ -434,13 +502,19 @@ final class SystemSound {
                         memcpy(t, s, Int(min(source.mDataByteSize, target.mDataByteSize)))
                     }
                 }
-                sink(copy)
+                if let steady = self.steady(copy) {
+                    sink(steady)
+                }
             }, "Couldn't read the Mac's sound")
         try check(AudioDeviceStart(device, proc), "Couldn't start reading the Mac's sound")
     }
 
     func stop() {
         if device != kAudioObjectUnknown {
+            if let rateListener {
+                AudioObjectRemovePropertyListenerBlock(device, &rateAddress, queue, rateListener)
+                self.rateListener = nil
+            }
             if let proc {
                 AudioDeviceStop(device, proc)
                 AudioDeviceDestroyIOProcID(device, proc)
